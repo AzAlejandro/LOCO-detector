@@ -172,16 +172,20 @@ def _save_ui_prefs(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_existing_dir(path_text: str) -> Path:
-    raw = str(path_text or '').strip().strip('"')
+    raw = str(path_text or '').strip().strip('"').strip("'")
     if not raw:
         raise HTTPException(status_code=400, detail='Ruta requerida.')
+    # Normalize backslashes for Windows
+    raw = raw.replace('/', '\\')
     path = Path(raw).expanduser()
     try:
         path = path.resolve()
     except Exception:
         path = path.absolute()
-    if not path.exists() or not path.is_dir():
-        raise HTTPException(status_code=400, detail=f'La ruta no existe o no es carpeta: {path}')
+    if not path.exists():
+        raise HTTPException(status_code=400, detail=f'La ruta no existe: {path}')
+    if not path.is_dir():
+        raise HTTPException(status_code=400, detail=f'La ruta no es una carpeta: {path}')
     return path
 
 

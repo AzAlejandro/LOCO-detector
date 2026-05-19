@@ -39,6 +39,19 @@ catboost_info/
 .env
 .env.local
 
+# CodeGraph index
+.codegraph/
+
 # Test cache
 .pytest_cache/
 .mypy_cache/
+
+# Images (sample/test images — not part of source)
+img/
+*.tif
+*.tiff
+*.bmp
+
+# Roo / agent config
+.roo/
+AGENT.md

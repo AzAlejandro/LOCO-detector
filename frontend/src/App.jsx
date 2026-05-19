@@ -5,8 +5,9 @@ import CalibrationPanel from './components/CalibrationPanel'
 import { apiForm, apiGet, apiPost, b64ToDataUrl } from './api'
 
 function errMsg(err) {
-  if (err instanceof Event) return 'No se pudo renderizar la imagen en el navegador.'
-  if (typeof err === 'object' && err && typeof err.type === 'string') return 'No se pudo renderizar la imagen en el navegador.'
+  if (err instanceof Event || (typeof err === 'object' && err && typeof err.type === 'string')) {
+    return 'No se pudo conectar con el servidor. Verifica que el backend esté ejecutándose en el puerto 8011.'
+  }
   if (err?.payload?.detail && Array.isArray(err.payload.detail)) {
     return err.payload.detail.map((d) => d.msg || String(d)).join('; ')
   }
@@ -1704,6 +1705,12 @@ export default function App() {
   async function bootstrap() {
     await withLoad('boot', async () => {
       try {
+        // Quick health check first — fail fast if backend is not reachable
+        const healthRes = await fetch('http://127.0.0.1:8011/api/health', { signal: AbortSignal.timeout(5000) })
+        if (!healthRes.ok) {
+          throw new Error(`Backend respondio con HTTP ${healthRes.status}`)
+        }
+
         const s = await apiPost('/api/session/new', {})
         const sid = String(s?.payload?.session_id || '')
         setSessionId(sid)

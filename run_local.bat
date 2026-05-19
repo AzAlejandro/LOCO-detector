@@ -44,8 +44,23 @@ if not exist "frontend\node_modules\" (
 echo [INFO] Starting backend on http://127.0.0.1:8011
 start "LOCO-Backend" cmd /c "call venv\Scripts\activate.bat && python app.py"
 
-:: Wait for backend to start
-timeout /t 3 /nobreak >nul
+:: Wait for backend to start (poll health endpoint up to 30 seconds)
+echo [INFO] Waiting for backend to be ready...
+set "BACKEND_READY="
+for /l %%i in (1,1,30) do (
+    timeout /t 1 /nobreak >nul
+    curl -s http://127.0.0.1:8011/api/health >nul 2>&1
+    if not errorlevel 1 (
+        set "BACKEND_READY=1"
+        goto backend_ready
+    )
+)
+:backend_ready
+if defined BACKEND_READY (
+    echo [INFO] Backend is ready.
+) else (
+    echo [WARNING] Backend did not respond within 30 seconds. Starting frontend anyway...
+)
 
 :: Start frontend
 echo [INFO] Starting frontend on http://localhost:5173

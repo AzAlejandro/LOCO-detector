@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Data (user-generated)
+data/calibration/
+data/images/
+data/runs/
+data/loco_dataset/
+data/loco_training/
+data/reports/
+
+# Logs
+*.log
+catboost_info/
+
+# Environment
+.env
+.env.local
+
+# Test cache
+.pytest_cache/
+.mypy_cache/

@@ -1,0 +1,22 @@
+{
+  "name": "loco-detector",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Automated circle detection and diameter measurement for TEM nanofiber images",
+  "scripts": {
+    "frontend:install": "npm --prefix frontend install",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "backend:dev": ".venv\\Scripts\\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8011 --reload --app-dir .",
+    "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AzAlejandro/LOCO-detector.git"
+  },
+  "keywords": ["tem", "nanofiber", "circle-detection", "machine-learning", "diameter-measurement"],
+  "license": "MIT"
+}

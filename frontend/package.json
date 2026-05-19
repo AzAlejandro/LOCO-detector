@@ -1,0 +1,26 @@
+{
+  "name": "loco-detector-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "LOCO Detector frontend — React UI for circle detection and diameter measurement",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5178",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4178"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.10"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AzAlejandro/LOCO-detector.git"
+  },
+  "keywords": ["tem", "nanofiber", "circle-detection", "react", "diameter-measurement"],
+  "license": "MIT"
+}

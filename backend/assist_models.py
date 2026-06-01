@@ -15,12 +15,15 @@ from pydantic import BaseModel, Field
 from sklearn.base import clone
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score
+from catboost import CatBoostClassifier
+from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 
 from .features import build_features
-from .image_codec import encode_display_b64, encode_gray_png_b64, to_uint8_rgb
+from .image_codec import apply_mask_overlay, encode_display_b64, encode_gray_png_b64, to_uint8_rgb
 from .library_store import list_library_images, load_library_image, load_library_thumbnail
-from .persistence import OUTPUT_ROOT, load_scribble_draft
+from .persistence import OUTPUT_ROOT, load_scribble_draft, load_run, save_run
+from .runner import RunArtifacts, compute_image_id, new_run_id, now_str
 from .scribble import labels_to_visual, scribble_label_counts
 from .session_store import store
 
@@ -43,15 +46,26 @@ class TrainModelReq(BaseModel):
     model_name: str = ''
     image_ids: list[str] = Field(default_factory=list)
     class_mode: Literal['multiclass', 'binary'] = 'multiclass'
-    classifier: Literal['extratrees', 'rf'] = 'extratrees'
+    classifier: Literal['extratrees', 'rf', 'catboost', 'xgboost'] = 'extratrees'
     feature_variant: Literal['base', 'context'] = 'context'
     n_estimators: int = 120
     max_samples_per_class: int = 20000
     max_samples_per_image_class: int = 6000
     notes: str = ''
+    origin_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class PredictModelReq(BaseModel):
+    session_id: str
+    image_id: str
+    model_id: str = ''
+    min_confidence: float = 0.72
+    include_fiber: bool = True
+    include_halo: bool = True
+    include_background: bool = False
+
+
+class PredictMaskReq(BaseModel):
     session_id: str
     image_id: str
     model_id: str = ''
@@ -185,8 +199,10 @@ def _dataset_rows() -> list[dict[str, Any]]:
             row['thumbnail_b64'], row['thumbnail_mime'] = encode_display_b64(thumb)
         except Exception:
             pass
+        # Load scribble thumbnail from the current scribble_origin
         try:
-            draft = load_scribble_draft(str(row.get('image_id') or ''))
+            current_origin = str(row.get('scribble_origin', '') or '')
+            draft = load_scribble_draft(str(row.get('image_id') or ''), origin=current_origin)
             if bool(draft.get('found')):
                 labels = np.asarray(draft.get('labels'), dtype=np.uint8)
                 visual = labels_to_visual(labels)
@@ -230,10 +246,14 @@ def _collect_training_data(req: TrainModelReq) -> tuple[np.ndarray, np.ndarray, 
     total_counts = {'fiber': 0, 'halo': 0, 'background': 0, 'binary_negative': 0}
     per_img_limit = max(100, int(req.max_samples_per_image_class))
 
+    # Build origin override map
+    origin_overrides = {str(k).strip(): str(v).strip() for k, v in (req.origin_overrides or {}).items()}
+
     for image_id in image_ids:
         try:
             image, meta = load_library_image(image_id)
-            draft = load_scribble_draft(image_id)
+            origin = origin_overrides.get(image_id, '')
+            draft = load_scribble_draft(image_id, origin=origin)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f'No se pudo cargar {image_id}: {exc}') from exc
         if not bool(draft.get('found')):
@@ -310,6 +330,30 @@ def _fit_classifier(req: TrainModelReq, x: np.ndarray, y: np.ndarray):
             n_jobs=-1,
             random_state=42,
             class_weight='balanced_subsample',
+        )
+    elif kind == 'catboost':
+        loss = 'MultiClass' if str(req.class_mode) == 'multiclass' else 'Logloss'
+        clf = CatBoostClassifier(
+            iterations=n_estimators,
+            depth=6,
+            learning_rate=0.05,
+            loss_function=loss,
+            random_seed=42,
+            verbose=False,
+            allow_writing_files=False,
+        )
+    elif kind == 'xgboost':
+        objective = 'multi:softmax' if str(req.class_mode) == 'multiclass' else 'binary:logistic'
+        num_class = int(len(np.unique(y))) if str(req.class_mode) == 'multiclass' else None
+        clf = XGBClassifier(
+            n_estimators=n_estimators,
+            max_depth=6,
+            learning_rate=0.05,
+            objective=objective,
+            num_class=num_class,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
         )
     else:
         clf = ExtraTreesClassifier(
@@ -394,7 +438,9 @@ def dataset_images(session_id: str = '') -> dict[str, Any]:
 
 
 @router.get('/dataset/preview')
-def dataset_preview(image_id: str) -> dict[str, Any]:
+def dataset_preview(image_id: str, origin: str = '') -> dict[str, Any]:
+    """Return image preview with scribble overlay for a specific origin.
+    If origin is empty, uses the auto-detected origin (most recent draft)."""
     iid = str(image_id or '').strip()
     if not iid:
         raise HTTPException(status_code=400, detail='image_id requerido.')
@@ -407,7 +453,9 @@ def dataset_preview(image_id: str) -> dict[str, Any]:
     scribble_mime = 'image/png'
     counts: dict[str, int] = {}
     try:
-        draft = load_scribble_draft(iid)
+        # Pass the origin parameter to load the specific origin's scribble
+        draft = load_scribble_draft(iid, origin=origin)
+        print(f"[DBG-PREVIEW] ENTER: image_id={iid}, origin_param={origin!r}, found={draft.get('found')}")
         if bool(draft.get('found')):
             labels = np.asarray(draft.get('labels'), dtype=np.uint8)
             if labels.shape[:2] != image.shape[:2]:
@@ -569,3 +617,106 @@ def predict_model(req: PredictModelReq) -> dict[str, Any]:
             'classifier': str(meta.get('classifier') or ''),
         },
     }
+
+@router.post('/predict-mask')
+def predict_mask(req: PredictMaskReq) -> dict[str, Any]:
+    """Predict a mask and save it as an experiment run visible in 'Revisión de resultados'."""
+    sess = _require_session(req.session_id)
+    if sess.image_rgb is None:
+        raise HTTPException(status_code=400, detail='Carga una imagen antes de predecir.')
+    image_id = str(req.image_id or '').strip()
+    if image_id != str(sess.image_id or '').strip():
+        raise HTTPException(status_code=400, detail='image_id no corresponde a la imagen activa.')
+    model_id = str(req.model_id or '').strip() or str(_sync_registry().get('default_model_id') or '')
+    if not model_id:
+        raise HTTPException(status_code=400, detail='Selecciona o entrena un modelo.')
+    meta = _read_meta(model_id)
+    model_path = _model_dir(model_id) / 'model.joblib'
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail='Archivo de modelo no encontrado.')
+    clf = joblib.load(model_path)
+
+    rgb = to_uint8_rgb(sess.image_rgb)
+    feats = build_features(rgb, variant=str(meta.get('feature_variant') or 'context'))
+    h, w, c = feats.shape
+    probs = _class_probabilities(clf, feats.reshape(-1, c), (h, w))
+    min_conf = float(np.clip(req.min_confidence, 0.05, 0.99))
+
+    suggestion = np.zeros((h, w), dtype=np.uint8)
+    allowed = set()
+    if req.include_fiber:
+        allowed.add(1)
+    if req.include_halo:
+        allowed.add(2)
+    if req.include_background:
+        allowed.add(3)
+
+    if probs:
+        stack_classes = sorted(probs.keys())
+        stack = np.stack([probs[cls] for cls in stack_classes], axis=-1)
+        best_idx = np.argmax(stack, axis=-1)
+        best_prob = np.max(stack, axis=-1)
+        for idx, cls in enumerate(stack_classes):
+            if cls not in allowed:
+                continue
+            suggestion[(best_idx == idx) & (best_prob >= min_conf)] = int(cls)
+
+    # Build overlay from the suggestion mask
+    overlay = apply_mask_overlay(rgb, suggestion, color=(0, 220, 80), alpha=0.35)
+
+    # Build a RunArtifacts and save it as an experiment run
+    run_id = new_run_id('assist_model_predict')
+    art = RunArtifacts(
+        run_id=run_id,
+        image_id=image_id,
+        experiment_id='assist_model_predict',
+        created_at=now_str(),
+        input_image=rgb,
+        scribble_labels=np.zeros((h, w), dtype=np.uint8),
+        prior_map=np.zeros((h, w), dtype=np.float32),
+        mask=suggestion,
+        overlay=overlay,
+        meta={
+            'model_id': model_id,
+            'model_name': str(meta.get('model_name') or model_id),
+            'classifier': str(meta.get('classifier') or ''),
+            'class_mode': str(meta.get('class_mode') or ''),
+            'min_confidence': min_conf,
+            'experiment_label': 'Prediccion de mascara',
+            'run_status_level': 'success',
+            # Include experiment metadata so save_run() writes group/display_name to the index.
+            # This mirrors what _build_common_meta() does in runner.py for normal experiments.
+            'experiment': {
+                'experiment_id': 'assist_model_predict',
+                'group': 'F',
+                'display_name': 'Prediccion de mascara (modelo asistente)',
+                'implementation_status': 'native',
+                'requirements_hint': '',
+            },
+        },
+        class_prob_maps={str(k): v for k, v in probs.items()},
+    )
+    save_run(art)
+
+    # Load back and format as payload (inline _run_to_payload logic)
+    run_item = load_run(run_id)
+    labels_vis = labels_to_visual(np.asarray(run_item['scribble_map'], dtype=np.uint8))
+    run_meta = dict(run_item.get('meta') or {})
+    input_b64, input_mime = encode_display_b64(run_item['input_image'])
+    overlay_b64, overlay_mime = encode_display_b64(run_item['overlay'])
+    payload = {
+        'run_id': run_item.get('run_id', ''),
+        'image_id': run_item.get('image_id', ''),
+        'experiment_id': run_item.get('experiment_id', ''),
+        'created_at': run_item.get('created_at', ''),
+        'run_status_level': str(run_meta.get('run_status_level', 'success')),
+        'input_image_b64': input_b64,
+        'input_image_mime': input_mime,
+        'scribble_map_b64': encode_gray_png_b64(labels_vis),
+        'prior_b64': encode_gray_png_b64((np.clip(np.asarray(run_item['prior_prob'], dtype=np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)),
+        'mask_b64': encode_gray_png_b64((np.asarray(run_item['mask']) > 0).astype(np.uint8) * 255),
+        'overlay_b64': overlay_b64,
+        'overlay_mime': overlay_mime,
+        'meta': run_meta,
+    }
+    return {'ok': True, 'run': payload}

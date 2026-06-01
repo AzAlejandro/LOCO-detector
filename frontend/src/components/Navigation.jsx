@@ -1,14 +1,11 @@
-import React from 'react'
+import React, { useState } from 'react'
 
 /**
- * Navigation component for hierarchical workspace tabs.
- *
- * Level 1: 3 logical groups + LOCO Lab as separate experimental tab
- * Level 2: Sub-tabs within each group
+ * Navigation component: collapsible sidebar (level 1) + exported GROUPS for tab strip.
  *
  * Props:
- *   activeGroup: 'scribble' | 'loco' | 'detection' | 'locoLab'
- *   activeTab: string (sub-tab within the active group)
+ *   activeGroup: 'scribble' | 'loco' | 'detection'
+ *   activeTab: string
  *   onGroupChange: (group) => void
  *   onTabChange: (tab) => void
  */
@@ -16,8 +13,10 @@ import React from 'react'
 const GROUPS = [
   {
     key: 'scribble',
-    label: 'Grupo 1: Entrenamiento Scribble',
+    label: 'Scribble',
+    fullLabel: 'Grupo 1: Entrenamiento Scribble',
     icon: '✏️',
+    section: 'training',
     tabs: [
       { key: 'workbench', label: 'Scribbles y Experimentos' },
       { key: 'review', label: 'Revision de Resultados' },
@@ -26,8 +25,10 @@ const GROUPS = [
   },
   {
     key: 'loco',
-    label: 'Grupo 2: Entrenamiento LOCO',
+    label: 'LOCO',
+    fullLabel: 'Grupo 2: Entrenamiento LOCO',
     icon: '🔵',
+    section: 'training',
     tabs: [
       { key: 'locoDataset', label: 'Generar Dataset' },
       { key: 'locoAugment', label: 'Aumentacion' },
@@ -37,8 +38,10 @@ const GROUPS = [
   },
   {
     key: 'detection',
-    label: 'Grupo 3: Deteccion y Medicion',
+    label: 'Deteccion',
+    fullLabel: 'Grupo 3: Deteccion y Medicion',
     icon: '📏',
+    section: 'production',
     tabs: [
       { key: 'locoModel', label: 'Detector LOCO' },
       { key: 'diameter', label: 'Medicion de Diametros' },
@@ -46,11 +49,6 @@ const GROUPS = [
   },
 ]
 
-const LOCO_LAB_TAB = { key: 'loco', label: 'Laboratorio LOCO', icon: '🧪' }
-
-/**
- * Map legacy workspaceTab to {activeGroup, activeTab}.
- */
 export function legacyToGroup(tab) {
   const mapping = {
     workbench: { group: 'scribble', tab: 'workbench' },
@@ -62,14 +60,11 @@ export function legacyToGroup(tab) {
     locoTest: { group: 'loco', tab: 'locoTest' },
     locoModel: { group: 'detection', tab: 'locoModel' },
     diameter: { group: 'detection', tab: 'diameter' },
-    loco: { group: 'locoLab', tab: 'loco' },
+    loco: { group: 'detection', tab: 'locoModel' },
   }
   return mapping[tab] || { group: 'scribble', tab: 'workbench' }
 }
 
-/**
- * Map {activeGroup, activeTab} back to legacy workspaceTab.
- */
 export function groupToLegacy(group, tab) {
   const mapping = {
     'scribble:workbench': 'workbench',
@@ -81,69 +76,63 @@ export function groupToLegacy(group, tab) {
     'loco:locoTest': 'locoTest',
     'detection:locoModel': 'locoModel',
     'detection:diameter': 'diameter',
-    'locoLab:loco': 'loco',
   }
   return mapping[`${group}:${tab}`] || 'workbench'
 }
 
-export default function Navigation({ activeGroup, activeTab, onGroupChange, onTabChange }) {
-  const isLocoLab = activeGroup === 'locoLab'
+export { GROUPS }
+
+export default function Navigation({ activeGroup, onGroupChange, onTabChange }) {
+  const [collapsed, setCollapsed] = useState(true)
+
+  function handleGroupClick(key) {
+    const group = GROUPS.find((item) => item.key === key)
+    const firstTab = group ? group.tabs[0].key : 'workbench'
+    onGroupChange(key)
+    onTabChange(firstTab)
+  }
 
   return (
-    <div className="nav-container">
-      {/* Level 1: Group tabs */}
-      <div className="nav-groups">
-        {GROUPS.map((g) => (
-          <button
-            key={g.key}
-            className={`nav-group-btn ${activeGroup === g.key && !isLocoLab ? 'active' : ''}`}
-            onClick={() => {
-              // When switching to a group, keep the current sub-tab if it belongs to that group,
-              // otherwise select the first tab of the group
-              const groupTabs = GROUPS.find((x) => x.key === g.key)
-              const firstTab = groupTabs ? groupTabs.tabs[0].key : g.tabs[0].key
-              onGroupChange(g.key)
-              onTabChange(firstTab)
-            }}
-            title={g.label}
-          >
-            <span className="nav-icon">{g.icon}</span>
-            <span className="nav-label">{g.label}</span>
-          </button>
-        ))}
-        {/* LOCO Lab as separate experimental tab */}
-        <div className="nav-separator" />
-        <button
-          key={LOCO_LAB_TAB.key}
-          className={`nav-group-btn nav-lab-btn ${isLocoLab ? 'active' : ''}`}
-          onClick={() => {
-            onGroupChange('locoLab')
-            onTabChange('loco')
-          }}
-          title={LOCO_LAB_TAB.label}
-        >
-          <span className="nav-icon">{LOCO_LAB_TAB.icon}</span>
-          <span className="nav-label">{LOCO_LAB_TAB.label}</span>
-          <span className="nav-badge">Experimental</span>
-        </button>
-      </div>
+    <aside
+      className={`sidebar ${collapsed ? 'collapsed' : 'expanded'}`}
+      onMouseEnter={() => setCollapsed(false)}
+      onMouseLeave={() => setCollapsed(true)}
+    >
+      <button
+        className="sidebar-toggle"
+        onClick={() => setCollapsed((current) => !current)}
+        title={collapsed ? 'Expandir menu' : 'Colapsar menu'}
+      >
+        <span className="sidebar-toggle-icon">{collapsed ? '☰' : '✕'}</span>
+        {!collapsed && <span className="sidebar-toggle-label">Menu</span>}
+      </button>
 
-      {/* Level 2: Sub-tabs (only for non-locoLab groups) */}
-      {!isLocoLab && (
-        <div className="nav-subtabs">
-          {GROUPS.filter((g) => g.key === activeGroup).map((g) =>
-            g.tabs.map((t) => (
-              <button
-                key={t.key}
-                className={`nav-subtab-btn ${activeTab === t.key ? 'active' : ''}`}
-                onClick={() => onTabChange(t.key)}
-              >
-                {t.label}
-              </button>
-            ))
-          )}
-        </div>
-      )}
-    </div>
+      <div className="sidebar-section-label">{collapsed ? '⚙' : 'Entrenamiento'}</div>
+      {GROUPS.filter((group) => group.section === 'training').map((group) => (
+        <button
+          key={group.key}
+          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
+          onClick={() => handleGroupClick(group.key)}
+          title={collapsed ? group.fullLabel : group.label}
+        >
+          <span className="sidebar-icon">{group.icon}</span>
+          {!collapsed && <span className="sidebar-label">{group.label}</span>}
+        </button>
+      ))}
+
+      <div className="sidebar-separator" />
+      <div className="sidebar-section-label">{collapsed ? '⚙' : 'Produccion'}</div>
+      {GROUPS.filter((group) => group.section === 'production').map((group) => (
+        <button
+          key={group.key}
+          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
+          onClick={() => handleGroupClick(group.key)}
+          title={collapsed ? group.fullLabel : group.label}
+        >
+          <span className="sidebar-icon">{group.icon}</span>
+          {!collapsed && <span className="sidebar-label">{group.label}</span>}
+        </button>
+      ))}
+    </aside>
   )
 }

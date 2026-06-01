@@ -67,6 +67,31 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 .\stop_servers.ps1
 ```
 
+### Port configuration
+
+Ports are configured in the root `.env` file:
+
+```
+BACKEND_PORT=8011
+BACKEND_HOST=127.0.0.1
+FRONTEND_PORT=5173
+FRONTEND_HOST=localhost
+DEV_RELOAD=true
+VITE_API_BASE=http://127.0.0.1:8011
+```
+
+To change the backend port, edit `BACKEND_PORT` and `VITE_API_BASE` in `.env`. The frontend reads `VITE_API_BASE` from `frontend/.env`, which is automatically synced by `run_local.bat` and `run_silent.vbs`.
+
+> ⚠️ **ComfyUI** runs on port **8188** and is never managed by LOCO scripts. The `stop_servers.ps1` script explicitly skips port 8188.
+
+### Diagnose ports
+
+```powershell
+.\diagnose_ports.ps1
+```
+
+This read-only script shows all processes using the configured backend, frontend, and ComfyUI ports. It never kills any process.
+
 ---
 
 ## UI Navigation (3 hierarchical groups)

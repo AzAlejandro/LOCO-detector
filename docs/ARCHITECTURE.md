@@ -24,6 +24,23 @@ LOCO Detector is a full-stack application with a Python/FastAPI backend and a Re
 │                         │    persistence.py            │    │
 │                         │    validation.py             │    │
 │                         └──────────────────────────────┘    │
+│                                                             │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │  Configuration (.env)                            │       │
+│  │  ├─ BACKEND_PORT / BACKEND_HOST                  │       │
+│  │  ├─ FRONTEND_PORT / FRONTEND_HOST                │       │
+│  │  ├─ DEV_RELOAD (true/false)                      │       │
+│  │  └─ VITE_API_BASE (synced to frontend/.env)      │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                             │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │  Scripts                                          │       │
+│  │  ├─ run_local.bat     — reads .env, starts both  │       │
+│  │  ├─ run_silent.vbs    — silent launcher          │       │
+│  │  ├─ run_silent.bat    — delegates to stop_servers│       │
+│  │  ├─ stop_servers.ps1  — safe shutdown (reads .env)│      │
+│  │  └─ diagnose_ports.ps1— read-only diagnostics    │       │
+│  └──────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,15 +50,19 @@ LOCO Detector is a full-stack application with a Python/FastAPI backend and a Re
 
 ```
 LOCO-detector/
-├── app.py                          # Backend entry point
+├── .env                            # Port and host configuration
+├── app.py                          # Backend entry point (reads .env)
 ├── requirements.txt                # Python dependencies
 ├── package.json                    # Root package metadata
 ├── README.md                       # This file
 ├── CHANGELOG.md                    # Version history
 ├── SECURITY.md                     # Security policy
 ├── .gitignore                      # Git ignore rules
-├── run_local.bat                   # Windows startup script
-├── stop_servers.ps1                # Windows stop script
+├── run_local.bat                   # Windows startup script (reads .env)
+├── run_silent.bat                  # Thin wrapper — delegates to stop_servers.ps1
+├── run_silent.vbs                  # Silent launcher (reads .env, syncs frontend/.env)
+├── stop_servers.ps1                # Windows stop script (reads .env, safety guards)
+├── diagnose_ports.ps1              # Read-only port diagnostics
 │
 ├── backend/                        # Python backend
 │   ├── __init__.py

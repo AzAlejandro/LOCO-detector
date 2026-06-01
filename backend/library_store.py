@@ -115,12 +115,55 @@ def register_library_image(image_id: str, image_name: str, image_rgb: np.ndarray
     return out
 
 
-def _draft_meta_for(image_id: str) -> dict[str, Any]:
+def _draft_meta_for(image_id: str, origin: str = '') -> dict[str, Any]:
+    """Return draft meta for a specific origin, or the most recent across all origins.
+    Does NOT depend on scribble_origin stored in library meta.json."""
     sid = _safe_id(image_id)
     if not sid:
         return {}
-    path = base_persistence.DRAFTS_DIR / sid / 'meta.json'
-    return _load_json(path)
+    base_dir = base_persistence.DRAFTS_DIR / sid
+
+    # If a specific origin is requested, return that one
+    if origin in ('manual', 'modelo', 'modelo_modificado'):
+        meta = _load_json(base_dir / origin / 'meta.json')
+        if meta:
+            meta['scribble_origin'] = origin
+            return meta
+
+    # First check for legacy root-level draft (pre-multi-origin)
+    legacy_meta = _load_json(base_dir / 'meta.json')
+    if legacy_meta and (base_dir / 'scribble_map.npz').exists():
+        legacy_meta['scribble_origin'] = 'manual'
+        return legacy_meta
+
+    # Return most recent across all origins
+    best: dict[str, Any] = {}
+    for candidate in ('manual', 'modelo', 'modelo_modificado'):
+        candidate_dir = base_dir / candidate
+        meta = _load_json(candidate_dir / 'meta.json')
+        if meta:
+            meta['scribble_origin'] = candidate
+            if not best or str(meta.get('updated_at', '')) > str(best.get('updated_at', '')):
+                best = meta
+    return best
+
+
+def _list_available_origins(image_id: str) -> list[str]:
+    """Return which origins have scribble files for this image."""
+    sid = _safe_id(image_id)
+    if not sid:
+        return []
+    base_dir = base_persistence.DRAFTS_DIR / sid
+    available: list[str] = []
+    # Check for legacy root-level draft
+    if (base_dir / 'scribble_map.npz').exists():
+        available.append('manual')
+    # Check origin subdirectories
+    for candidate in ('manual', 'modelo', 'modelo_modificado'):
+        if (base_dir / candidate / 'scribble_map.npz').exists():
+            if candidate not in available:
+                available.append(candidate)
+    return available
 
 
 def list_library_images() -> list[dict[str, Any]]:
@@ -137,6 +180,7 @@ def list_library_images() -> list[dict[str, Any]]:
         draft = _draft_meta_for(image_id)
         prior_meta = _load_json(d / 'prior_meta.json')
         shape = list(meta.get('shape_hw') or [])
+        available_origins = _list_available_origins(image_id)
         items.append(
             {
                 'image_id': image_id,
@@ -150,6 +194,8 @@ def list_library_images() -> list[dict[str, Any]]:
                 'draft_n_fg': int(draft.get('n_fg') or 0),
                 'draft_n_halo': int(draft.get('n_halo') or 0),
                 'draft_n_bg': int(draft.get('n_bg') or 0),
+                'scribble_origin': str(draft.get('scribble_origin', '')),
+                'scribble_origins_available': available_origins,
                 'has_prior_cache': bool(meta.get('has_prior_cache', False)),
                 'latest_prior_run_id': str(meta.get('latest_prior_run_id') or ''),
                 'latest_prior_experiment_id': str(prior_meta.get('experiment_id') or ''),
@@ -181,6 +227,29 @@ def load_library_thumbnail(image_id: str, max_px: int = 220) -> np.ndarray:
     nw = max(1, int(round(w * scale)))
     nh = max(1, int(round(h * scale)))
     return cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+
+
+def load_library_mask_thumbnail(image_id: str, max_px: int = 220) -> np.ndarray | None:
+    """Load the predicted mask overlay (prior_overlay.png) as a thumbnail, if it exists."""
+    ensure_library_dirs()
+    sid = _safe_id(image_id)
+    if not sid:
+        return None
+    mask_path = _img_dir(image_id) / 'prior_overlay.png'
+    if not mask_path.exists():
+        return None
+    try:
+        mask = _read_png(mask_path, grayscale=False)
+    except Exception:
+        return None
+    h, w = mask.shape[:2]
+    m = max(32, int(max_px))
+    scale = min(1.0, float(m) / float(max(1, h, w)))
+    if scale >= 0.999:
+        return mask
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    return cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA)
 
 
 def delete_library_image(image_id: str) -> dict[str, Any]:

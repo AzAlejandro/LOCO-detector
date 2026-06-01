@@ -54,6 +54,7 @@ img/
 
 # Roo / agent config
 .roo/
+.kilo/
 AGENT.md
 
 # Generated outputs (user data — images, runs, models, scribbles)

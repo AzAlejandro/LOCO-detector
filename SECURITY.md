@@ -9,17 +9,14 @@
 ## Network Security
 
 ### Localhost-only binding
-The backend API server binds to `127.0.0.1:8011` by default. This ensures the API is **not exposed** to the local network or internet. Only processes running on the same machine can communicate with the backend.
+The backend API server binds to `127.0.0.1` by default (configured via `BACKEND_HOST` in `.env`). This ensures the API is **not exposed** to the local network or internet. Only processes running on the same machine can communicate with the backend.
 
-```python
-# backend/main.py
-uvicorn.run(app, host='127.0.0.1', port=8011)
-```
+The port is configured in the root `.env` file (`BACKEND_PORT`, default `8011`). The entry point `app.py` reads these values at startup.
 
 > ⚠️ **Do not change** the host to `0.0.0.0` unless you fully understand the network exposure implications.
 
 ### CORS (Cross-Origin Resource Sharing)
-The frontend dev server runs on `http://localhost:5173`. CORS is configured to only allow requests from this origin:
+The frontend dev server runs on `http://localhost:5173` (configurable via `FRONTEND_PORT` in `.env`). CORS is configured to only allow requests from this origin:
 
 ```python
 app.add_middleware(

@@ -36,6 +36,7 @@ def ensure_dirs() -> None:
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_drafts()
 
 
 def _safe_id(text: str) -> str:
@@ -58,13 +59,78 @@ def _draft_dir(image_id: str) -> Path:
     return DRAFTS_DIR / sid
 
 
+def _draft_origin_dir(image_id: str, origin: str) -> Path:
+    """Return the per-origin subdirectory for a draft."""
+    base = _draft_dir(image_id)
+    origin_key = str(origin or 'manual').strip().lower()
+    if origin_key not in ('manual', 'modelo', 'modelo_modificado'):
+        origin_key = 'manual'
+    return base / origin_key
+
+
 def _labels_to_visual(labels: np.ndarray) -> np.ndarray:
     return labels_to_visual(labels)
 
 
-def save_scribble_draft(image_id: str, labels: np.ndarray) -> dict[str, Any]:
+def _migrate_legacy_drafts() -> None:
+    """Move root-level drafts into per-origin subdirectories.
+
+    Scans DRAFTS_DIR for image_id directories that contain scribble_map.npz
+    directly (legacy layout) and moves them into <image_id>/<origin>/ based
+    on the scribble_origin field in meta.json (defaults to 'manual').
+
+    NOTE: This is called from ensure_dirs(), so DRAFTS_DIR is guaranteed to exist.
+    """
+    if not DRAFTS_DIR.exists():
+        return
+    for child in sorted(DRAFTS_DIR.iterdir()):
+        if not child.is_dir():
+            continue
+        # Skip directories that look like origin subdirs (manual, modelo, modelo_modificado)
+        if child.name in ('manual', 'modelo', 'modelo_modificado'):
+            continue
+        if (child / 'scribble_map.npz').exists():
+            _migrate_single_legacy_draft(child)
+
+
+def _migrate_single_legacy_draft(image_dir: Path) -> None:
+    """Migrate a single legacy root-level draft into its origin subdirectory.
+
+    image_dir is the <image_id> directory under DRAFTS_DIR that contains
+    scribble_map.npz directly (legacy layout).
+    """
+    zpath = image_dir / 'scribble_map.npz'
+    if not zpath.exists():
+        return
+    mpath = image_dir / 'meta.json'
+    origin = 'manual'
+    if mpath.exists():
+        try:
+            meta = dict(json.loads(mpath.read_text(encoding='utf-8')) or {})
+            origin = str(meta.get('scribble_origin', 'manual'))
+        except Exception:
+            pass
+    origin_dir = image_dir / origin
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    for f in list(image_dir.glob('*')):
+        if f.is_file():
+            dest = origin_dir / f.name
+            if not dest.exists():
+                shutil.move(str(f), str(dest))
+    for sub in list(image_dir.glob('*')):
+        if sub.is_dir() and sub != origin_dir:
+            try:
+                sub.rmdir()
+            except OSError:
+                pass
+
+
+def save_scribble_draft(image_id: str, labels: np.ndarray, origin: str = '') -> dict[str, Any]:
     ensure_dirs()
-    draft_dir = _draft_dir(image_id)
+    origin_key = str(origin or 'manual').strip().lower()
+    if origin_key not in ('manual', 'modelo', 'modelo_modificado'):
+        origin_key = 'manual'
+    draft_dir = _draft_origin_dir(image_id, origin_key)
     draft_dir.mkdir(parents=True, exist_ok=True)
 
     arr = np.asarray(labels, dtype=np.uint8)
@@ -95,14 +161,33 @@ def save_scribble_draft(image_id: str, labels: np.ndarray) -> dict[str, Any]:
         'n_bg': counts['background'],
         'n_unlabeled': counts['unlabeled'],
         'shape_hw': [int(out.shape[0]), int(out.shape[1])],
+        'scribble_origin': origin_key,
     }
-    (draft_dir / 'meta.json').write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+    mpath = draft_dir / 'meta.json'
+    mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
     return meta
 
 
-def load_scribble_draft(image_id: str) -> dict[str, Any]:
+def load_scribble_draft(image_id: str, origin: str = '') -> dict[str, Any]:
     ensure_dirs()
-    draft_dir = _draft_dir(image_id)
+    origin_key = str(origin or '').strip().lower()
+    if origin_key and origin_key in ('manual', 'modelo', 'modelo_modificado'):
+        draft_dir = _draft_origin_dir(image_id, origin_key)
+    else:
+        # No origin specified — try each origin in priority order
+        draft_dir = _draft_dir(image_id)
+        # First check root-level (legacy) location
+        if (draft_dir / 'scribble_map.npz').exists():
+            pass  # draft_dir already points to the legacy root
+        else:
+            for candidate in ('manual', 'modelo', 'modelo_modificado'):
+                candidate_dir = draft_dir / candidate
+                if (candidate_dir / 'scribble_map.npz').exists():
+                    draft_dir = candidate_dir
+                    break
+            else:
+                # Fall back to 'manual' subdirectory
+                draft_dir = draft_dir / 'manual'
     zpath = draft_dir / 'scribble_map.npz'
     mpath = draft_dir / 'meta.json'
     if not zpath.exists():
@@ -145,22 +230,41 @@ def load_scribble_draft(image_id: str) -> dict[str, Any]:
     meta['n_bg'] = counts['background']
     meta['n_unlabeled'] = counts['unlabeled']
     meta.setdefault('shape_hw', [int(out.shape[0]), int(out.shape[1])])
+    meta.setdefault('scribble_origin', origin_key or 'manual')
     return {'found': True, 'image_id': str(image_id), 'labels': out, 'meta': meta}
 
 
-def clear_scribble_draft(image_id: str) -> dict[str, Any]:
+def clear_scribble_draft(image_id: str, origin: str = '') -> dict[str, Any]:
     ensure_dirs()
-    draft_dir = _draft_dir(image_id)
-    existed = bool(draft_dir.exists())
-    if draft_dir.exists():
-        for p in draft_dir.glob('*'):
-            if p.is_file():
-                p.unlink(missing_ok=True)
-        try:
-            draft_dir.rmdir()
-        except OSError:
-            pass
-    return {'image_id': str(image_id), 'cleared': bool(existed)}
+    origin_key = str(origin or '').strip().lower()
+    if origin_key and origin_key in ('manual', 'modelo', 'modelo_modificado'):
+        draft_dir = _draft_origin_dir(image_id, origin_key)
+        existed = bool(draft_dir.exists())
+        if draft_dir.exists():
+            for p in draft_dir.glob('*'):
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+            try:
+                draft_dir.rmdir()
+            except OSError:
+                pass
+        return {'image_id': str(image_id), 'origin': origin_key, 'cleared': bool(existed)}
+    else:
+        # No origin specified — clear all origin subdirs
+        base_dir = _draft_dir(image_id)
+        any_existed = False
+        for candidate in ('manual', 'modelo', 'modelo_modificado'):
+            candidate_dir = base_dir / candidate
+            if candidate_dir.exists():
+                for p in candidate_dir.glob('*'):
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+                try:
+                    candidate_dir.rmdir()
+                except OSError:
+                    pass
+                any_existed = True
+        return {'image_id': str(image_id), 'cleared': bool(any_existed)}
 
 
 def _write_png(path: Path, image: np.ndarray) -> None:

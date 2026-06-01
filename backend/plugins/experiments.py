@@ -188,6 +188,23 @@ class UnetSmallPatchExperiment:
         return ExperimentOutput(prior_map=prior, mask=mask, meta=meta, status_level=_status_from_meta(meta))
 
 
+class AssistModelPredictExperiment:
+    """Placeholder experiment for predictions made via the 'Predecir mascara' button.
+    The actual prediction is handled by assist_models.predict_mask(); this entry
+    only ensures the runs appear in 'Revisión de resultados'."""
+    info = ExperimentInfo(
+        experiment_id='assist_model_predict',
+        group='F',
+        display_name='Prediccion de mascara (modelo asistente)',
+        description='Mascara generada por el modelo asistente entrenado.',
+        default_params={},
+        implementation_status='native',
+    )
+
+    def run(self, ctx: RunContext) -> ExperimentOutput:
+        raise NotImplementedError('assist_model_predict se ejecuta via /api/assist-models/predict-mask')
+
+
 def build_default_experiments() -> list:
     return [
         ExtraTreesPixelExperiment(),
@@ -198,4 +215,5 @@ def build_default_experiments() -> list:
         ContextFeaturesExperiment(),
         ClassifierMorphMinExperiment(),
         UnetSmallPatchExperiment(),
+        AssistModelPredictExperiment(),
     ]

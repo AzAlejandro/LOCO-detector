@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import Navigation, { legacyToGroup, groupToLegacy } from './components/Navigation'
-import Histogram, { exportHistogramCsv } from './components/Histogram'
+import Navigation, { legacyToGroup, groupToLegacy, GROUPS } from './components/Navigation'
+import Histogram from './components/Histogram'
 import CalibrationPanel from './components/CalibrationPanel'
-import { apiForm, apiGet, apiPost, b64ToDataUrl } from './api'
+import OriginToast, { showOriginToast } from './components/OriginToast'
+import { apiForm, apiGet, apiPost, b64ToDataUrl, API_BASE } from './api'
 
 function errMsg(err) {
   if (err instanceof Event || (typeof err === 'object' && err && typeof err.type === 'string')) {
-    return 'No se pudo conectar con el servidor. Verifica que el backend esté ejecutándose en el puerto 8011.'
+    return 'No se pudo conectar con el servidor. Verifica que el backend esté ejecutándose.'
   }
   if (err?.payload?.detail && Array.isArray(err.payload.detail)) {
     return err.payload.detail.map((d) => d.msg || String(d)).join('; ')
@@ -97,21 +98,20 @@ function emptyLoading() {
     diamExport: false,
     locoPreview: false,
     locoRun: false,
-    locoLab: false,
     locoDataset: false,
     locoAugment: false,
     locoTraining: false,
     locoTest: false,
     locoModel: false,
+    locoModelExclude: false,
     validationList: false,
     validationSave: false,
-    validationRun: false,
-    validationExport: false,
     modelsDataset: false,
     modelsList: false,
     modelsTrain: false,
     modelsPredict: false,
     modelsDelete: false,
+    modelsDatasetDelete: false,
   }
 }
 
@@ -167,6 +167,33 @@ function ToolIcon({ name }) {
   )
 }
 
+function normalizeExcludeRectList(rects) {
+  return (Array.isArray(rects) ? rects : []).map((rect) => ({
+    x: Math.round(Number(rect?.x || 0)),
+    y: Math.round(Number(rect?.y || 0)),
+    w: Math.max(1, Math.round(Number(rect?.w || 0))),
+    h: Math.max(1, Math.round(Number(rect?.h || 0))),
+  })).filter((rect) => Number.isFinite(rect.x) && Number.isFinite(rect.y) && Number.isFinite(rect.w) && Number.isFinite(rect.h) && rect.w > 0 && rect.h > 0)
+}
+
+function rectListRoughEqual(a, b, tol = 1.01) {
+  const aa = normalizeExcludeRectList(a)
+  const bb = normalizeExcludeRectList(b)
+  if (aa.length !== bb.length) return false
+  return aa.every((rect, idx) => rectRoughEqual(rect, bb[idx], tol))
+}
+
+function TrainingDisclosure({ title, children, defaultOpen = false }) {
+  return (
+    <details className="training-section training-disclosure" open={defaultOpen ? true : undefined}>
+      <summary>{title}</summary>
+      <div className="training-disclosure-body">
+        {children}
+      </div>
+    </details>
+  )
+}
+
 function buildRunRow(item) {
   const meta = item?.meta || {}
   const exp = meta?.experiment || {}
@@ -203,14 +230,6 @@ const LOCO_STEPS = [
   { key: 'best', label: 'Mejor' },
   { key: 'refine', label: 'Refine' },
   { key: 'result', label: 'Resultado' },
-]
-
-const LOCO_LAB_STAGES = [
-  { key: 'proposals', label: '1. Propuestas' },
-  { key: 'filters', label: '2. Filtros' },
-  { key: 'circles', label: '3. Circulos' },
-  { key: 'measure', label: '4. Medicion' },
-  { key: 'evaluate', label: '5. Evaluacion' },
 ]
 
 const LOCO_PRESETS = {
@@ -361,6 +380,85 @@ const LOCO_PRESETS = {
   },
 }
 
+const DEFAULT_LOCO_MODEL_LAYERS = { mask: true, accepted: true, rejected: false, scores: true, tiles: false }
+const DEFAULT_LOCO_MODEL_STAGE_STATE = {
+  detector_state_id: '',
+  baseReady: false,
+  thresholdReady: false,
+  nmsReady: false,
+  spatialReady: false,
+  baseDirty: false,
+  thresholdDirty: false,
+  nmsDirty: false,
+  spatialDirty: false,
+  resultStage: '',
+  resultStale: false,
+  baseSnapshot: null,
+  thresholdSnapshot: null,
+  nmsSnapshot: null,
+  spatialSnapshot: null,
+}
+
+const DEFAULT_DIAM_CALIBRATION = {
+  enabled: false,
+  known_value: 100,
+  pixel_distance: 0,
+  unit_per_px: 0,
+  unit: 'nm',
+  line_x1: null,
+  line_y1: null,
+  line_x2: null,
+  line_y2: null,
+}
+
+function normalizeDiamCalibrationState(raw) {
+  const next = {
+    ...DEFAULT_DIAM_CALIBRATION,
+    ...(raw || {}),
+  }
+  next.enabled = !!next.enabled
+  next.unit = String(next.unit || 'nm') === 'um' ? 'um' : 'nm'
+  next.known_value = Math.max(0, Number(next.known_value ?? next.known_nm ?? DEFAULT_DIAM_CALIBRATION.known_value) || 0)
+  ;['line_x1', 'line_y1', 'line_x2', 'line_y2'].forEach((key) => {
+    const value = next[key]
+    next[key] = Number.isFinite(Number(value)) ? Number(value) : null
+  })
+  const hasLine = ['line_x1', 'line_y1', 'line_x2', 'line_y2'].every((key) => Number.isFinite(Number(next[key])))
+  const lineDistance = hasLine
+    ? Math.hypot(Number(next.line_x2) - Number(next.line_x1), Number(next.line_y2) - Number(next.line_y1))
+    : 0
+  const rawPixelDistance = Number(next.pixel_distance || 0)
+  next.pixel_distance = lineDistance > 0 ? Number(lineDistance.toFixed(4)) : (rawPixelDistance > 0 ? rawPixelDistance : 0)
+  next.unit_per_px = next.pixel_distance > 0
+    ? Number((next.known_value / next.pixel_distance).toFixed(8))
+    : Number(next.unit_per_px || next.nm_per_px || 0)
+  return next
+}
+
+function calibrationLineFromState(calibration) {
+  if (!calibration) return null
+  const keys = ['line_x1', 'line_y1', 'line_x2', 'line_y2']
+  if (!keys.every((key) => Number.isFinite(Number(calibration[key])))) return null
+  return {
+    start: { x: Number(calibration.line_x1), y: Number(calibration.line_y1) },
+    end: { x: Number(calibration.line_x2), y: Number(calibration.line_y2) },
+  }
+}
+
+function makeLocoCustomPresetValue(presetId) {
+  return `custom:${String(presetId || '')}`
+}
+
+function stableJson(value) {
+  return JSON.stringify(value ?? null)
+}
+
+function escapeCsvCell(value) {
+  const text = String(value ?? '')
+  if (!/[",\n]/.test(text)) return text
+  return `"${text.replaceAll('"', '""')}"`
+}
+
 const PARAM_DESCRIPTIONS = {
   // Generacion
   candidate_sampling_mode: 'Controla c\u00f3mo se reduce el n\u00famero de candidatos cuando la grilla genera m\u00e1s que max candidatos. tile balanced reparte equitativamente entre tiles de la imagen.',
@@ -432,6 +530,32 @@ function CurtainCompare({ title, subtitle, baseUrl, maskUrl, maskClassName = '',
     setDragDivider(false)
     setDragPan(false)
   }, [baseUrl, maskUrl, persistOnSourceChange])
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'm' || e.key === 'M') {
+        setPanMode((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Non-passive wheel listener so preventDefault() works for Ctrl+Wheel zoom
+  useEffect(() => {
+    const el = stageRef.current
+    if (!el) return
+    function onWheel(e) {
+      if (!maskUrl) return
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        const factor = e.deltaY < 0 ? 1.15 : 0.87
+        setZoom((z) => clamp(z * factor, 0.25, 8))
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [maskUrl])
 
   function updateCurtain(clientX) {
     const stage = stageRef.current
@@ -531,12 +655,57 @@ function CurtainCompare({ title, subtitle, baseUrl, maskUrl, maskClassName = '',
   )
 }
 
+/** Renders a scribble thumbnail onto a <canvas>, bypassing browser <img> caching issues. */
+function ScribblePreviewCanvas({ scribbleThumbSrc, imageId, selectedOrigin }) {
+  const canvasRef = useRef(null)
+  const [drawCount, setDrawCount] = useState(0)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    console.log(`[DBG-CANVAS] useEffect: imageId=${imageId}, origin=${selectedOrigin}, scribbleThumbSrc=${scribbleThumbSrc ? 'non-empty' : 'empty'}`)
+    if (!scribbleThumbSrc) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      setDrawCount(c => c + 1)
+      return
+    }
+    const img = new Image()
+    img.onload = () => {
+      console.log(`[DBG-CANVAS] drawImage: imageId=${imageId}, origin=${selectedOrigin}`)
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      setDrawCount(c => c + 1)
+    }
+    img.onerror = () => {
+      console.log(`[DBG-CANVAS] error: imageId=${imageId}, origin=${selectedOrigin}`)
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+    }
+    img.src = scribbleThumbSrc
+  }, [scribbleThumbSrc, imageId, selectedOrigin])
+  if (!scribbleThumbSrc) {
+    return (
+      <div className="scribble-grid-empty-cell">
+        <span className="scribble-grid-empty-text">no disponible</span>
+      </div>
+    )
+  }
+  return (
+    <canvas
+      ref={canvasRef}
+      width={104}
+      height={72}
+      className="scribble-grid-thumb"
+    />
+  )
+}
+
 export default function App() {
+  console.warn('[APP-V2] LOADED — fixes: clear circles on load, update both counters, delete decrements')
   const drawCanvasRef = useRef(null)
   const labelsCanvasRef = useRef(null)
+  const brushCursorRef = useRef(null)
   const editorStageRef = useRef(null)
   const diameterStageRef = useRef(null)
-  const locoStageRef = useRef(null)
   const locoDatasetStageRef = useRef(null)
   const locoTestStageRef = useRef(null)
   const locoModelStageRef = useRef(null)
@@ -547,13 +716,15 @@ export default function App() {
   const diamPanRef = useRef({ dragging: false, x: 0, y: 0 })
   const diamLineDragRef = useRef({ dragging: false, start: null })
   const diamCircleDragRef = useRef({ dragging: false, center: null })
-  const locoPanRef = useRef({ dragging: false, x: 0, y: 0 })
-  const locoCircleDragRef = useRef({ dragging: false, center: null })
+  const diamCalibrationDragRef = useRef({ dragging: false, start: null })
   const locoDatasetPanRef = useRef({ dragging: false, x: 0, y: 0 })
   const locoDatasetDragRef = useRef({ mode: '', id: '', start: null, circle: null })
+  const locoDatasetCirclesRef = useRef([])
   const locoTestPanRef = useRef({ dragging: false, x: 0, y: 0 })
   const locoTestDragRef = useRef({ mode: '', id: '', start: null, circle: null })
   const locoModelPanRef = useRef({ dragging: false, x: 0, y: 0 })
+  const locoModelExcludeDragRef = useRef({ dragging: false, start: null, index: -1 })
+  const locoModelExcludeRectsRef = useRef([])
   const pointReviewPanRef = useRef({ dragging: false, x: 0, y: 0 })
   const filterFocusRef = useRef(null)
   const localObjectUrlRef = useRef('')
@@ -571,6 +742,7 @@ export default function App() {
   const [assistModels, setAssistModels] = useState([])
   const [defaultAssistModelId, setDefaultAssistModelId] = useState('')
   const [selectedAssistModelId, setSelectedAssistModelId] = useState('')
+  const [selectedAssistModelIds, setSelectedAssistModelIds] = useState({})
   const [selectedTrainImages, setSelectedTrainImages] = useState({})
   const [trainConfig, setTrainConfig] = useState({
     model_name: '',
@@ -587,6 +759,107 @@ export default function App() {
   const [modelPrediction, setModelPrediction] = useState(null)
   const [modelTrainSummary, setModelTrainSummary] = useState(null)
   const [modelImagePreview, setModelImagePreview] = useState(null)
+  const [modelSort, setModelSort] = useState({ key: 'path', dir: 'asc' })
+  const [scribbleOrigin, setScribbleOrigin] = useState('')
+  // Cache scribble thumbnails per image_id per origin, so dropdown switches instantly
+  // e.g. { "img123": { "manual": "data:...", "modelo": "data:...", "modelo_modificado": "data:..." } }
+  const [scribbleThumbsByOrigin, setScribbleThumbsByOrigin] = useState({})
+  const [selectedGridOrigin, setSelectedGridOrigin] = useState({})
+  const [contextMenu, setContextMenu] = useState(null)
+  const [maskRunListByImage, setMaskRunListByImage] = useState({})
+  const [maskIndexByImage, setMaskIndexByImage] = useState({})
+  const [maskThumbByRun, setMaskThumbByRun] = useState({})
+  const [circleTypeCounts, setCircleTypeCounts] = useState({})
+  const [locoDatasetCircleCounts, setLocoDatasetCircleCounts] = useState({})
+
+  function handleGridContextMenu(e, imageId, origin) {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY, imageId, origin, type: 'scribble' })
+  }
+
+  function handleImageContextMenu(e, imageId) {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY, imageId, origin: null, type: 'image' })
+  }
+
+  function closeContextMenu() {
+    setContextMenu(null)
+  }
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const handler = () => closeContextMenu()
+    document.addEventListener('click', handler)
+    return () => document.removeEventListener('click', handler)
+  }, [contextMenu])
+
+  async function fetchScribbleThumbForOrigin(imageId, origin) {
+    if (!imageId || !origin) {
+      console.log(`[DBG-FETCH] SKIP: imageId=${imageId}, origin=${origin}`)
+      return ''
+    }
+    console.log(`[DBG-FETCH] CALL: image_id=${imageId}, origin=${origin}`)
+    try {
+      const res = await apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(imageId)}&origin=${encodeURIComponent(origin)}`)
+      const scribbleB64 = res?.scribble_b64 || ''
+      console.log(`[DBG-FETCH] RESPONSE: image_id=${imageId}, origin=${origin}, scribbleB64.length=${scribbleB64.length}, found=${!!scribbleB64}`)
+      setScribbleThumbsByOrigin(prev => {
+        const next = { ...prev }
+        if (!next[imageId]) next[imageId] = {}
+        const dataUrl = scribbleB64 ? b64ToDataUrl(scribbleB64, res.scribble_mime || 'image/png') : ''
+        next[imageId][origin] = dataUrl
+        console.log(`[DBG-FETCH] STATE-UPDATE: image_id=${imageId}, origin=${origin}, dataUrl=${dataUrl ? 'non-empty' : 'empty'}`)
+        return next
+      })
+      return scribbleB64
+    } catch (err) {
+      console.log(`[DBG-FETCH] ERROR: image_id=${imageId}, origin=${origin}, err=${errMsg(err)}`)
+      // Cache empty result on error so the fallback thumbs.scribble is not used
+      setScribbleThumbsByOrigin(prev => {
+        const next = { ...prev }
+        if (!next[imageId]) next[imageId] = {}
+        next[imageId][origin] = ''
+        return next
+      })
+      return ''
+    }
+  }
+
+  async function fetchMaskThumbForRun(runId) {
+    if (!runId || maskThumbByRun[runId]) return
+    try {
+      const res = await apiGet(`/api/results/mask-thumb?run_id=${encodeURIComponent(runId)}`)
+      if (res?.payload?.mask_thumb_b64) {
+        setMaskThumbByRun(prev => ({
+          ...prev,
+          [runId]: { b64: res.payload.mask_thumb_b64, w: res.payload.width, h: res.payload.height },
+        }))
+      }
+    } catch {}
+  }
+
+  function maskPrev(imageId) {
+    const runs = maskRunListByImage[imageId]
+    if (!runs?.length) return
+    const idx = (maskIndexByImage[imageId] || 0) - 1
+    const newIdx = idx < 0 ? runs.length - 1 : idx
+    setMaskIndexByImage(prev => ({ ...prev, [imageId]: newIdx }))
+    fetchMaskThumbForRun(runs[newIdx].run_id)
+  }
+
+  function maskNext(imageId) {
+    const runs = maskRunListByImage[imageId]
+    if (!runs?.length) return
+    const idx = (maskIndexByImage[imageId] || 0) + 1
+    const newIdx = idx >= runs.length ? 0 : idx
+    setMaskIndexByImage(prev => ({ ...prev, [imageId]: newIdx }))
+    fetchMaskThumbForRun(runs[newIdx].run_id)
+  }
+
+  const [brushMousePos, setBrushMousePos] = useState({ x: -9999, y: -9999 })
+  const [cursorColor, setCursorColor] = useState('#00cc66')
 
   const [experiments, setExperiments] = useState([])
   const [selectedExperiment, setSelectedExperiment] = useState('')
@@ -596,7 +869,7 @@ export default function App() {
   const [imageStartDir, setImageStartDir] = useState('')
   const [localImageFiles, setLocalImageFiles] = useState([])
   const [selectedLocalPath, setSelectedLocalPath] = useState('')
-  const [workspaceTab, setWorkspaceTab] = useState('workbench') // workbench | review | diameter | loco | locoDataset | locoAugment | locoTraining | locoTest | models
+  const [workspaceTab, setWorkspaceTab] = useState('workbench') // workbench | review | diameter | locoDataset | locoAugment | locoTraining | locoTest | locoModel | models
   // New hierarchical navigation state
   const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('workbench').group)
   const [activeTab, setActiveTab] = useState(() => legacyToGroup('workbench').tab)
@@ -646,11 +919,10 @@ export default function App() {
   const [reviews, setReviews] = useState([])
   const [reportInfo, setReportInfo] = useState(null)
 
-  const [diamMethodPanel, setDiamMethodPanel] = useState('automatic')
-  const [diamMethodId, setDiamMethodId] = useState('hybrid_profile_diameter_v3_2_auto')
+  const [diamMethodId, setDiamMethodId] = useState('circle_square_mask_diameter')
   const diamSourceMode = 'prior_mask'
   const [diamPriorRunId, setDiamPriorRunId] = useState('latest')
-  const [diamViewerMode, setDiamViewerMode] = useState('mark')
+  const [diamViewerMode, setDiamViewerMode] = useState('circle')
   const [diamViewerZoom, setDiamViewerZoom] = useState(1)
   const [diamViewerOffset, setDiamViewerOffset] = useState({ x: 0, y: 0 })
   const [diamStageSize, setDiamStageSize] = useState({ w: 0, h: 0 })
@@ -666,6 +938,7 @@ export default function App() {
   const [manualCircleActiveIdx, setManualCircleActiveIdx] = useState(-1)
   const [manualCircleSelected, setManualCircleSelected] = useState(false)
   const [manualCircleConsumed, setManualCircleConsumed] = useState(false)
+  const [manualCircleNextType, setManualCircleNextType] = useState('valid')
   const [diamManualHistory, setDiamManualHistory] = useState([])
   const [diamManualFuture, setDiamManualFuture] = useState([])
   const [diamPoints, setDiamPoints] = useState([])
@@ -686,11 +959,6 @@ export default function App() {
   const [diamActiveRunId, setDiamActiveRunId] = useState('')
   const [diamRunCache, setDiamRunCache] = useState({})
   const [diamReportInfo, setDiamReportInfo] = useState(null)
-  const [locoViewerMode, setLocoViewerMode] = useState('pan')
-  const [locoViewerZoom, setLocoViewerZoom] = useState(1)
-  const [locoViewerOffset, setLocoViewerOffset] = useState({ x: 0, y: 0 })
-  const [locoStageSize, setLocoStageSize] = useState({ w: 0, h: 0 })
-  const [locoIsPanning, setLocoIsPanning] = useState(false)
   const [locoPoints, setLocoPoints] = useState([])
   const [locoActivePointIdx, setLocoActivePointIdx] = useState(-1)
   const [locoCircleDraft, setLocoCircleDraft] = useState(null)
@@ -712,35 +980,6 @@ export default function App() {
     loco_mode: 'refine',
     loco_aggregation: 'median',
   })
-  const [locoLabStage, setLocoLabStage] = useState('proposals')
-  const [locoProposalMethod, setLocoProposalMethod] = useState('circle_grid')
-  const [locoProposals, setLocoProposals] = useState([])
-  const [locoFilteredProposals, setLocoFilteredProposals] = useState([])
-  const [locoMeasuredResults, setLocoMeasuredResults] = useState([])
-  const [locoEvaluation, setLocoEvaluation] = useState(null)
-  const [locoSelectedProposalId, setLocoSelectedProposalId] = useState('')
-  const [locoLayerVisibility, setLocoLayerVisibility] = useState({
-    mask: true,
-    components: false,
-    proposals: true,
-    rejected: false,
-    intersections: true,
-    quadrilaterals: true,
-    diameter: true,
-  })
-  const [locoLabParams, setLocoLabParams] = useState({
-    grid_stride_px: 18,
-    radius_min_px: 3,
-    radius_max_px: 18,
-    radius_step_px: 2,
-    mask_required_ratio: 0.1,
-    max_candidates: 600,
-    min_score: 0.42,
-    max_intersections: 12,
-    circle_samples: 128,
-    require_four_cuts: true,
-    measure_limit: 120,
-  })
   const [locoDatasetTool, setLocoDatasetTool] = useState('circle')
   const [locoDatasetCircles, setLocoDatasetCircles] = useState([])
   const [locoDatasetSelectedId, setLocoDatasetSelectedId] = useState('')
@@ -761,6 +1000,7 @@ export default function App() {
   ])
   const [locoAugPreview, setLocoAugPreview] = useState([])
   const [locoAugInfo, setLocoAugInfo] = useState(null)
+  const [locoAugDatasetDir, setLocoAugDatasetDir] = useState('')
   const [locoAugBlockType, setLocoAugBlockType] = useState('rotate')
   const [locoAugPasses, setLocoAugPasses] = useState(4)
   const [locoTrainingDataSelection, setLocoTrainingDataSelection] = useState('all')
@@ -768,7 +1008,7 @@ export default function App() {
   const [locoTrainingSeed, setLocoTrainingSeed] = useState(42)
   const [locoTrainingResult, setLocoTrainingResult] = useState(null)
   const [locoTrainingSelectedModel, setLocoTrainingSelectedModel] = useState('catboost')
-  const [locoTrainingMulticlass, setLocoTrainingMulticlass] = useState(false)
+  const [locoTrainingMulticlass, setLocoTrainingMulticlass] = useState(true)
   const [locoTrainingThreshold, setLocoTrainingThreshold] = useState(0.5)
   const [locoTrainingErrorType, setLocoTrainingErrorType] = useState('False Positives')
   const [locoTrainingMcErrorClass, setLocoTrainingMcErrorClass] = useState('all')
@@ -777,10 +1017,19 @@ export default function App() {
   const [locoTrainingCombErrorType, setLocoTrainingCombErrorType] = useState('all')
   const [locoTrainingCombErrorSubtype, setLocoTrainingCombErrorSubtype] = useState('all')
   const [locoTrainingRuns, setLocoTrainingRuns] = useState([])
+  const [locoSavedModels, setLocoSavedModels] = useState([])
+  const [locoTrainingSelectedSavedModelId, setLocoTrainingSelectedSavedModelId] = useState('')
+  const [locoTrainingProgress, setLocoTrainingProgress] = useState(null)
+  const [locoTrainingBatchProgress, setLocoTrainingBatchProgress] = useState({})
   const [locoTrainingPixelMode, setLocoTrainingPixelMode] = useState('circle_only')
   const [locoTrainingPrunePx, setLocoTrainingPrunePx] = useState(1)
   const [locoTrainingUseZoom, setLocoTrainingUseZoom] = useState(true)
   const [locoTrainingUseSourceRadius, setLocoTrainingUseSourceRadius] = useState(true)
+  const [locoTrainingUseCv5, setLocoTrainingUseCv5] = useState(false)
+  const [locoTrainingBatchJobs, setLocoTrainingBatchJobs] = useState([])
+  const [locoTrainingBatchTopK, setLocoTrainingBatchTopK] = useState('all')
+  const [locoTrainingTuneTrials, setLocoTrainingTuneTrials] = useState(12)
+  const [locoTrainingMcCrossingThreshold, setLocoTrainingMcCrossingThreshold] = useState(0.5)
   const [locoTestTool, setLocoTestTool] = useState('circle')
   const [locoTestCircles, setLocoTestCircles] = useState([])
   const [locoTestSelectedId, setLocoTestSelectedId] = useState('')
@@ -790,20 +1039,24 @@ export default function App() {
   const [locoTestOffset, setLocoTestOffset] = useState({ x: 0, y: 0 })
   const [locoTestStageSize, setLocoTestStageSize] = useState({ w: 0, h: 0 })
   const [locoTestIsPanning, setLocoTestIsPanning] = useState(false)
-  const [locoTestTrainingRunId, setLocoTestTrainingRunId] = useState('latest')
+  const [locoTestTrainingRunId, setLocoTestTrainingRunId] = useState('')
   const [locoTestModelId, setLocoTestModelId] = useState('extratrees')
   const [locoTestThreshold, setLocoTestThreshold] = useState(0.5)
   const [locoTestResult, setLocoTestResult] = useState(null)
-  const [locoModelRunId, setLocoModelRunId] = useState('latest')
+  const [locoModelRunId, setLocoModelRunId] = useState('')
   const [locoModelId, setLocoModelId] = useState('extratrees')
   const [locoModelZoom, setLocoModelZoom] = useState(1)
   const [locoModelOffset, setLocoModelOffset] = useState({ x: 0, y: 0 })
   const [locoModelStageSize, setLocoModelStageSize] = useState({ w: 0, h: 0 })
   const [locoModelIsPanning, setLocoModelIsPanning] = useState(false)
+  const [locoModelTool, setLocoModelTool] = useState('pan')
   const [locoModelSelectedId, setLocoModelSelectedId] = useState('')
   const [locoModelResult, setLocoModelResult] = useState(null)
   const [locoModelMeasurement, setLocoModelMeasurement] = useState(null)
-  const [locoModelLayers, setLocoModelLayers] = useState({ mask: true, accepted: true, rejected: false, scores: true, tiles: false })
+  const [locoModelExcludeRects, setLocoModelExcludeRects] = useState([])
+  const [locoModelExcludeActiveIdx, setLocoModelExcludeActiveIdx] = useState(-1)
+  const [locoModelStageState, setLocoModelStageState] = useState(DEFAULT_LOCO_MODEL_STAGE_STATE)
+  const [locoModelLayers, setLocoModelLayers] = useState(DEFAULT_LOCO_MODEL_LAYERS)
   const [locoModelParams, setLocoModelParams] = useState({
     crossing_threshold: 0.5,
     grid_step: 4,
@@ -835,16 +1088,11 @@ export default function App() {
     spatial_final_min_center_distance_factor: 1.0,
   })
   const [locoModelPreset, setLocoModelPreset] = useState('custom')
+  const [locoModelCustomPresets, setLocoModelCustomPresets] = useState([])
+  const [locoModelPresetName, setLocoModelPresetName] = useState('')
   const [validationCases, setValidationCases] = useState([])
   const [validationActiveCaseId, setValidationActiveCaseId] = useState('')
-  const [validationExportInfo, setValidationExportInfo] = useState(null)
-  const [diamCalibration, setDiamCalibration] = useState({
-    enabled: false,
-    known_nm: 100,
-    pixel_distance: 100,
-    nm_per_px: 1.0,
-    unit: 'nm',
-  })
+  const [diamCalibration, setDiamCalibration] = useState(DEFAULT_DIAM_CALIBRATION)
   const [diamHistogramBins, setDiamHistogramBins] = useState(20)
   const [diamHistogramUnit, setDiamHistogramUnit] = useState('px')
 
@@ -1046,29 +1294,117 @@ export default function App() {
 
   async function openModelImagePreview(item) {
     const urls = modelDatasetPreviewUrls(item)
+    const iid = String(item?.image_id || '').trim()
     setModelImagePreview({
       image_name: String(item?.image_name || item?.image_id || ''),
       source_path: String(item?.source_path || ''),
       source_mtime: String(item?.source_mtime || item?.updated_at || ''),
       real: urls.real,
-      scribble: urls.scribble,
+      manual: scribbleThumbsByOrigin[iid]?.['manual'] || '',
+      modelo: scribbleThumbsByOrigin[iid]?.['modelo'] || '',
+      modelo_modificado: scribbleThumbsByOrigin[iid]?.['modelo_modificado'] || '',
       loading: true,
     })
-    const iid = String(item?.image_id || '').trim()
     if (!iid) return
     try {
-      const res = await apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(iid)}`)
+      // Fetch all 3 origins in parallel
+      const [resManual, resModelo, resModeloMod] = await Promise.allSettled([
+        apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(iid)}&origin=manual`),
+        apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(iid)}&origin=modelo`),
+        apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(iid)}&origin=modelo_modificado`),
+      ])
+      const manualB64 = resManual.status === 'fulfilled' ? resManual.value?.scribble_b64 || '' : ''
+      const modeloB64 = resModelo.status === 'fulfilled' ? resModelo.value?.scribble_b64 || '' : ''
+      const modeloModB64 = resModeloMod.status === 'fulfilled' ? resModeloMod.value?.scribble_b64 || '' : ''
+      // Also fetch the real image (no origin)
+      const resReal = await apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(iid)}`)
       setModelImagePreview({
-        image_name: String(res?.image_name || item?.image_name || iid),
-        source_path: String(res?.source_path || item?.source_path || ''),
-        source_mtime: String(res?.source_mtime || item?.source_mtime || item?.updated_at || ''),
-        real: res?.image_b64 ? b64ToDataUrl(res.image_b64, res.image_mime || 'image/png') : urls.real,
-        scribble: res?.scribble_b64 ? b64ToDataUrl(res.scribble_b64, res.scribble_mime || 'image/png') : urls.scribble,
+        image_name: String(resReal?.image_name || item?.image_name || iid),
+        source_path: String(resReal?.source_path || item?.source_path || ''),
+        source_mtime: String(resReal?.source_mtime || item?.source_mtime || item?.updated_at || ''),
+        real: resReal?.image_b64 ? b64ToDataUrl(resReal.image_b64, resReal.image_mime || 'image/png') : urls.real,
+        manual: manualB64 ? b64ToDataUrl(manualB64, 'image/png') : '',
+        modelo: modeloB64 ? b64ToDataUrl(modeloB64, 'image/png') : '',
+        modelo_modificado: modeloModB64 ? b64ToDataUrl(modeloModB64, 'image/png') : '',
         loading: false,
       })
     } catch (err) {
       setModelImagePreview((prev) => prev ? { ...prev, loading: false, error: errMsg(err) } : prev)
       toast('warning', 'Preview dataset', errMsg(err))
+    }
+  }
+
+  async function openMaskPreview(imageId, runId) {
+    if (!runId) return
+    const runs = maskRunListByImage[imageId] || []
+    const idx = runs.findIndex(r => r.run_id === runId)
+    setModelImagePreview({
+      image_name: `Mascara - ${imageId || ''}`,
+      source_path: '',
+      source_mtime: '',
+      real: null,
+      manual: null,
+      modelo: null,
+      modelo_modificado: null,
+      mask: null,
+      maskImageId: imageId,
+      maskIndex: Math.max(idx, 0),
+      maskTotal: runs.length || 1,
+      loading: true,
+    })
+    try {
+      const res = await apiGet(`/api/results/get?run_id=${encodeURIComponent(runId)}`)
+      const maskB64 = res?.payload?.mask_b64 || ''
+      const experimentId = res?.payload?.experiment_id || ''
+      setModelImagePreview(prev => prev ? {
+        ...prev,
+        image_name: `Mascara - ${res?.payload?.image_id || imageId}`,
+        mask: maskB64 ? `data:image/png;base64,${maskB64}` : null,
+        maskExperimentId: experimentId,
+        loading: false,
+      } : prev)
+    } catch (err) {
+      setModelImagePreview(prev => prev ? { ...prev, loading: false, error: errMsg(err) } : prev)
+    }
+  }
+
+  async function maskModalNext() {
+    const prev = modelImagePreview
+    if (!prev?.maskImageId || prev.maskTotal <= 1) return
+    const newIdx = (prev.maskIndex + 1) % prev.maskTotal
+    const runs = maskRunListByImage[prev.maskImageId] || []
+    const runId = runs[newIdx]?.run_id
+    if (!runId) return
+    setMaskIndexByImage(s => ({ ...s, [prev.maskImageId]: newIdx }))
+    fetchMaskThumbForRun(runId)
+    setModelImagePreview(s => s ? { ...s, maskIndex: newIdx, loading: true } : s)
+    try {
+      const res = await apiGet(`/api/results/get?run_id=${encodeURIComponent(runId)}`)
+      const maskB64 = res?.payload?.mask_b64 || ''
+      const experimentId = res?.payload?.experiment_id || ''
+      setModelImagePreview(s => s ? { ...s, mask: maskB64 ? `data:image/png;base64,${maskB64}` : null, maskExperimentId: experimentId, loading: false } : s)
+    } catch (err) {
+      setModelImagePreview(s => s ? { ...s, loading: false } : s)
+    }
+  }
+
+  async function maskModalPrev() {
+    const prev = modelImagePreview
+    if (!prev?.maskImageId || prev.maskTotal <= 1) return
+    const newIdx = prev.maskIndex <= 0 ? prev.maskTotal - 1 : prev.maskIndex - 1
+    const runs = maskRunListByImage[prev.maskImageId] || []
+    const runId = runs[newIdx]?.run_id
+    if (!runId) return
+    setMaskIndexByImage(s => ({ ...s, [prev.maskImageId]: newIdx }))
+    fetchMaskThumbForRun(runId)
+    setModelImagePreview(s => s ? { ...s, maskIndex: newIdx, loading: true } : s)
+    try {
+      const res = await apiGet(`/api/results/get?run_id=${encodeURIComponent(runId)}`)
+      const maskB64 = res?.payload?.mask_b64 || ''
+      const experimentId = res?.payload?.experiment_id || ''
+      setModelImagePreview(s => s ? { ...s, mask: maskB64 ? `data:image/png;base64,${maskB64}` : null, maskExperimentId: experimentId, loading: false } : s)
+    } catch (err) {
+      setModelImagePreview(s => s ? { ...s, loading: false } : s)
     }
   }
 
@@ -1250,6 +1586,8 @@ export default function App() {
     clearScribbles()
     scribbleAutosaveDirtyRef.current = false
     scribbleAutosaveFailCountRef.current = 0
+    setScribbleOrigin('manual')
+    showOriginToast('manual')
     await clearScribbleDraftRemote()
   }
 
@@ -1441,6 +1779,12 @@ export default function App() {
     const snap = captureAnnotSnapshot()
     const didPaint = paintAt(e.clientX, e.clientY)
     if (!didPaint) return
+    // Track scribble origin: if model was applied, mark as modified
+    setScribbleOrigin((prev) => {
+      if (prev === 'modelo') return 'modelo_modificado'
+      if (!prev) return 'manual'
+      return prev
+    })
     if (snap) {
       setAnnotHistory((h) => [...h, snap].slice(-40))
       setAnnotFuture([])
@@ -1452,6 +1796,7 @@ export default function App() {
 
   function onEditorPointerMove(e) {
     if (!imageUrl) return
+    setBrushMousePos({ x: e.clientX, y: e.clientY })
     if (viewerMode === 'pan') {
       if (!panStateRef.current.dragging) return
       const dx = e.clientX - panStateRef.current.x
@@ -1627,7 +1972,7 @@ export default function App() {
     return changed
   }
 
-  async function saveScribbleDraft({ silent = true } = {}) {
+  async function saveScribbleDraft({ silent = true, origin: forcedOrigin = null } = {}) {
     if (!sessionId || !imageId) return false
     const labels = labelsCanvasRef.current
     if (!labels) return false
@@ -1635,10 +1980,20 @@ export default function App() {
     scribbleAutosaveInFlightRef.current = true
     try {
       const scribble = currentScribbleB64()
+      // Allow callers to force a specific origin (e.g. applyModelPredictionAsScribbles)
+      let originToSave = forcedOrigin || scribbleOrigin
+      // Auto-detection: if origin is "modelo" and user modified, switch to "modelo_modificado"
+      // Skip auto-detection when a forced origin is provided
+      if (!forcedOrigin && scribbleOrigin === 'modelo' && scribbleAutosaveDirtyRef.current) {
+        originToSave = 'modelo_modificado'
+        setScribbleOrigin('modelo_modificado')
+        showOriginToast('modelo_modificado')
+      }
       const res = await apiPost('/api/scribble/draft/save', {
         session_id: sessionId,
         image_id: imageId,
         scribble_map_b64: scribble,
+        scribble_origin: originToSave,
       })
       scribbleAutosaveDirtyRef.current = false
       scribbleAutosaveFailCountRef.current = 0
@@ -1646,6 +2001,10 @@ export default function App() {
       if (ts) setDraftInfo(`Autoguardado: ${ts}`)
       else setDraftInfo('Autoguardado')
       if (!silent) toast('success', 'Draft', 'Scribble guardado.')
+      // Refresh the thumbnail cache for the saved origin
+      if (imageId && originToSave) {
+        void fetchScribbleThumbForOrigin(imageId, originToSave)
+      }
       return true
     } catch (err) {
       scribbleAutosaveFailCountRef.current += 1
@@ -1678,11 +2037,36 @@ export default function App() {
     }
   }
 
-  async function loadScribbleDraftForImage(targetImageId) {
+  async function updateScribbleOrigin(imageIdToUpdate, newOrigin) {
+    if (!sessionId || !imageIdToUpdate) return
+    try {
+      await apiPost('/api/scribble/draft/set-origin', {
+        session_id: sessionId,
+        image_id: imageIdToUpdate,
+        origin: newOrigin,
+      })
+      // If this is the currently loaded image, reload the draft for the new origin
+      if (imageIdToUpdate === imageId) {
+        setScribbleOrigin(newOrigin)
+        await loadScribbleDraftForImage(imageIdToUpdate, newOrigin)
+      }
+      await refreshModelDataset()
+      toast('success', 'Origen', `Etiqueta cambiada a: ${newOrigin}`)
+    } catch (err) {
+      toast('warning', 'Origen', `No se pudo actualizar: ${errMsg(err)}`)
+    }
+  }
+
+  async function loadScribbleDraftForImage(targetImageId, targetOrigin) {
     const sid = String(targetImageId || '').trim()
     if (!sessionId || !sid) return
     try {
-      const res = await apiGet(`/api/scribble/draft/load?session_id=${encodeURIComponent(sessionId)}&image_id=${encodeURIComponent(sid)}`)
+      const originParam = String(targetOrigin || scribbleOrigin || '').trim()
+      let url = `/api/scribble/draft/load?session_id=${encodeURIComponent(sessionId)}&image_id=${encodeURIComponent(sid)}`
+      if (originParam) {
+        url += `&origin=${encodeURIComponent(originParam)}`
+      }
+      const res = await apiGet(url)
       const payload = res?.payload || {}
       if (!payload?.found || !payload?.scribble_map_b64) {
         setDraftInfo('')
@@ -1706,7 +2090,7 @@ export default function App() {
     await withLoad('boot', async () => {
       try {
         // Quick health check first — fail fast if backend is not reachable
-        const healthRes = await fetch('http://127.0.0.1:8011/api/health', { signal: AbortSignal.timeout(5000) })
+        const healthRes = await fetch(`${API_BASE}/api/health`, { signal: AbortSignal.timeout(5000) })
         if (!healthRes.ok) {
           throw new Error(`Backend respondio con HTTP ${healthRes.status}`)
         }
@@ -1788,6 +2172,11 @@ export default function App() {
   }, [workspaceTab])
 
   useEffect(() => {
+    if (workspaceTab !== 'locoModel') return
+    fetchLocoModelCustomPresets().catch(() => {})
+  }, [workspaceTab])
+
+  useEffect(() => {
     let cancelled = false
     if (!diamVisualMaskUrl) {
       setDiamMaskLayerUrl('')
@@ -1833,14 +2222,27 @@ export default function App() {
     const stage = editorStageRef.current
     if (!stage || workspaceTab !== 'workbench' || !imageUrl) return undefined
     const onNativeWheel = (ev) => {
-      if (!ev.ctrlKey && !ev.metaKey) return
-      ev.preventDefault()
-      ev.stopPropagation()
-      zoomEditorAt(ev.clientX, ev.clientY, ev.deltaY < 0 ? 1.12 : 1 / 1.12)
+      // Ctrl/Meta+Wheel → zoom
+      if (ev.ctrlKey || ev.metaKey) {
+        ev.preventDefault()
+        ev.stopPropagation()
+        zoomEditorAt(ev.clientX, ev.clientY, ev.deltaY < 0 ? 1.12 : 1 / 1.12)
+        return
+      }
+      // Alt+Wheel → brush size (prevent page scroll)
+      if (ev.altKey) {
+        ev.preventDefault()
+        ev.stopPropagation()
+        const direction = ev.deltaY < 0 ? 1 : -1
+        const current = Math.max(1, Math.round(Number(brushSize) || 1))
+        const step = ev.shiftKey ? 5 : (current < 10 ? 1 : 2)
+        setBrushSize((prev) => clamp((Number(prev) || 16) + direction * step, 1, 120))
+      }
     }
     stage.addEventListener('wheel', onNativeWheel, { passive: false, capture: true })
     return () => stage.removeEventListener('wheel', onNativeWheel, { capture: true })
-  }, [workspaceTab, imageUrl, viewerZoom, viewerOffset, stageSize, imageDims])
+  }, [workspaceTab, imageUrl, viewerZoom, viewerOffset, stageSize, imageDims, brushSize])
+
 
   useEffect(() => {
     const stage = diameterStageRef.current
@@ -1848,23 +2250,6 @@ export default function App() {
     const update = () => {
       const r = stage.getBoundingClientRect()
       setDiamStageSize({ w: r.width, h: r.height })
-    }
-    update()
-    const ro = new ResizeObserver(update)
-    ro.observe(stage)
-    window.addEventListener('resize', update)
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', update)
-    }
-  }, [imageUrl, workspaceTab])
-
-  useEffect(() => {
-    const stage = locoStageRef.current
-    if (!stage) return
-    const update = () => {
-      const r = stage.getBoundingClientRect()
-      setLocoStageSize({ w: r.width, h: r.height })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -1939,19 +2324,6 @@ export default function App() {
     stage.addEventListener('wheel', onNativeWheel, { passive: false, capture: true })
     return () => stage.removeEventListener('wheel', onNativeWheel, { capture: true })
   }, [workspaceTab, imageUrl, diamViewerZoom, diamViewerOffset, diamStageSize, imageDims])
-
-  useEffect(() => {
-    const stage = locoStageRef.current
-    if (!stage || workspaceTab !== 'loco' || !imageUrl) return undefined
-    const onNativeWheel = (ev) => {
-      if (!ev.ctrlKey && !ev.metaKey) return
-      ev.preventDefault()
-      ev.stopPropagation()
-      zoomLocoAt(ev.clientX, ev.clientY, ev.deltaY < 0 ? 1.12 : 1 / 1.12)
-    }
-    stage.addEventListener('wheel', onNativeWheel, { passive: false, capture: true })
-    return () => stage.removeEventListener('wheel', onNativeWheel, { capture: true })
-  }, [workspaceTab, imageUrl, locoViewerZoom, locoViewerOffset, locoStageSize, imageDims])
 
   useEffect(() => {
     const stage = locoDatasetStageRef.current
@@ -2151,59 +2523,101 @@ export default function App() {
       if (k === 'l') {
         ev.preventDefault()
         if (diamMethodId === 'circle_square_mask_diameter') {
-          setDiamViewerMode('circle')
+          switchDiameterViewer('circle', { forceManualCircleSeed: true })
           toast('warning', 'Circle-square', 'Este metodo usa solo circulo manual.')
           return
         }
-        setDiamViewerMode('mark')
+        switchDiameterViewer('mark')
       } else if (k === 'm') {
         ev.preventDefault()
-        setDiamViewerMode('pan')
+        switchDiameterViewer('pan')
       } else if (k === 'c') {
         ev.preventDefault()
-        setDiamMethodPanel('manual')
-        setDiamMethodId('circle_square_mask_diameter')
-        setDiamViewerMode('circle')
-        updateDiamRawParam('circle_square_seed_mode', 'manual_circle')
+        switchDiameterViewer('circle', { methodPanel: 'manual', methodId: 'circle_square_mask_diameter', forceManualCircleSeed: true })
       } else if (k === 'd') {
         ev.preventDefault()
-        setDiamMethodPanel('manual')
-        setDiamMethodId('manual_dual_side_caliper')
-        setDiamViewerMode('manual')
+        switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_dual_side_caliper' })
       } else if (k === 'x') {
         ev.preventDefault()
-        setDiamMethodPanel('manual')
-        setDiamMethodId('manual_line_direct_caliper')
-        setDiamViewerMode('manual')
+        switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_line_direct_caliper' })
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [workspaceTab, diamMethodId, diamViewerMode, diamManualHistory, diamManualFuture, manualMaskLineDraft, manualDirectLineDraft, manualCircleDraft, manualCircles, manualCircleActiveIdx, manualCircleSelected, diamPoints, diamActivePointIdx])
+  }, [workspaceTab, diamMethodId, diamViewerMode, diamManualHistory, diamManualFuture, manualMaskLineDraft, manualDirectLineDraft, manualCircleDraft, manualCircles, manualCircleActiveIdx, manualCircleSelected, manualCircleNextType, diamPoints, diamActivePointIdx])
 
   useEffect(() => {
-    if (workspaceTab !== 'loco') return undefined
+    if (workspaceTab !== 'locoDataset') return undefined
     const onKey = (ev) => {
       const tag = String(document.activeElement?.tagName || '').toUpperCase()
       const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-      const k = String(ev.key || '').toLowerCase()
       if (typing) return
-      if (k === 'm') {
+      const k = String(ev.key || '').toLowerCase()
+      if (k === 'v') {
         ev.preventDefault()
-        setLocoViewerMode('pan')
+        setLocoDatasetDefaultLabel('valid')
+        toast('info', 'Dataset', 'Siguiente: Valid')
+      } else if (k === 'c') {
+        ev.preventDefault()
+        setLocoDatasetDefaultLabel('invalid_crossing')
+        toast('info', 'Dataset', 'Siguiente: Crossing')
+      } else if (k === 'o') {
+        ev.preventDefault()
+        setLocoDatasetDefaultLabel('invalid_other')
+        toast('info', 'Dataset', 'Siguiente: Other')
+      } else if (k === 'delete' || k === 'backspace') {
+        if (locoDatasetSelectedId) {
+          ev.preventDefault()
+          const selId = locoDatasetSelectedId
+          setLocoDatasetCircles(prev => {
+            const toDelete = prev.find(c => String(c.candidate_id) === String(selId))
+            if (toDelete) {
+              const ck = toDelete.label === 'invalid_crossing' ? 'crossing' : toDelete.label === 'invalid_other' ? 'other_valid' : 'valid'
+              setCircleTypeCounts(pc => {
+                const cur = pc[imageId] || { valid: 0, crossing: 0, other_valid: 0, unknown: 0 }
+                return { ...pc, [imageId]: { ...cur, [ck]: Math.max(0, (cur[ck] || 0) - 1) } }
+              })
+              const dk = toDelete.label === 'invalid_crossing' ? 'invalid_crossing' : toDelete.label === 'invalid_other' ? 'invalid_other' : 'valid'
+              setLocoDatasetCircleCounts(pd => {
+                const cur = pd[imageId] || { valid: 0, invalid_crossing: 0, invalid_other: 0 }
+                return { ...pd, [imageId]: { ...cur, [dk]: Math.max(0, (cur[dk] || 0) - 1) } }
+              })
+            }
+            const filtered = prev.filter(c => String(c.candidate_id) !== String(selId))
+            locoDatasetCirclesRef.current = filtered
+            void syncLocoDatasetPoints(filtered)
+            return filtered
+          })
+          setLocoDatasetSelectedId('')
+          setLocoDatasetFeatures([])
+          setLocoDatasetSaveInfo(null)
+        }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [workspaceTab])
+  }, [workspaceTab, locoDatasetSelectedId, locoDatasetDefaultLabel])
 
   useEffect(() => {
-    setLocoProposals([])
-    setLocoFilteredProposals([])
-    setLocoMeasuredResults([])
-    setLocoEvaluation(null)
-    setLocoSelectedProposalId('')
-    setLocoLabStage('proposals')
+    locoDatasetCirclesRef.current = Array.isArray(locoDatasetCircles) ? locoDatasetCircles : []
+  }, [locoDatasetCircles])
+
+  useEffect(() => {
+    locoModelExcludeRectsRef.current = Array.isArray(locoModelExcludeRects) ? locoModelExcludeRects : []
+  }, [locoModelExcludeRects])
+
+  useEffect(() => {
+    setDiamCalibration(DEFAULT_DIAM_CALIBRATION)
+  }, [imageId])
+
+  useEffect(() => {
+    const iid = String(imageId || '').trim()
+    if (!iid) {
+      setLocoModelExcludeRects([])
+      setLocoModelExcludeActiveIdx(-1)
+      return
+    }
+    void loadLocoModelExcludeRects(iid)
   }, [imageId])
 
   useEffect(() => {
@@ -2414,6 +2828,30 @@ export default function App() {
           if (items.some((it) => it.image_id === imageId)) return imageId
           return ''
         })
+        const ctFetches = items
+          .filter((img) => img.mask_thumbnail_b64)
+          .map(async (img) => {
+            try {
+              const res = await apiGet(`/api/diameter-research/points/counts?image_id=${encodeURIComponent(img.image_id)}`)
+              console.log('[DEBUG-COUNTS] Fetch:', img.image_id, '→', res?.payload?.counts)
+              if (res?.payload?.counts) {
+                setCircleTypeCounts(prev => ({ ...prev, [img.image_id]: res.payload.counts }))
+              }
+            } catch {}
+          })
+        void Promise.allSettled(ctFetches)
+        const locoFetches = items
+          .filter((img) => img.mask_thumbnail_b64)
+          .map(async (img) => {
+            try {
+              const res = await apiGet(`/api/diameter-research/loco-dataset/circle-counts?image_id=${encodeURIComponent(img.image_id)}`)
+              const counts = res?.payload?.counts
+              if (counts) {
+                setLocoDatasetCircleCounts(prev => ({ ...prev, [img.image_id]: counts }))
+              }
+            } catch {}
+          })
+        void Promise.allSettled(locoFetches)
       } catch (err) {
         toast('warning', 'Imagenes guardadas', `No se pudo listar biblioteca: ${errMsg(err)}`)
       }
@@ -2476,6 +2914,17 @@ export default function App() {
         toast('warning', 'Carpeta', errMsg(err))
       }
     })
+  }
+
+  async function openLocoAugmentedFolder() {
+    const directDir = String(locoAugInfo?.augmented_dir || '').trim()
+    const datasetDir = String(locoAugDatasetDir || '').trim().replace(/[\\/]+$/, '')
+    const targetDir = directDir || (datasetDir ? `${datasetDir}\\augmented` : '')
+    if (!targetDir) {
+      toast('warning', 'Augmentation', 'No hay carpeta augmented para abrir.')
+      return
+    }
+    await openFolder('custom', targetDir)
   }
 
   async function loadLocalImage(pathToLoad = '') {
@@ -2553,6 +3002,43 @@ export default function App() {
           })
           return valid
         })
+        // Pre-fetch scribble thumbnails for all 3 origins (manual, modelo, modelo_modificado)
+        const ALL_ORIGINS = ['manual', 'modelo', 'modelo_modificado']
+        const fetches = []
+        console.log(`[DBG-FETCH] refreshModelDataset: starting pre-fetch for ${items.length} items`)
+        for (const item of items) {
+          for (const origin of ALL_ORIGINS) {
+            console.log(`[DBG-FETCH] QUEUE: image_id=${item.image_id}, origin=${origin}`)
+            fetches.push(fetchScribbleThumbForOrigin(item.image_id, origin))
+          }
+        }
+        if (fetches.length > 0) {
+          await Promise.allSettled(fetches)
+        }
+        console.log(`[DBG-FETCH] refreshModelDataset: all pre-fetches completed`)
+        // Pre-fetch mask run lists and first thumb for each image
+        const maskFetches = items.map(async (item) => {
+          try {
+            const runRes = await apiGet(`/api/results/list?image_id=${encodeURIComponent(item.image_id)}`)
+            const runItems = Array.isArray(runRes?.payload?.items) ? runRes.payload.items : []
+            if (runItems.length > 0) {
+              setMaskRunListByImage(prev => ({ ...prev, [item.image_id]: runItems }))
+              const firstRunId = runItems[0].run_id
+              await fetchMaskThumbForRun(firstRunId)
+            }
+          } catch {}
+        })
+        await Promise.allSettled(maskFetches)
+        // Pre-fetch circle type counts per image
+        const countFetches = items.map(async (item) => {
+          try {
+            const res = await apiGet(`/api/diameter-research/points/counts?image_id=${encodeURIComponent(item.image_id)}`)
+            if (res?.payload?.counts) {
+              setCircleTypeCounts(prev => ({ ...prev, [item.image_id]: res.payload.counts }))
+            }
+          } catch {}
+        })
+        await Promise.allSettled(countFetches)
       } catch (err) {
         toast('warning', 'Modelos', `No se pudo listar dataset: ${errMsg(err)}`)
       }
@@ -2595,6 +3081,34 @@ export default function App() {
     setSelectedTrainImages({})
   }
 
+  async function deleteSelectedDatasetImages() {
+    if (!trainImageIds.length) return
+    const sid = await ensureSessionReady()
+    if (!sid) return
+    await withLoad('modelsDatasetDelete', async () => {
+      try {
+        const ids = [...trainImageIds]
+        for (const id of ids) {
+          await apiPost('/api/library/delete', { session_id: sid, image_id: id })
+        }
+        if (ids.includes(String(imageId || ''))) {
+          setImageId('')
+          setImageName('')
+          setImageUrl('')
+          resetImageScopedState()
+          resetScribbleDraftState()
+          resetAnnotHistory()
+        }
+        setSelectedTrainImages({})
+        await refreshSavedImages(sid)
+        await refreshModelDataset(sid)
+        toast('success', 'Dataset', `${ids.length} imagen(es) eliminada(s).`)
+      } catch (err) {
+        toast('error', 'Dataset', errMsg(err))
+      }
+    })
+  }
+
   function updateTrainConfig(key, value) {
     setTrainConfig((prev) => ({ ...prev, [key]: value }))
   }
@@ -2608,6 +3122,12 @@ export default function App() {
     }
     await withLoad('modelsTrain', async () => {
       try {
+        // Build origin overrides from selectedGridOrigin for selected images
+        const originOverrides = {}
+        trainImageIds.forEach((imgId) => {
+          const override = selectedGridOrigin[imgId]
+          if (override) originOverrides[imgId] = override
+        })
         const res = await apiPost('/api/assist-models/train', {
           session_id: sid,
           model_name: trainConfig.model_name || '',
@@ -2617,6 +3137,7 @@ export default function App() {
           feature_variant: trainConfig.feature_variant || 'context',
           n_estimators: Number(trainConfig.n_estimators || 120),
           notes: trainConfig.notes || '',
+          origin_overrides: originOverrides,
         })
         const model = res?.model || {}
         setModelTrainSummary(res?.meta || model)
@@ -2664,6 +3185,29 @@ export default function App() {
     })
   }
 
+  function toggleAssistModelSelection(modelId) {
+    const id = String(modelId || '')
+    if (!id) return
+    setSelectedAssistModelIds((prev) => ({ ...prev, [id]: !prev[id] }))
+  }
+
+  async function deleteSelectedAssistModels() {
+    const ids = Object.keys(selectedAssistModelIds).filter((k) => selectedAssistModelIds[k])
+    if (!ids.length) return
+    await withLoad('modelsDelete', async () => {
+      try {
+        for (const mid of ids) {
+          await apiPost('/api/assist-models/delete', { model_id: mid })
+        }
+        setSelectedAssistModelIds({})
+        await refreshAssistModels()
+        toast('success', 'Modelos', `${ids.length} modelo(s) eliminado(s).`)
+      } catch (err) {
+        toast('warning', 'Modelos', errMsg(err))
+      }
+    })
+  }
+
   async function predictWithAssistModel() {
     const sid = await ensureSessionReady()
     if (!sid || !imageId) return
@@ -2692,6 +3236,59 @@ export default function App() {
     })
   }
 
+  async function predictMaskAsExperiment() {
+    const sid = await ensureSessionReady()
+    if (!sid || !imageId) return
+    const mid = String(selectedAssistModelId || defaultAssistModelId || '').trim()
+    if (!mid) {
+      toast('warning', 'Modelo guardado', 'Entrena o selecciona un modelo primero.')
+      return
+    }
+    await withLoad('modelsPredict', async () => {
+      try {
+        const res = await apiPost('/api/assist-models/predict-mask', {
+          session_id: sid,
+          image_id: imageId,
+          model_id: mid,
+          min_confidence: Number(modelMinConfidence || 0.72),
+          include_fiber: !!modelIncludeFiber,
+          include_halo: !!modelIncludeHalo,
+          include_background: !!modelIncludeBackground,
+        })
+        if (res?.ok && res?.run) {
+          // Ensure the experiment is in the experiments list so the run appears in filtered results.
+          // This handles the case where the catalog hasn't been refreshed yet.
+          setExperiments((prev) => {
+            if (prev.some((x) => x.experiment_id === 'assist_model_predict')) return prev
+            return [
+              ...prev,
+              {
+                experiment_id: 'assist_model_predict',
+                group: 'F',
+                display_name: 'Prediccion de mascara (modelo asistente)',
+                description: 'Mascara generada por el modelo asistente entrenado.',
+                default_params: {},
+                implementation_status: 'native',
+                requirements_hint: '',
+              },
+            ]
+          })
+          // Add the run to runCache and set it active so the "Comparador de resultado" panel
+          // shows the overlay immediately (same pattern as runOne / runBatch).
+          const run = res.run
+          setRunCache((prev) => ({ ...prev, [run.run_id]: run }))
+          setActiveRunId(run.run_id)
+          await refreshResults(imageId)
+          toast('success', 'Mascara generada', 'La mascara se agrego a Resultados de experimentos.')
+        } else {
+          toast('warning', 'Modelo guardado', 'No se pudo generar la mascara.')
+        }
+      } catch (err) {
+        toast('warning', 'Modelo guardado', errMsg(err))
+      }
+    })
+  }
+
   async function applyModelPredictionAsScribbles() {
     if (!modelPrediction?.suggestion_b64 || !imageUrl) return
     const snap = captureAnnotSnapshot()
@@ -2702,14 +3299,32 @@ export default function App() {
         setAnnotFuture([])
       }
       markScribbleDirty()
-      await saveScribbleDraft({ silent: true })
+      setScribbleOrigin('modelo')
+      showOriginToast('modelo')
+      // Force origin='modelo' so the auto-detection logic in saveScribbleDraft
+      // does NOT upgrade it to 'modelo_modificado'
+      await saveScribbleDraft({ silent: true, origin: 'modelo' })
+      // Refresh thumbnail cache for "modelo" origin
+      if (imageId) {
+        void fetchScribbleThumbForOrigin(imageId, 'modelo')
+      }
+      setModelPrediction(null)
+      // Refresh the dataset table so scribble_origins_available and thumbnails update
+      void refreshModelDataset()
       toast('success', 'Scribbles agregados', `${changed} px agregados desde el modelo.`)
     } catch (err) {
       toast('warning', 'Modelo guardado', errMsg(err))
     }
   }
 
+  function clearModelPrediction() {
+    setModelPrediction(null)
+  }
+
   function resetImageScopedState() {
+    console.log('[DEBUG-LOAD] resetImageScopedState called, clearing locoDatasetCircles')
+    void clearLocoModelBackendState()
+    clearLocoDatasetLocalState()
     setRuns([])
     setRunCache({})
     setActiveRunId('')
@@ -2742,7 +3357,6 @@ export default function App() {
     setManualCircleConsumed(false)
     setValidationCases([])
     setValidationActiveCaseId('')
-    setValidationExportInfo(null)
     setValidationForm({
       case_id: '',
       category: 'borde_limpio',
@@ -2764,19 +3378,26 @@ export default function App() {
     setLocoModelResult(null)
     setLocoModelMeasurement(null)
     setLocoModelSelectedId('')
+    setLocoModelExcludeRects([])
+    setLocoModelExcludeActiveIdx(-1)
+    setLocoModelTool('pan')
+    setLocoModelStageState(DEFAULT_LOCO_MODEL_STAGE_STATE)
   }
 
-  async function loadSavedImage(imageIdToLoad) {
+  async function loadSavedImage(imageIdToLoad, targetOrigin) {
+    console.log('[DEBUG-LOAD2] loadSavedImage called with:', imageIdToLoad)
     const sid = await ensureSessionReady()
     const target = String(imageIdToLoad || '').trim()
-    if (!sid || !target) return
+    if (!sid || !target) { console.log('[DEBUG-LOAD2] loadSavedImage EARLY RETURN sid=', sid, 'target=', target); return }
     await flushDraftIfNeeded()
     await withLoad('libraryLoad', async () => {
       try {
+        const originParam = String(targetOrigin || scribbleOrigin || '').trim()
         const res = await apiPost('/api/library/load', {
           session_id: sid,
           image_id: target,
           restore_scribbles: true,
+          scribble_origin: originParam,
         })
         const p = res.payload || {}
         const ok = await applyImageB64(p.image_b64, String(p.image_mime || 'image/png'))
@@ -2793,11 +3414,20 @@ export default function App() {
           const ts = String(draft?.meta?.updated_at || '')
           setDraftInfo(ts ? `Draft restaurado: ${ts}` : 'Draft restaurado')
         }
+        // Restore scribble origin from draft meta
+        const draftMeta = draft?.meta || {}
+        setScribbleOrigin(String(draftMeta.scribble_origin || ''))
         await refreshSavedImages(sid)
         await refreshResults(loadedImageId)
         await loadDiameterPoints(sid, loadedImageId, { silent: true })
+        await loadLocoDatasetCirclesFromBackend(loadedImageId)
         await refreshDiameterRuns(loadedImageId, { silent: true })
         await refreshValidationCases(loadedImageId, { silent: true })
+        const runs = maskRunListByImage[loadedImageId]
+        const idx = maskIndexByImage[loadedImageId]
+        if (runs?.length && idx != null && runs[idx]?.run_id) {
+          setDiamPriorRunId(runs[idx].run_id)
+        }
         toast('success', 'Imagen guardada', `Cargada: ${loadedImageId}`)
       } catch (err) {
         toast('error', 'Imagen guardada', errMsg(err))
@@ -2811,7 +3441,7 @@ export default function App() {
     await withLoad('listResults', async () => {
       try {
         const res = await apiGet(`/api/results/list?image_id=${encodeURIComponent(iid)}`)
-        const items = (Array.isArray(res?.payload?.items) ? res.payload.items : []).filter((x) => Boolean(experimentsById[String(x?.experiment_id || '')]))
+        const items = Array.isArray(res?.payload?.items) ? res.payload.items : []
         setRuns(items)
         setActiveRunId((prev) => (items.some((r) => r.run_id === prev) ? prev : (items[0]?.run_id || '')))
       } catch (err) {
@@ -2941,18 +3571,6 @@ export default function App() {
     return { scale, x, y }
   }
 
-  function getLocoRenderMetrics() {
-    const { w, h } = imageDims
-    if (w < 1 || h < 1 || locoStageSize.w < 1 || locoStageSize.h < 1) return null
-    const fit = Math.min(locoStageSize.w / w, locoStageSize.h / h)
-    const scale = Math.max(0.0001, fit * locoViewerZoom)
-    const contentW = w * scale
-    const contentH = h * scale
-    const x = (locoStageSize.w - contentW) * 0.5 + locoViewerOffset.x
-    const y = (locoStageSize.h - contentH) * 0.5 + locoViewerOffset.y
-    return { scale, x, y }
-  }
-
   function getLocoDatasetRenderMetrics() {
     const { w, h } = imageDims
     if (w < 1 || h < 1 || locoDatasetStageSize.w < 1 || locoDatasetStageSize.h < 1) return null
@@ -3006,23 +3624,6 @@ export default function App() {
     }
   }
 
-  function locoPointFromClient(clientX, clientY) {
-    const stage = locoStageRef.current
-    if (!stage || !imageDims.w || !imageDims.h) return null
-    const metrics = getLocoRenderMetrics()
-    if (!metrics) return null
-    const rect = stage.getBoundingClientRect()
-    if (rect.width < 1 || rect.height < 1) return null
-    const x = (clientX - rect.left - metrics.x) / metrics.scale
-    const y = (clientY - rect.top - metrics.y) / metrics.scale
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-    if (x < 0 || y < 0 || x >= imageDims.w || y >= imageDims.h) return null
-    return {
-      x: clamp(x, 0, Math.max(0, imageDims.w - 1)),
-      y: clamp(y, 0, Math.max(0, imageDims.h - 1)),
-    }
-  }
-
   function locoDatasetPointFromClient(clientX, clientY) {
     const stage = locoDatasetStageRef.current
     if (!stage || !imageDims.w || !imageDims.h) return null
@@ -3057,6 +3658,29 @@ export default function App() {
     }
   }
 
+  function locoModelPointFromClient(clientX, clientY, { clampToImage = false } = {}) {
+    const stage = locoModelStageRef.current
+    if (!stage || !imageDims.w || !imageDims.h) return null
+    const metrics = getLocoModelRenderMetrics()
+    if (!metrics) return null
+    const rect = stage.getBoundingClientRect()
+    if (rect.width < 1 || rect.height < 1) return null
+    const x = (clientX - rect.left - metrics.x) / metrics.scale
+    const y = (clientY - rect.top - metrics.y) / metrics.scale
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    if (clampToImage) {
+      return {
+        x: clamp(x, 0, Math.max(0, imageDims.w - 1)),
+        y: clamp(y, 0, Math.max(0, imageDims.h - 1)),
+      }
+    }
+    if (x < 0 || y < 0 || x >= imageDims.w || y >= imageDims.h) return null
+    return {
+      x: clamp(x, 0, Math.max(0, imageDims.w - 1)),
+      y: clamp(y, 0, Math.max(0, imageDims.h - 1)),
+    }
+  }
+
   function zoomDiameterBy(factor) {
     if (!imageUrl) return
     setDiamViewerZoom((prev) => clamp(prev * factor, 0.25, 12))
@@ -3080,32 +3704,6 @@ export default function App() {
     setDiamViewerOffset({
       x: clientX - rect.left - imgX * nextScale - (diamStageSize.w - imageDims.w * nextScale) * 0.5,
       y: clientY - rect.top - imgY * nextScale - (diamStageSize.h - imageDims.h * nextScale) * 0.5,
-    })
-  }
-
-  function zoomLocoBy(factor) {
-    if (!imageUrl) return
-    setLocoViewerZoom((prev) => clamp(prev * factor, 0.25, 12))
-  }
-
-  function zoomLocoAt(clientX, clientY, factor) {
-    if (!imageUrl) return
-    const stage = locoStageRef.current
-    const metrics = getLocoRenderMetrics()
-    if (!stage || !metrics) {
-      zoomLocoBy(factor)
-      return
-    }
-    const rect = stage.getBoundingClientRect()
-    const imgX = (clientX - rect.left - metrics.x) / metrics.scale
-    const imgY = (clientY - rect.top - metrics.y) / metrics.scale
-    const nextZoom = clamp(locoViewerZoom * factor, 0.25, 12)
-    const fit = Math.min(locoStageSize.w / Math.max(1, imageDims.w), locoStageSize.h / Math.max(1, imageDims.h))
-    const nextScale = Math.max(0.0001, fit * nextZoom)
-    setLocoViewerZoom(nextZoom)
-    setLocoViewerOffset({
-      x: clientX - rect.left - imgX * nextScale - (locoStageSize.w - imageDims.w * nextScale) * 0.5,
-      y: clientY - rect.top - imgY * nextScale - (locoStageSize.h - imageDims.h * nextScale) * 0.5,
     })
   }
 
@@ -3195,11 +3793,20 @@ export default function App() {
     setDiamViewerOffset({ x: 0, y: 0 })
   }
 
-  function resetLocoView() {
-    setLocoViewerMode('center')
-    setLocoViewerZoom(1)
-    setLocoViewerOffset({ x: 0, y: 0 })
-    setLocoIsPanning(false)
+  function clearDiameterInteractionRefs() {
+    diamPanRef.current = { dragging: false, x: 0, y: 0 }
+    diamLineDragRef.current = { dragging: false, mode: '', kind: '', lineIndex: -1, start: null, geometry_id: '' }
+    diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '' }
+    diamCalibrationDragRef.current = { dragging: false, start: null }
+    setDiamIsPanning(false)
+  }
+
+  function switchDiameterViewer(nextMode, { methodId = '', methodPanel = '', forceManualCircleSeed = false } = {}) {
+    clearDiameterInteractionRefs()
+    if (methodPanel) setDiamMethodPanel(methodPanel)
+    if (methodId) setDiamMethodId(methodId)
+    setDiamViewerMode(nextMode)
+    if (forceManualCircleSeed) updateDiamRawParam('circle_square_seed_mode', 'manual_circle')
   }
 
   function resetLocoDatasetView() {
@@ -3215,6 +3822,7 @@ export default function App() {
   }
 
   function resetLocoModelView() {
+    setLocoModelTool('pan')
     setLocoModelZoom(1)
     setLocoModelOffset({ x: 0, y: 0 })
     setLocoModelIsPanning(false)
@@ -3295,6 +3903,22 @@ export default function App() {
   }
 
   function clearDiameterManualCircle({ remember = true } = {}) {
+    const removedCircles = manualCircleActiveIdx >= 0 && manualCircleActiveIdx < manualCircles.length
+      ? [manualCircles[manualCircleActiveIdx]].filter(Boolean)
+      : manualCircles.filter(Boolean)
+    const removalPoints = removedCircles
+      .map((circle) => {
+        const center = circle?.center
+        if (!center) return null
+        return { x: Number(center.x), y: Number(center.y) }
+      })
+      .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y))
+    const nextPoints = removalPoints.length
+      ? diamPoints.filter((point) => !removalPoints.some((removed) => samePoint(point, removed, 2.0)))
+      : diamPoints
+    const nextActivePointIdx = nextPoints.length
+      ? clamp(diamActivePointIdx, 0, nextPoints.length - 1)
+      : -1
     if (remember) rememberDiameterManualState()
     setManualCircleDraft(null)
     setManualCircles((prev) => (
@@ -3305,7 +3929,17 @@ export default function App() {
     setManualCircleActiveIdx(-1)
     setManualCircleSelected(false)
     setManualCircleConsumed(true)
+    setDiamPoints(nextPoints)
+    setDiamActivePointIdx(nextActivePointIdx)
     setDiamParams((prev) => ({ ...prev, circle_square_seed_mode: 'manual_circle' }))
+    pruneDiameterResultsForRemovals(removedCircles.map((circle) => ({
+      geometryId: String(circle?.geometry_id || ''),
+      point: circle?.center || null,
+    })))
+    void syncDiameterPointsToServer({
+      points: nextPoints,
+      active: nextActivePointIdx,
+    })
   }
 
   function consumeDiameterManualCircle() {
@@ -3455,6 +4089,21 @@ export default function App() {
 
   function onDiameterPointerDown(e) {
     if (!imageUrl) return
+    if (diamViewerMode === 'calibration') {
+      const p = diameterPointFromClient(e.clientX, e.clientY)
+      if (!p) return
+      diamCalibrationDragRef.current = { dragging: true, start: p }
+      updateDiamCalibration((prev) => ({
+        ...prev,
+        line_x1: p.x,
+        line_y1: p.y,
+        line_x2: p.x,
+        line_y2: p.y,
+      }))
+      e.currentTarget.setPointerCapture?.(e.pointerId)
+      e.preventDefault()
+      return
+    }
     if (diamViewerMode === 'manual') {
       const p = diameterPointFromClient(e.clientX, e.clientY)
       if (!p) return
@@ -3489,6 +4138,21 @@ export default function App() {
   }
 
   function onDiameterPointerMove(e) {
+    if (diamCalibrationDragRef.current.dragging) {
+      const p = diameterPointFromClient(e.clientX, e.clientY)
+      const start = diamCalibrationDragRef.current.start
+      if (p && start) {
+        updateDiamCalibration((prev) => ({
+          ...prev,
+          line_x1: start.x,
+          line_y1: start.y,
+          line_x2: p.x,
+          line_y2: start.y,
+        }))
+      }
+      e.preventDefault()
+      return
+    }
     if (diamLineDragRef.current.dragging) {
       const p = diameterPointFromClient(e.clientX, e.clientY)
       const drag = diamLineDragRef.current
@@ -3535,6 +4199,26 @@ export default function App() {
   }
 
   function onDiameterPointerUp(e) {
+    if (diamCalibrationDragRef.current.dragging) {
+      const start = diamCalibrationDragRef.current.start
+      const p = diameterPointFromClient(e.clientX, e.clientY)
+      diamCalibrationDragRef.current = { dragging: false, start: null }
+      try {
+        e.currentTarget.releasePointerCapture?.(e.pointerId)
+      } catch {}
+      if (start && p) {
+        updateDiamCalibration((prev) => ({
+          ...prev,
+          line_x1: start.x,
+          line_y1: start.y,
+          line_x2: p.x,
+          line_y2: start.y,
+        }))
+      }
+      setDiamViewerMode('pan')
+      e.preventDefault()
+      return
+    }
     if (diamLineDragRef.current.dragging) {
       const drag = diamLineDragRef.current
       const p = diameterPointFromClient(e.clientX, e.clientY)
@@ -3574,6 +4258,7 @@ export default function App() {
           radius: Number(draft.radius),
           geometry_id: String(draft.geometry_id || geometryId || makeManualGeometryId('circle', draft.center, draft.center)),
           consumed: false,
+          type: manualCircleNextType,
         }
         setManualCircleDraft(circle)
         setManualCircleConsumed(false)
@@ -3630,6 +4315,74 @@ export default function App() {
     const points = Array.isArray(payload?.points) ? payload.points : []
     setDiamPoints(points)
     setDiamActivePointIdx(Number.isFinite(Number(payload?.active_point_idx)) ? Number(payload.active_point_idx) : -1)
+  }
+
+  function buildDetectorSeedCircles(candidates) {
+    return (Array.isArray(candidates) ? candidates : [])
+      .map((candidate, idx) => {
+        const x = Number(candidate?.center_x ?? candidate?.x ?? candidate?.center_xy?.[0])
+        const y = Number(candidate?.center_y ?? candidate?.y ?? candidate?.center_xy?.[1])
+        const radius = Math.max(1, Number(candidate?.radius_px ?? candidate?.radius ?? candidate?.r ?? 0))
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(radius)) return null
+        const center = { x, y }
+        return {
+          center,
+          radius,
+          geometry_id: String(candidate?.candidate_id || makeManualGeometryId('circle', center, center)),
+          consumed: false,
+          type: 'valid',
+          source: 'loco_detector',
+          detector_candidate_id: String(candidate?.candidate_id || `detector_circle_${idx}`),
+          valid_score: Number(candidate?.valid_score ?? candidate?.score ?? 0),
+        }
+      })
+      .filter(Boolean)
+  }
+
+  async function replaceDiameterCirclesFromDetector(candidates) {
+    const circles = buildDetectorSeedCircles(candidates)
+    if (!circles.length) {
+      throw new Error('No hay circulos validos para transferir.')
+    }
+    const points = circles.map((circle) => ({
+      x: Number(circle.center.x),
+      y: Number(circle.center.y),
+    }))
+    const firstCircle = circles[0] || null
+    rememberDiameterManualState()
+    setDiamOverlayUrl('')
+    setDiamResults([])
+    setDiamResultsMode('run')
+    setDiamReviewTarget(null)
+    setPointReviewOpen(false)
+    setDiamActiveRunId('')
+    setDiamReportInfo(null)
+    setManualMaskLineDraft({ start: null, end: null })
+    setManualDirectLineDraft({ start: null, end: null })
+    setManualMaskLines([])
+    setManualDirectLines([])
+    setManualMaskLineActiveIdx(-1)
+    setManualDirectLineActiveIdx(-1)
+    setManualCircleDraft(firstCircle)
+    setManualCircles(circles)
+    setManualCircleActiveIdx(0)
+    setManualCircleSelected(true)
+    setManualCircleConsumed(false)
+    setDiamPoints(points)
+    setDiamActivePointIdx(0)
+    setDiamMethodPanel('manual')
+    setDiamMethodId('circle_square_mask_diameter')
+    setDiamViewerMode('circle')
+    setDiamParams((prev) => ({
+      ...prev,
+      circle_square_seed_mode: 'manual_circle',
+      circle_square_seed_radius_px: Math.max(1, Number(firstCircle?.radius) || Number(prev.circle_square_seed_radius_px) || 1),
+    }))
+    await syncDiameterPointsToServer({
+      points,
+      active: 0,
+    })
+    return circles
   }
 
   async function syncDiameterPointsToServer(snapshot) {
@@ -3707,6 +4460,12 @@ export default function App() {
 
   async function updateDiameterPoints(action, extra = {}, options = {}) {
     if (!sessionId || !imageId) return
+    const removedPoint = String(action) === 'remove_active' && diamActivePointIdx >= 0 && diamActivePointIdx < diamPoints.length
+      ? {
+          x: Number(diamPoints[diamActivePointIdx]?.x),
+          y: Number(diamPoints[diamActivePointIdx]?.y),
+        }
+      : null
     if (options.remember !== false && ['add', 'remove_last', 'remove_active', 'clear', 'replace'].includes(String(action))) {
       rememberDiameterManualState()
     }
@@ -3715,9 +4474,13 @@ export default function App() {
         const res = await apiPost('/api/diameter-research/points/update', {
           session_id: sessionId,
           action,
+          circle_type: action === 'add' ? manualCircleNextType : '',
           ...extra,
         })
         syncDiameterPointPayload(res)
+        if (removedPoint && Number.isFinite(removedPoint.x) && Number.isFinite(removedPoint.y)) {
+          pruneDiameterResultsForRemovals({ point: removedPoint })
+        }
       } catch (err) {
         toast('error', 'Diameter points', errMsg(err))
       }
@@ -3759,6 +4522,7 @@ export default function App() {
     if (diamViewerMode === 'pan') return
     if (diamViewerMode === 'circle') return
     if (diamViewerMode === 'manual') return
+    if (diamViewerMode === 'calibration') return
     const p = diameterPointFromClient(e.clientX, e.clientY)
     if (!p) return
     void updateDiameterPoints('add', { x: p.x, y: p.y })
@@ -3834,36 +4598,6 @@ export default function App() {
     setLocoParams((prev) => ({ ...prev, [key]: value }))
   }
 
-  function updateLocoLabParam(key, value, integer = false) {
-    const raw = integer ? Math.round(Number(value)) : Number(value)
-    if (!Number.isFinite(raw)) return
-    setLocoLabParams((prev) => ({ ...prev, [key]: raw }))
-  }
-
-  function updateLocoLabRawParam(key, value) {
-    setLocoLabParams((prev) => ({ ...prev, [key]: value }))
-  }
-
-  function toggleLocoLayer(key) {
-    setLocoLayerVisibility((prev) => ({ ...prev, [key]: !prev[key] }))
-  }
-
-  function locoLabPayloadParams() {
-    return {
-      grid_stride_px: Math.max(3, Math.round(Number(locoLabParams.grid_stride_px) || 18)),
-      radius_min_px: Math.max(1, Number(locoLabParams.radius_min_px) || 3),
-      radius_max_px: Math.max(1, Number(locoLabParams.radius_max_px) || 18),
-      radius_step_px: Math.max(0.5, Number(locoLabParams.radius_step_px) || 2),
-      mask_required_ratio: clamp(Number(locoLabParams.mask_required_ratio), 0, 1),
-      max_candidates: Math.max(1, Math.round(Number(locoLabParams.max_candidates) || 600)),
-      min_score: clamp(Number(locoLabParams.min_score), 0, 1),
-      max_intersections: Math.max(1, Math.round(Number(locoLabParams.max_intersections) || 12)),
-      circle_samples: Math.max(32, Math.round(Number(locoLabParams.circle_samples) || 128)),
-      require_four_cuts: Boolean(locoLabParams.require_four_cuts),
-      measure_limit: Math.max(1, Math.round(Number(locoLabParams.measure_limit) || 120)),
-    }
-  }
-
   function activeLocoPoint() {
     if (locoActivePointIdx >= 0 && locoActivePointIdx < locoPoints.length) return locoPoints[locoActivePointIdx]
     return locoPoints[0] || null
@@ -3891,85 +4625,6 @@ export default function App() {
       loco_aggregation: String(locoParams.loco_aggregation || 'median'),
       loco_seed_radii_by_point: seedMap,
     }
-  }
-
-  function onLocoStageClick(e) {
-    if (!imageUrl || locoViewerMode === 'pan' || locoViewerMode === 'circle') return
-    const p = locoPointFromClient(e.clientX, e.clientY)
-    if (!p) return
-    const next = [...locoPoints, { x: p.x, y: p.y }]
-    setLocoGeometry(next, next.length - 1, null)
-    setLocoStep(1)
-  }
-
-  function onLocoPointerDown(e) {
-    if (!imageUrl) return
-    if (locoViewerMode === 'circle') {
-      const p = locoPointFromClient(e.clientX, e.clientY)
-      if (!p) return
-      rememberLocoState()
-      locoCircleDragRef.current = { dragging: true, center: p }
-      setLocoCircleDraft({ center: p, radius: 1 })
-      e.currentTarget.setPointerCapture?.(e.pointerId)
-      e.preventDefault()
-      return
-    }
-    if (locoViewerMode !== 'pan') return
-    locoPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
-    setLocoIsPanning(true)
-    e.currentTarget.setPointerCapture?.(e.pointerId)
-    e.preventDefault()
-  }
-
-  function onLocoPointerMove(e) {
-    if (locoCircleDragRef.current.dragging) {
-      const p = locoPointFromClient(e.clientX, e.clientY)
-      const center = locoCircleDragRef.current.center
-      if (!p || !center) return
-      const dx = Number(p.x) - Number(center.x)
-      const dy = Number(p.y) - Number(center.y)
-      const radius = clamp(Math.sqrt(dx * dx + dy * dy), 1, Math.max(2, Number(locoParams.loco_max_radius_px) || 26))
-      setLocoCircleDraft({ center, radius: Number(radius.toFixed(1)) })
-      e.preventDefault()
-      return
-    }
-    if (!locoPanRef.current.dragging) return
-    const dx = e.clientX - locoPanRef.current.x
-    const dy = e.clientY - locoPanRef.current.y
-    locoPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
-    setLocoViewerOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
-    e.preventDefault()
-  }
-
-  function onLocoPointerUp(e) {
-    if (locoCircleDragRef.current.dragging) {
-      const draft = locoCircleDraft
-      locoCircleDragRef.current = { dragging: false, center: null }
-      e.currentTarget.releasePointerCapture?.(e.pointerId)
-      if (draft?.center) {
-        const nextPoint = { x: Number(draft.center.x), y: Number(draft.center.y), seed_radius_px: Math.max(1, Number(draft.radius) || 1) }
-        setLocoPoints((prev) => {
-          const existingIdx = prev.findIndex((p) => Math.hypot(Number(p.x) - nextPoint.x, Number(p.y) - nextPoint.y) <= 2)
-          if (existingIdx >= 0) {
-            const next = prev.map((p, idx) => (idx === existingIdx ? { ...p, seed_radius_px: nextPoint.seed_radius_px } : p))
-            setLocoActivePointIdx(existingIdx)
-            return next
-          }
-          setLocoActivePointIdx(prev.length)
-          return [...prev, nextPoint]
-        })
-        setLocoCircleDraft({ center: draft.center, radius: nextPoint.seed_radius_px })
-        setLocoPreview(null)
-        setLocoCandidateIndex(-1)
-        setLocoStep(2)
-      }
-      e.preventDefault()
-      return
-    }
-    if (!locoPanRef.current.dragging) return
-    locoPanRef.current = { dragging: false, x: 0, y: 0 }
-    setLocoIsPanning(false)
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
   }
 
   function onLocoDatasetPointerDown(e) {
@@ -4018,12 +4673,13 @@ export default function App() {
       updateLocoDatasetCircle(drag.id, {
         center_x: clamp(Number(drag.circle.center_x) + dx, 0, Math.max(0, imageDims.w - 1)),
         center_y: clamp(Number(drag.circle.center_y) + dy, 0, Math.max(0, imageDims.h - 1)),
-      })
+      }, { sync: false })
       e.preventDefault()
     }
   }
 
   function onLocoDatasetPointerUp(e) {
+    console.log('[DEBUG-V2] onLocoDatasetPointerUp FIRED, mode:', locoDatasetDragRef.current?.mode, 'imageId:', imageId)
     if (locoDatasetPanRef.current.dragging) {
       locoDatasetPanRef.current = { dragging: false, x: 0, y: 0 }
       setLocoDatasetIsPanning(false)
@@ -4044,10 +4700,30 @@ export default function App() {
           radius_px: Number(draft.radius_px),
           label: locoDatasetDefaultLabel,
         }
-        setLocoDatasetCircles((prev) => [...prev, next])
+        setLocoDatasetCircles((prev) => {
+          const updated = [...prev, next]
+          locoDatasetCirclesRef.current = updated
+          void syncLocoDatasetPoints(updated)
+          return updated
+        })
         setLocoDatasetSelectedId(candidate_id)
         setLocoDatasetFeatures([])
         setLocoDatasetSaveInfo(null)
+        setCircleTypeCounts(prev => ({
+          ...prev,
+          [imageId]: {
+            valid: (prev[imageId]?.valid || 0) + (locoDatasetDefaultLabel === 'valid' ? 1 : 0),
+            crossing: (prev[imageId]?.crossing || 0) + (locoDatasetDefaultLabel === 'invalid_crossing' ? 1 : 0),
+            other_valid: (prev[imageId]?.other_valid || 0) + (locoDatasetDefaultLabel === 'invalid_other' ? 1 : 0),
+            unknown: prev[imageId]?.unknown || 0,
+          },
+        }))
+        setLocoDatasetCircleCounts(prev => {
+          const cur = prev[imageId] || { valid: 0, invalid_crossing: 0, invalid_other: 0 }
+          const key = locoDatasetDefaultLabel === 'invalid_crossing' ? 'invalid_crossing' : locoDatasetDefaultLabel === 'invalid_other' ? 'invalid_other' : 'valid'
+          return { ...prev, [imageId]: { ...cur, [key]: (cur[key] || 0) + 1 } }
+        })
+        console.log('[DEBUG-CIRCLE] Synced circles:', imageId)
       }
       setLocoDatasetDraftCircle(null)
       e.preventDefault()
@@ -4055,6 +4731,7 @@ export default function App() {
     }
     if (drag.mode === 'move') {
       locoDatasetDragRef.current = { mode: '', id: '', start: null, circle: null }
+      void syncLocoDatasetPoints(locoDatasetCirclesRef.current)
       e.currentTarget.releasePointerCapture?.(e.pointerId)
       e.preventDefault()
     }
@@ -4177,6 +4854,22 @@ export default function App() {
 
   function onLocoModelPointerDown(e) {
     if (!imageUrl) return
+    if (locoModelTool === 'exclude') {
+      const p = locoModelPointFromClient(e.clientX, e.clientY)
+      if (!p) return
+      const nextIndex = locoModelExcludeRectsRef.current.length
+      const nextRect = normalizeRectFromPoints(p, p)
+      setLocoModelExcludeRects((prev) => {
+        const next = [...prev, nextRect]
+        locoModelExcludeRectsRef.current = next
+        return next
+      })
+      setLocoModelExcludeActiveIdx(nextIndex)
+      locoModelExcludeDragRef.current = { dragging: true, start: p, index: nextIndex, rect: nextRect }
+      e.currentTarget.setPointerCapture?.(e.pointerId)
+      e.preventDefault()
+      return
+    }
     locoModelPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
     setLocoModelIsPanning(true)
     e.currentTarget.setPointerCapture?.(e.pointerId)
@@ -4184,6 +4877,20 @@ export default function App() {
   }
 
   function onLocoModelPointerMove(e) {
+    if (locoModelTool === 'exclude') {
+      if (!locoModelExcludeDragRef.current.dragging || !locoModelExcludeDragRef.current.start) return
+      const p = locoModelPointFromClient(e.clientX, e.clientY, { clampToImage: true })
+      if (!p) return
+      const nextRect = normalizeRectFromPoints(locoModelExcludeDragRef.current.start, p)
+      locoModelExcludeDragRef.current = { ...locoModelExcludeDragRef.current, rect: nextRect }
+      setLocoModelExcludeRects((prev) => {
+        const next = prev.map((rect, idx) => (idx === locoModelExcludeDragRef.current.index ? nextRect : rect))
+        locoModelExcludeRectsRef.current = next
+        return next
+      })
+      e.preventDefault()
+      return
+    }
     if (!locoModelPanRef.current.dragging) return
     const dx = e.clientX - locoModelPanRef.current.x
     const dy = e.clientY - locoModelPanRef.current.y
@@ -4193,6 +4900,13 @@ export default function App() {
   }
 
   function onLocoModelPointerUp(e) {
+    if (locoModelTool === 'exclude' && locoModelExcludeDragRef.current.dragging) {
+      const normalized = normalizeExcludeRectList(locoModelExcludeRectsRef.current)
+      locoModelExcludeDragRef.current = { dragging: false, start: null, index: -1 }
+      void applyLocoModelExcludeRects(normalized, { persist: true, clearResult: true })
+      e.currentTarget.releasePointerCapture?.(e.pointerId)
+      return
+    }
     if (!locoModelPanRef.current.dragging) return
     locoModelPanRef.current = { dragging: false, x: 0, y: 0 }
     setLocoModelIsPanning(false)
@@ -4281,157 +4995,6 @@ export default function App() {
     setLocoPreview(null)
     setLocoCandidateIndex(-1)
     setLocoStep(0)
-    setLocoViewerMode('center')
-  }
-
-  function clearLocoLab() {
-    setLocoProposals([])
-    setLocoFilteredProposals([])
-    setLocoMeasuredResults([])
-    setLocoEvaluation(null)
-    setLocoSelectedProposalId('')
-    setLocoLabStage('proposals')
-  }
-
-  async function generateLocoLabProposals() {
-    if (!sessionId || !imageId || !imageUrl) {
-      toast('warning', 'LOCO Lab', 'Carga una imagen primero.')
-      return
-    }
-    await flushDraftIfNeeded()
-    const scribble = currentScribbleB64()
-    const params = locoLabPayloadParams()
-    await withLoad('locoLab', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/loco/proposals', {
-          session_id: sessionId,
-          image_id: imageId,
-          source_mode: 'prior_mask',
-          prior_run_id: diamPriorRunId,
-          method: locoProposalMethod,
-          params,
-          scribble_map_b64: scribble,
-        })
-        const proposals = Array.isArray(res?.proposals) ? res.proposals : []
-        setLocoProposals(proposals)
-        setLocoFilteredProposals(proposals)
-        setLocoMeasuredResults([])
-        setLocoEvaluation(res?.summary || null)
-        setLocoSelectedProposalId(proposals[0]?.proposal_id || '')
-        setLocoLabStage('filters')
-        toast(proposals.length ? 'success' : 'warning', 'LOCO Lab', `${proposals.length} propuestas generadas.`)
-      } catch (err) {
-        toast('error', 'LOCO Lab', errMsg(err))
-      }
-    })
-  }
-
-  async function filterLocoLabProposals() {
-    const proposals = locoFilteredProposals.length ? locoFilteredProposals : locoProposals
-    if (!sessionId || !imageId || !proposals.length) {
-      toast('warning', 'LOCO Lab', 'Primero genera propuestas.')
-      return
-    }
-    await withLoad('locoLab', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/loco/filter', {
-          session_id: sessionId,
-          image_id: imageId,
-          proposals,
-          params: locoLabPayloadParams(),
-        })
-        const next = Array.isArray(res?.proposals) ? res.proposals : []
-        setLocoFilteredProposals(next)
-        setLocoEvaluation(res?.summary || null)
-        setLocoSelectedProposalId((prev) => prev || next[0]?.proposal_id || '')
-        setLocoLabStage('circles')
-        const accepted = next.filter((p) => p.status === 'accepted').length
-        toast(accepted ? 'success' : 'warning', 'LOCO Lab', `${accepted}/${next.length} propuestas aceptadas.`)
-      } catch (err) {
-        toast('error', 'LOCO Lab', errMsg(err))
-      }
-    })
-  }
-
-  async function measureLocoLabProposals() {
-    const proposals = locoFilteredProposals.length ? locoFilteredProposals : locoProposals
-    if (!sessionId || !imageId || !proposals.length) {
-      toast('warning', 'LOCO Lab', 'No hay circulos para medir.')
-      return
-    }
-    await flushDraftIfNeeded()
-    const scribble = currentScribbleB64()
-    await withLoad('locoLab', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/loco/measure', {
-          session_id: sessionId,
-          image_id: imageId,
-          prior_run_id: diamPriorRunId,
-          proposals,
-          params: locoLabPayloadParams(),
-          scribble_map_b64: scribble,
-        })
-        const measurements = Array.isArray(res?.measurements) ? res.measurements : []
-        setLocoMeasuredResults(measurements)
-        setLocoEvaluation(res?.summary || null)
-        setLocoLabStage('measure')
-        const ok = measurements.filter((m) => m.status === 'ok').length
-        toast(ok ? 'success' : 'warning', 'LOCO Lab', `${ok}/${measurements.length} mediciones validas.`)
-      } catch (err) {
-        toast('error', 'LOCO Lab', errMsg(err))
-      }
-    })
-  }
-
-  async function evaluateLocoLab() {
-    if (!sessionId || !imageId) return
-    await withLoad('locoLab', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/loco/evaluate', {
-          session_id: sessionId,
-          image_id: imageId,
-          proposals: locoFilteredProposals.length ? locoFilteredProposals : locoProposals,
-          measurements: locoMeasuredResults,
-          params: locoLabPayloadParams(),
-        })
-        setLocoEvaluation(res?.summary || null)
-        setLocoLabStage('evaluate')
-      } catch (err) {
-        toast('error', 'LOCO Lab', errMsg(err))
-      }
-    })
-  }
-
-  async function saveLocoLabRun() {
-    const proposals = locoFilteredProposals.length ? locoFilteredProposals : locoProposals
-    if (!sessionId || !imageId || (!proposals.length && !locoMeasuredResults.length)) {
-      toast('warning', 'LOCO Lab', 'No hay resultados LOCO para guardar.')
-      return
-    }
-    await flushDraftIfNeeded()
-    const scribble = currentScribbleB64()
-    await withLoad('locoLab', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/loco/run', {
-          session_id: sessionId,
-          image_id: imageId,
-          prior_run_id: diamPriorRunId,
-          proposals,
-          measurements: locoMeasuredResults,
-          params: locoLabPayloadParams(),
-          scribble_map_b64: scribble,
-        })
-        setDiamRunCache((prev) => ({ ...prev, [res.run_id]: res }))
-        setDiamActiveRunId(res.run_id)
-        setDiamResults(Array.isArray(res?.results) ? res.results : [])
-        setDiamResultsMode('run')
-        if (res?.overlay_b64) setDiamOverlayUrl(b64ToDataUrl(res.overlay_b64, res.overlay_mime || 'image/png'))
-        await refreshDiameterRuns(imageId, { silent: true })
-        toast('success', 'LOCO Lab', 'Run LOCO guardado.')
-      } catch (err) {
-        toast('error', 'LOCO Lab', errMsg(err))
-      }
-    })
   }
 
   function locoDatasetPayloadCandidates() {
@@ -4448,26 +5011,129 @@ export default function App() {
     return locoDatasetCircles.find((c) => String(c.candidate_id) === String(locoDatasetSelectedId)) || null
   }
 
-  function updateLocoDatasetCircle(id, patch) {
-    setLocoDatasetCircles((prev) => prev.map((c) => (String(c.candidate_id) === String(id) ? { ...c, ...patch } : c)))
+  function setLocoDatasetCachedCounts(targetImageId, circles) {
+    const iid = String(targetImageId || imageId || '').trim()
+    if (!iid) return
+    const datasetCounts = { valid: 0, invalid_crossing: 0, invalid_other: 0 }
+    const pointCounts = { valid: 0, crossing: 0, other_valid: 0, unknown: 0 }
+    ;(Array.isArray(circles) ? circles : []).forEach((circle) => {
+      const label = String(circle?.label || '')
+      if (label === 'invalid_crossing') {
+        datasetCounts.invalid_crossing += 1
+        pointCounts.crossing += 1
+      } else if (label === 'invalid_other') {
+        datasetCounts.invalid_other += 1
+        pointCounts.other_valid += 1
+      } else if (label === 'valid') {
+        datasetCounts.valid += 1
+        pointCounts.valid += 1
+      } else {
+        pointCounts.unknown += 1
+      }
+    })
+    setLocoDatasetCircleCounts((prev) => ({ ...prev, [iid]: datasetCounts }))
+    setCircleTypeCounts((prev) => ({ ...prev, [iid]: pointCounts }))
+  }
+
+  function clearLocoDatasetLocalState(targetImageId = '', options = {}) {
+    locoDatasetCirclesRef.current = []
+    setLocoDatasetCircles([])
+    setLocoDatasetSelectedId('')
+    setLocoDatasetDraftCircle(null)
+    setLocoDatasetFeatures([])
+    setLocoDatasetSaveInfo(null)
+    if (options.resetCounts) setLocoDatasetCachedCounts(targetImageId, [])
+  }
+
+  function updateLocoDatasetCircle(id, patch, options = {}) {
+    const current = Array.isArray(locoDatasetCirclesRef.current) ? locoDatasetCirclesRef.current : []
+    const next = current.map((c) => (String(c.candidate_id) === String(id) ? { ...c, ...patch } : c))
+    locoDatasetCirclesRef.current = next
+    setLocoDatasetCircles(next)
     if (['valid', 'invalid_crossing', 'invalid_other'].includes(patch?.label)) setLocoDatasetDefaultLabel(patch.label)
+    setLocoDatasetCachedCounts(imageId, next)
+    if (options.sync !== false) void syncLocoDatasetPoints(next)
     setLocoDatasetFeatures([])
     setLocoDatasetSaveInfo(null)
   }
 
   function deleteSelectedLocoDatasetCircle() {
     if (!locoDatasetSelectedId) return
-    setLocoDatasetCircles((prev) => prev.filter((c) => String(c.candidate_id) !== String(locoDatasetSelectedId)))
+    const selId = locoDatasetSelectedId
+    setLocoDatasetCircles((prev) => {
+      const toDelete = prev.find((c) => String(c.candidate_id) === String(selId))
+      if (toDelete) {
+        const ck = toDelete.label === 'invalid_crossing' ? 'crossing' : toDelete.label === 'invalid_other' ? 'other_valid' : 'valid'
+        setCircleTypeCounts(pc => {
+          const cur = pc[imageId] || { valid: 0, crossing: 0, other_valid: 0, unknown: 0 }
+          return { ...pc, [imageId]: { ...cur, [ck]: Math.max(0, (cur[ck] || 0) - 1) } }
+        })
+        const dk = toDelete.label === 'invalid_crossing' ? 'invalid_crossing' : toDelete.label === 'invalid_other' ? 'invalid_other' : 'valid'
+        setLocoDatasetCircleCounts(pd => {
+          const cur = pd[imageId] || { valid: 0, invalid_crossing: 0, invalid_other: 0 }
+          return { ...pd, [imageId]: { ...cur, [dk]: Math.max(0, (cur[dk] || 0) - 1) } }
+        })
+      }
+      const filtered = prev.filter((c) => String(c.candidate_id) !== String(selId))
+      locoDatasetCirclesRef.current = filtered
+      void syncLocoDatasetPoints(filtered)
+      return filtered
+    })
     setLocoDatasetSelectedId('')
     setLocoDatasetFeatures([])
     setLocoDatasetSaveInfo(null)
   }
 
-  function clearLocoDatasetCanvas() {
-    setLocoDatasetCircles([])
-    setLocoDatasetSelectedId('')
-    setLocoDatasetDraftCircle(null)
-    setLocoDatasetFeatures([])
+  async function loadLocoDatasetCirclesFromBackend(targetImageId) {
+    const iid = String(targetImageId || imageId || '').trim()
+    if (!iid) return
+    try {
+      const res = await apiGet(`/api/diameter-research/points/list?image_id=${encodeURIComponent(iid)}`)
+      const points = Array.isArray(res?.payload?.points) ? res.payload.points : []
+      console.log('[DEBUG-LOAD3] Loaded', points.length, 'circles for image', iid)
+      if (!points.length) {
+        clearLocoDatasetLocalState(iid, { resetCounts: true })
+        return
+      }
+      const circles = points.map((p, idx) => ({
+        candidate_id: `loaded_${iid}_${idx}`,
+        center_x: Number(p.x),
+        center_y: Number(p.y),
+        radius_px: Number(p.radius_px || 0),
+        label: p.circle_type === 'crossing' ? 'invalid_crossing' : p.circle_type === 'other_valid' ? 'invalid_other' : 'valid',
+      }))
+      locoDatasetCirclesRef.current = circles
+      setLocoDatasetCircles(circles)
+      setLocoDatasetSelectedId('')
+      setLocoDatasetDraftCircle(null)
+      setLocoDatasetFeatures([])
+      setLocoDatasetSaveInfo(null)
+      setLocoDatasetCachedCounts(iid, circles)
+    } catch {}
+  }
+
+  async function syncLocoDatasetPoints(circles, targetImageId = '') {
+    const iid = String(targetImageId || imageId || '').trim()
+    console.log('[DEBUG-SYNC] syncLocoDatasetPoints: imageId=', iid, 'circles=', (circles || []).length)
+    if (!iid) { console.warn('[DEBUG-SYNC] Skipping sync: no imageId'); return }
+    const list = Array.isArray(circles) ? circles : locoDatasetCirclesRef.current
+    try {
+      const pts = list.map(c => ({
+        x: c.center_x,
+        y: c.center_y,
+        circle_type: c.label === 'invalid_crossing' ? 'crossing' : c.label === 'invalid_other' ? 'other_valid' : 'valid',
+        radius_px: c.radius_px,
+      }))
+      const res = await apiPost('/api/diameter-research/points/sync', { image_id: iid, points: pts })
+      console.log('[DEBUG-SYNC] Sync OK:', res?.ok)
+    } catch (err) {
+      console.error('[DEBUG-SYNC] Failed to sync:', err?.message, err?.status, err)
+    }
+  }
+
+  async function clearLocoDatasetCanvas() {
+    clearLocoDatasetLocalState(imageId, { resetCounts: true })
+    await syncLocoDatasetPoints([], imageId)
   }
 
   async function previewLocoDatasetFeatures() {
@@ -4545,6 +5211,8 @@ export default function App() {
     return labels[type] || type
   }
 
+  const locoAugVisibleBlockTypes = ['rotate', 'flip', 'morphology', 'perturb', 'resize_method', 'resolution']
+
   function locoAugPayload(overrides = {}) {
     return {
       items: Object.keys(locoAugSelected).filter((id) => locoAugSelected[id]),
@@ -4562,6 +5230,7 @@ export default function App() {
       try {
         const res = await apiGet('/api/diameter-research/loco-dataset/augment/items')
         const items = Array.isArray(res?.items) ? res.items : []
+        setLocoAugDatasetDir(String(res?.dataset_dir || '').trim())
         setLocoAugItems(items)
         setLocoAugCounts(res?.counts || { total: items.length, valid: 0, invalid: 0, augmented_total: 0, augmented_valid: 0, augmented_invalid: 0 })
         setLocoAugSelected((prev) => {
@@ -4677,43 +5346,790 @@ export default function App() {
     })
   }
 
+  const LOCO_TRAINING_MODEL_IDS = ['catboost', 'lightgbm', 'xgboost']
+  const LOCO_TRAINING_MODEL_LABELS = {
+    catboost: 'CatBoost',
+    lightgbm: 'LightGBM',
+    xgboost: 'XGBoost',
+    extratrees: 'ExtraTrees',
+  }
+
+  function syncLocoTrainingRuns(items) {
+    const list = Array.isArray(items) ? items : []
+    setLocoTrainingRuns(list)
+  }
+
+  async function fetchLocoTrainingRunsList() {
+    const res = await apiGet('/api/diameter-research/loco-training/runs')
+    const items = Array.isArray(res?.items) ? res.items : []
+    syncLocoTrainingRuns(items)
+    return items
+  }
+
+  async function fetchLocoSavedModelsList() {
+    const res = await apiGet('/api/diameter-research/loco-training/saved-models')
+    const items = Array.isArray(res?.items) ? res.items : []
+    setLocoSavedModels(items)
+    setLocoTrainingSelectedSavedModelId((prev) => (prev && items.some((m) => m.saved_model_id === prev) ? prev : (items[0]?.saved_model_id || '')))
+    setLocoTestTrainingRunId((prev) => (prev && items.some((m) => m.saved_model_id === prev) ? prev : (items[0]?.saved_model_id || '')))
+    setLocoModelRunId((prev) => (prev && items.some((m) => m.saved_model_id === prev) ? prev : (items[0]?.saved_model_id || '')))
+    setLocoTestModelId((prev) => {
+      const current = items.find((m) => m.saved_model_id === locoTestTrainingRunId)
+      if (current?.model_id) return current.model_id
+      return items[0]?.model_id || prev
+    })
+    setLocoModelId((prev) => {
+      const current = items.find((m) => m.saved_model_id === locoModelRunId)
+      if (current?.model_id) return current.model_id
+      return items[0]?.model_id || prev
+    })
+    return items
+  }
+
+  async function fetchLocoModelCustomPresets() {
+    const res = await apiGet('/api/diameter-research/loco-models/presets')
+    const items = Array.isArray(res?.items) ? res.items : []
+    setLocoModelCustomPresets(items)
+    return items
+  }
+
+  async function loadLocoModelExcludeRects(customImageId = '') {
+    const iid = String(customImageId || imageId || '').trim()
+    if (!iid) {
+      setLocoModelExcludeRects([])
+      setLocoModelExcludeActiveIdx(-1)
+      return []
+    }
+    await withLoad('locoModelExclude', async () => {
+      try {
+        const res = await apiGet(`/api/diameter-research/loco-models/exclusions?image_id=${encodeURIComponent(iid)}`)
+        const rects = normalizeExcludeRectList(res?.rects)
+        setLocoModelExcludeRects(rects)
+        setLocoModelExcludeActiveIdx(-1)
+      } catch (err) {
+        setLocoModelExcludeRects([])
+        setLocoModelExcludeActiveIdx(-1)
+        toast('warning', 'LOCO Detector', `No se pudieron cargar exclusiones: ${errMsg(err)}`)
+      }
+    })
+    return normalizeExcludeRectList(locoModelExcludeRects)
+  }
+
+  async function saveLocoModelExcludeRects(nextRects, customImageId = '') {
+    const iid = String(customImageId || imageId || '').trim()
+    if (!iid) return
+    const rects = normalizeExcludeRectList(nextRects)
+    await withLoad('locoModelExclude', async () => {
+      try {
+        if (!rects.length) {
+          await apiPost('/api/diameter-research/loco-models/exclusions/delete', { image_id: iid })
+        } else {
+          await apiPost('/api/diameter-research/loco-models/exclusions/save', { image_id: iid, rects })
+        }
+      } catch (err) {
+        toast('error', 'LOCO Detector', `No se pudieron guardar exclusiones: ${errMsg(err)}`)
+      }
+    })
+  }
+
+  function invalidateLocoModelBaseForExclusions({ clearResult = true } = {}) {
+    void clearLocoModelBackendState()
+    resetLocoModelStageState({ clearResult })
+  }
+
+  async function applyLocoModelExcludeRects(nextRects, { persist = true, clearResult = true } = {}) {
+    const normalized = normalizeExcludeRectList(nextRects)
+    const changed = !rectListRoughEqual(locoModelExcludeRects, normalized)
+    locoModelExcludeRectsRef.current = normalized
+    setLocoModelExcludeRects(normalized)
+    if (locoModelExcludeActiveIdx >= normalized.length) {
+      setLocoModelExcludeActiveIdx(normalized.length - 1)
+    }
+    if (changed) {
+      invalidateLocoModelBaseForExclusions({ clearResult })
+    }
+    if (persist && changed) {
+      await saveLocoModelExcludeRects(normalized)
+    }
+  }
+
+  function buildLocoModelDetectPayload(extra = {}) {
+    return {
+      session_id: sessionId,
+      image_id: imageId,
+      source_mode: 'prior_mask',
+      prior_run_id: diamPriorRunId,
+      model_run_id: locoModelRunId,
+      model_id: locoModelId,
+      patch_size: 64,
+      grid_step: Number(locoModelParams.grid_step || 6),
+      min_radius: Number(locoModelParams.min_radius || 8),
+      max_radius: Number(locoModelParams.max_radius || 32),
+      radius_step: Number(locoModelParams.radius_step || 2),
+      threshold: Number(locoModelParams.threshold || 0.8),
+      use_radius_thresholds: !!locoModelParams.use_radius_thresholds,
+      small_threshold: Number(locoModelParams.small_threshold || 0.8),
+      medium_threshold: Number(locoModelParams.medium_threshold || 0.8),
+      large_threshold: Number(locoModelParams.large_threshold || 0.9),
+      small_radius_limit: Number(locoModelParams.small_radius_limit || 14),
+      large_radius_limit: Number(locoModelParams.large_radius_limit || 24),
+      use_nms: !!locoModelParams.use_nms,
+      nms_mode: locoModelParams.nms_mode || 'distance_radius',
+      nms_distance_factor: Number(locoModelParams.nms_distance_factor || 0.5),
+      radius_similarity_factor: Number(locoModelParams.radius_similarity_factor || 0.4),
+      circle_iou_threshold: Number(locoModelParams.circle_iou_threshold || 0.4),
+      candidate_sampling_mode: locoModelParams.candidate_sampling_mode || 'row_major',
+      candidate_random_seed: Number(locoModelParams.candidate_random_seed || 42),
+      tile_size_px: Number(locoModelParams.tile_size_px || 128),
+      candidate_max_per_tile: Number(locoModelParams.candidate_max_per_tile || 0),
+      return_rejected: !!locoModelParams.return_rejected,
+      max_candidates: Number(locoModelParams.max_candidates || 8000),
+      max_return_rejected: Number(locoModelParams.max_return_rejected || 5000),
+      crossing_threshold: Number(locoModelParams.crossing_threshold || 0.5),
+      use_spatial_final_filter: !!locoModelParams.use_spatial_final_filter,
+      spatial_final_tile_px: Number(locoModelParams.spatial_final_tile_px || 128),
+      spatial_final_max_per_tile: Number(locoModelParams.spatial_final_max_per_tile || 3),
+      spatial_final_min_center_distance_factor: Number(locoModelParams.spatial_final_min_center_distance_factor || 1.0),
+      exclude_rects: normalizeExcludeRectList(locoModelExcludeRects),
+      scribble_map_b64: '',
+      ...extra,
+    }
+  }
+
+  function currentLocoModelBaseSnapshot() {
+    return {
+      session_id: sessionId || '',
+      image_id: imageId || '',
+      prior_run_id: diamPriorRunId || '',
+      model_run_id: locoModelRunId || '',
+      model_id: locoModelId || '',
+      candidate_sampling_mode: locoModelParams.candidate_sampling_mode || 'row_major',
+      grid_step: Number(locoModelParams.grid_step || 0),
+      max_candidates: Number(locoModelParams.max_candidates || 0),
+      candidate_max_per_tile: Number(locoModelParams.candidate_max_per_tile || 0),
+      tile_size_px: Number(locoModelParams.tile_size_px || 0),
+      candidate_random_seed: Number(locoModelParams.candidate_random_seed || 0),
+      min_radius: Number(locoModelParams.min_radius || 0),
+      max_radius: Number(locoModelParams.max_radius || 0),
+      radius_step: Number(locoModelParams.radius_step || 0),
+      exclude_rects: normalizeExcludeRectList(locoModelExcludeRects),
+    }
+  }
+
+  function currentLocoModelThresholdSnapshot() {
+    return {
+      use_radius_thresholds: !!locoModelParams.use_radius_thresholds,
+      threshold: Number(locoModelParams.threshold || 0),
+      small_threshold: Number(locoModelParams.small_threshold || 0),
+      medium_threshold: Number(locoModelParams.medium_threshold || 0),
+      large_threshold: Number(locoModelParams.large_threshold || 0),
+      small_radius_limit: Number(locoModelParams.small_radius_limit || 0),
+      large_radius_limit: Number(locoModelParams.large_radius_limit || 0),
+      crossing_threshold: Number(locoModelParams.crossing_threshold || 0),
+      return_rejected: !!locoModelParams.return_rejected,
+      max_return_rejected: Number(locoModelParams.max_return_rejected || 0),
+    }
+  }
+
+  function currentLocoModelNmsSnapshot() {
+    return {
+      use_nms: !!locoModelParams.use_nms,
+      nms_mode: locoModelParams.nms_mode || 'distance_radius',
+      circle_iou_threshold: Number(locoModelParams.circle_iou_threshold || 0),
+      nms_distance_factor: Number(locoModelParams.nms_distance_factor || 0),
+      radius_similarity_factor: Number(locoModelParams.radius_similarity_factor || 0),
+    }
+  }
+
+  function currentLocoModelSpatialSnapshot() {
+    return {
+      use_spatial_final_filter: !!locoModelParams.use_spatial_final_filter,
+      spatial_final_tile_px: Number(locoModelParams.spatial_final_tile_px || 0),
+      spatial_final_max_per_tile: Number(locoModelParams.spatial_final_max_per_tile || 0),
+      spatial_final_min_center_distance_factor: Number(locoModelParams.spatial_final_min_center_distance_factor || 0),
+    }
+  }
+
+  function locoModelStageIsStale(stageState, stageName = '') {
+    const stage = String(stageName || stageState?.resultStage || '').trim()
+    if (!stage) return false
+    if (stage === 'base') return !!stageState?.baseDirty
+    if (stage === 'threshold') return !!stageState?.thresholdDirty
+    if (stage === 'nms') return !!stageState?.thresholdDirty || !!stageState?.nmsDirty
+    if (stage === 'spatial') return !!stageState?.thresholdDirty || !!stageState?.nmsDirty || !!stageState?.spatialDirty
+    return false
+  }
+
+  function resetLocoModelStageState({ clearResult = true } = {}) {
+    setLocoModelStageState(DEFAULT_LOCO_MODEL_STAGE_STATE)
+    if (clearResult) {
+      setLocoModelResult(null)
+      setLocoModelMeasurement(null)
+      setLocoModelSelectedId('')
+    }
+  }
+
+  async function clearLocoModelBackendState(detectorStateId = '') {
+    const sid = String(sessionId || '').trim()
+    const iid = String(imageId || '').trim()
+    const stateId = String(detectorStateId || locoModelStageState.detector_state_id || '').trim()
+    if (!sid || !iid || !stateId) return
+    try {
+      await apiPost('/api/diameter-research/loco-models/clear-state', {
+        session_id: sid,
+        image_id: iid,
+        detector_state_id: stateId,
+      })
+    } catch {
+      // Estado solo en memoria del backend. Si no existe, no bloquea la UI.
+    }
+  }
+
+  function syncLocoModelStageStateFromResponse(res) {
+    const summary = res?.summary || {}
+    const nextBase = currentLocoModelBaseSnapshot()
+    const nextThreshold = currentLocoModelThresholdSnapshot()
+    const nextNms = currentLocoModelNmsSnapshot()
+    const nextSpatial = currentLocoModelSpatialSnapshot()
+    const nextState = {
+      detector_state_id: String(summary.detector_state_id || res?.detector_state_id || ''),
+      baseReady: !!summary.base_ready,
+      thresholdReady: !!summary.threshold_ready,
+      nmsReady: !!summary.nms_ready,
+      spatialReady: !!summary.spatial_ready,
+      baseDirty: !!summary.base_dirty,
+      thresholdDirty: !!summary.threshold_dirty,
+      nmsDirty: !!summary.nms_dirty,
+      spatialDirty: !!summary.spatial_dirty,
+      resultStage: String(summary.result_stage || ''),
+      resultStale: !!summary.result_stale,
+      baseSnapshot: nextBase,
+      thresholdSnapshot: nextThreshold,
+      nmsSnapshot: nextNms,
+      spatialSnapshot: nextSpatial,
+    }
+    nextState.resultStale = locoModelStageIsStale(nextState, nextState.resultStage) || !!summary.result_stale
+    setLocoModelStageState(nextState)
+  }
+
+  function markLocoModelStageDirty(level) {
+    setLocoModelStageState((prev) => {
+      if (level === 'base') {
+        const next = {
+          ...DEFAULT_LOCO_MODEL_STAGE_STATE,
+          baseDirty: true,
+          thresholdDirty: true,
+          nmsDirty: true,
+          spatialDirty: true,
+        }
+        next.resultStage = String(prev?.resultStage || '')
+        next.resultStale = locoModelStageIsStale(next, next.resultStage)
+        return next
+      }
+      if (level === 'threshold') {
+        const next = {
+          ...prev,
+          thresholdDirty: true,
+          nmsDirty: true,
+          spatialDirty: true,
+        }
+        next.resultStale = locoModelStageIsStale(next, next.resultStage)
+        return next
+      }
+      if (level === 'nms') {
+        const next = {
+          ...prev,
+          nmsDirty: true,
+          spatialDirty: true,
+        }
+        next.resultStale = locoModelStageIsStale(next, next.resultStage)
+        return next
+      }
+      if (level === 'spatial') {
+        const next = {
+          ...prev,
+          spatialDirty: true,
+        }
+        next.resultStale = locoModelStageIsStale(next, next.resultStage)
+        return next
+      }
+      return prev
+    })
+  }
+
+  function updateLocoModelLayer(key, value) {
+    setLocoModelLayers((prev) => ({ ...prev, [key]: value }))
+    setLocoModelPreset('custom')
+  }
+
+  function updateDiamCalibration(nextValue) {
+    setDiamCalibration((prev) => normalizeDiamCalibrationState(typeof nextValue === 'function' ? nextValue(prev) : nextValue))
+  }
+
+  function buildLocoTrainingPayload({ forceMulticlass = false } = {}) {
+    return {
+      data_selection: locoTrainingDataSelection,
+      test_size: Number(locoTrainingTestSize || 0.2),
+      random_seed: Number(locoTrainingSeed || 42),
+      pixel_mode: locoTrainingPixelMode,
+      circle_prune_px: Number(locoTrainingPrunePx || 0),
+      patch_size: 64,
+      uses_patch_zoom_factor: !!locoTrainingUseZoom,
+      uses_source_radius_px: !!locoTrainingUseSourceRadius,
+      cv5_enabled: !!locoTrainingUseCv5,
+      models: [...LOCO_TRAINING_MODEL_IDS],
+      multiclass_model: forceMulticlass ? true : !!locoTrainingMulticlass,
+    }
+  }
+
+  function makeLocoTrainingProgressId(prefix = 'train') {
+    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  function progressPercent(progress) {
+    const total = Number(progress?.total_steps || 0)
+    const done = Number(progress?.completed_steps || 0)
+    if (!total) return 0
+    return clamp(Math.round((done / total) * 100), 0, 100)
+  }
+
+  function formatLocoTrainingStage(stage) {
+    const raw = String(stage || '').trim()
+    if (!raw) return 'training'
+    const map = {
+      preparando: 'preparando',
+      holdout_binario: 'holdout binario',
+      cv5_binario: 'cv5 binario',
+      holdout_multiclase: 'holdout multiclase',
+      cv5_multiclase: 'cv5 multiclase',
+      optuna_preparando: 'optuna preparando',
+      optuna_trial: 'optuna trial',
+      completado: 'completado',
+    }
+    return map[raw] || raw.replaceAll('_', ' ')
+  }
+
+  function convertDiameterValue(diameterPx, unit = diamHistogramUnit) {
+    const d = Number(diameterPx || 0)
+    if (!Number.isFinite(d)) return null
+    if (!diamCalibration.enabled || unit === 'px') return d
+    const factor = Number(diamCalibration.unit_per_px || 0)
+    if (!(factor > 0)) return d
+    if (diamCalibration.unit === 'nm') {
+      return unit === 'um' ? (d * factor) / 1000 : d * factor
+    }
+    return unit === 'nm' ? d * factor * 1000 : d * factor
+  }
+
+  function exportDiameterValuesCsv() {
+    const okRows = diamResults.filter((r) => r.status === 'ok' && r.diameter_px != null)
+    if (!okRows.length) {
+      toast('warning', 'Distribucion de Diametros', 'No hay diametros para exportar.')
+      return
+    }
+    const unit = diamHistogramUnit
+    const headers = [
+      'point_index',
+      'x',
+      'y',
+      'status',
+      'method_id',
+      'diameter_px',
+      `diameter_${unit}`,
+    ]
+    const lines = [headers.join(',')]
+    okRows.forEach((row) => {
+      const converted = convertDiameterValue(row.diameter_px, unit)
+      lines.push([
+        escapeCsvCell(Number(row.point_index ?? 0) + 1),
+        escapeCsvCell(Number(row.x ?? 0).toFixed(4)),
+        escapeCsvCell(Number(row.y ?? 0).toFixed(4)),
+        escapeCsvCell(row.status || ''),
+        escapeCsvCell(row.method_id || diamMethodId || ''),
+        escapeCsvCell(Number(row.diameter_px).toFixed(6)),
+        escapeCsvCell(converted == null ? '' : Number(converted).toFixed(6)),
+      ].join(','))
+    })
+    const csv = lines.join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `diametros_por_circulo_${imageId || 'unknown'}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function pollLocoTrainingProgress(progressId, applyProgress) {
+    let cancelled = false
+    const tick = async () => {
+      if (cancelled || !progressId) return
+      try {
+        const res = await apiGet(`/api/diameter-research/loco-training/progress/${encodeURIComponent(progressId)}`)
+        if (!cancelled) applyProgress(res?.progress || null)
+      } catch {}
+    }
+    tick()
+    const timer = window.setInterval(tick, 700)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }
+
+  function createLocoTrainingBatchJob() {
+    const config = buildLocoTrainingPayload({ forceMulticlass: true })
+    const jobToken = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+    return {
+      job_id: `train_batch_${jobToken}`,
+      config,
+      status: 'pending',
+      error: '',
+      response: null,
+      created_at: new Date().toISOString(),
+    }
+  }
+
+  function locoTrainingMacroF1(row) {
+    if (!row || row.status !== 'ok') return null
+    const values = [row.f1_valid, row.f1_crossing, row.f1_other].map((v) => Number(v))
+    if (!values.every((v) => Number.isFinite(v))) return null
+    return values.reduce((acc, val) => acc + val, 0) / values.length
+  }
+
+  function buildLocoTrainingBatchRows(jobs) {
+    const rows = []
+    ;(Array.isArray(jobs) ? jobs : []).forEach((job, jobIdx) => {
+      const response = job?.response
+      const metrics = Array.isArray(response?.multiclass_metrics_summary) ? response.multiclass_metrics_summary : []
+      const metricsByModel = {}
+      metrics.forEach((row) => {
+        if (row?.model_id) metricsByModel[row.model_id] = row
+      })
+      const models = Array.isArray(job?.config?.models) && job.config.models.length ? job.config.models : LOCO_TRAINING_MODEL_IDS
+      models.forEach((modelId, modelIdx) => {
+        const row = metricsByModel[modelId] || null
+        const rowStatus = row?.status || (job.status === 'done' ? 'missing' : job.status || 'pending')
+        rows.push({
+          key: `${job.job_id}_${response?.run_id || 'no_run'}_${modelId || modelIdx}`,
+          job_id: job.job_id,
+          job_index: jobIdx + 1,
+          model: row?.model || LOCO_TRAINING_MODEL_LABELS[modelId] || modelId || '-',
+          model_id: modelId || row?.model_id || '',
+          status: rowStatus,
+          reason: row?.reason || job.error || (job.status === 'done' && !row ? 'Sin metricas multiclase en la respuesta.' : ''),
+          macro_f1: locoTrainingMacroF1(row),
+          accuracy: row?.status === 'ok' ? Number(row.accuracy) : null,
+          f1_valid: row?.status === 'ok' ? Number(row.f1_valid) : null,
+          f1_crossing: row?.status === 'ok' ? Number(row.f1_crossing) : null,
+          f1_other: row?.status === 'ok' ? Number(row.f1_other) : null,
+          data_selection: job.config?.data_selection || '',
+          test_size: job.config?.test_size,
+          circle_prune_px: job.config?.circle_prune_px,
+          random_seed: job.config?.random_seed,
+          uses_patch_zoom_factor: !!job.config?.uses_patch_zoom_factor,
+          uses_source_radius_px: !!job.config?.uses_source_radius_px,
+          run_id: response?.run_id || '',
+          runResponse: response,
+          job_type: job.job_type || job.config?.job_type || '',
+          trial_index: response?.tuning_trial?.trial_index ?? job.config?.trial_index ?? null,
+          trial_count: response?.tuning_trial?.trial_count ?? job.config?.trial_count ?? null,
+          source_macro_f1: response?.tuning_trial?.source_macro_f1 ?? job.config?.source_macro_f1 ?? null,
+          model_params: response?.tuning_trial?.model_params ?? job.config?.model_params ?? null,
+          config_snapshot: job.config || {},
+        })
+      })
+    })
+    return rows
+      .sort((a, b) => {
+        const aOk = a.status === 'ok' ? 1 : 0
+        const bOk = b.status === 'ok' ? 1 : 0
+        if (aOk !== bOk) return bOk - aOk
+        const macroDiff = Number(b.macro_f1 ?? -1) - Number(a.macro_f1 ?? -1)
+        if (macroDiff) return macroDiff
+        const accDiff = Number(b.accuracy ?? -1) - Number(a.accuracy ?? -1)
+        if (accDiff) return accDiff
+        const runCmp = String(a.run_id || '').localeCompare(String(b.run_id || ''))
+        if (runCmp) return runCmp
+        return String(a.model || '').localeCompare(String(b.model || ''))
+      })
+      .map((row, idx) => ({ ...row, rank: idx + 1 }))
+  }
+
   async function trainLocoModels() {
     await withLoad('locoTraining', async () => {
+      const progressId = makeLocoTrainingProgressId('train')
+      const stopPolling = pollLocoTrainingProgress(progressId, setLocoTrainingProgress)
       try {
-        const res = await apiPost('/api/diameter-research/loco-training/train', {
-          data_selection: locoTrainingDataSelection,
-          test_size: Number(locoTrainingTestSize || 0.2),
-          random_seed: Number(locoTrainingSeed || 42),
-          pixel_mode: locoTrainingPixelMode,
-          circle_prune_px: Number(locoTrainingPrunePx || 0),
-          patch_size: 64,
-          uses_patch_zoom_factor: !!locoTrainingUseZoom,
-          uses_source_radius_px: !!locoTrainingUseSourceRadius,
-          models: ['catboost', 'lightgbm', 'xgboost', 'extratrees'],
-          multiclass_model: !!locoTrainingMulticlass,
-        })
+        setLocoTrainingResult(null)
+        setLocoTrainingProgress({ status: 'running', stage: 'preparando', completed_steps: 0, total_steps: 1 })
+        const res = await apiPost('/api/diameter-research/loco-training/train', { ...buildLocoTrainingPayload(), progress_id: progressId })
         setLocoTrainingResult(res || null)
         const firstOk = (res?.metrics_summary || []).find((row) => row.status === 'ok')
         if (firstOk?.model_id) setLocoTrainingSelectedModel(firstOk.model_id)
+        await fetchLocoTrainingRunsList()
         toast('success', 'Training', `Run ${res?.run_id || ''} completado.`)
       } catch (err) {
         toast('error', 'Training', errMsg(err))
+      } finally {
+        stopPolling()
+        try {
+          const res = await apiGet(`/api/diameter-research/loco-training/progress/${encodeURIComponent(progressId)}`)
+          setLocoTrainingProgress(res?.progress || null)
+        } catch {}
       }
+    })
+  }
+
+  function addLocoTrainingBatchJob() {
+    setLocoTrainingBatchJobs((prev) => [...prev, createLocoTrainingBatchJob()])
+  }
+
+  function removeLocoTrainingBatchJob(jobId) {
+    setLocoTrainingBatchJobs((prev) => prev.filter((job) => job.job_id !== jobId))
+  }
+
+  function clearLocoTrainingBatchJobs() {
+    setLocoTrainingBatchJobs([])
+    setLocoTrainingBatchProgress({})
+  }
+
+  async function runLocoTrainingBatch() {
+    if (!locoTrainingBatchJobs.length) {
+      toast('warning', 'Training batch', 'Agrega al menos una configuracion al batch.')
+      return
+    }
+    await withLoad('locoTraining', async () => {
+      const queue = locoTrainingBatchJobs.map((job) => ({ ...job, status: 'pending', error: '', response: job.response || null }))
+      setLocoTrainingResult(null)
+      setLocoTrainingBatchProgress({})
+      setLocoTrainingBatchJobs(queue)
+      for (let idx = 0; idx < queue.length; idx += 1) {
+        const progressId = makeLocoTrainingProgressId(`batch_${idx + 1}`)
+        let stopPolling = () => {}
+        queue[idx] = { ...queue[idx], status: 'running', error: '', progress_id: progressId }
+        setLocoTrainingBatchJobs([...queue])
+        stopPolling = pollLocoTrainingProgress(progressId, (progress) => {
+          setLocoTrainingBatchProgress((prev) => ({ ...prev, [queue[idx].job_id]: progress }))
+        })
+        try {
+          const res = await apiPost('/api/diameter-research/loco-training/train', { ...queue[idx].config, progress_id: progressId })
+          queue[idx] = { ...queue[idx], status: 'done', error: '', response: res || null }
+        } catch (err) {
+          queue[idx] = { ...queue[idx], status: 'error', error: errMsg(err), response: null }
+        } finally {
+          stopPolling()
+          try {
+            const res = await apiGet(`/api/diameter-research/loco-training/progress/${encodeURIComponent(progressId)}`)
+            queue[idx] = { ...queue[idx], progress: res?.progress || queue[idx].progress || null }
+            setLocoTrainingBatchProgress((prev) => ({ ...prev, [queue[idx].job_id]: queue[idx].progress }))
+          } catch {}
+        }
+        setLocoTrainingBatchJobs([...queue])
+      }
+      try {
+        await fetchLocoTrainingRunsList()
+      } catch {}
+      const ranked = buildLocoTrainingBatchRows(queue)
+      if (ranked.length) {
+        setLocoTrainingResult(ranked[0].runResponse || null)
+        if (ranked[0].model_id) setLocoTrainingSelectedModel(ranked[0].model_id)
+      }
+      const okJobs = queue.filter((job) => job.status === 'done').length
+      const errJobs = queue.filter((job) => job.status === 'error').length
+      toast(errJobs ? 'warning' : 'success', 'Training batch', `${okJobs}/${queue.length} jobs completados${errJobs ? `, ${errJobs} con error` : ''}.`)
+    })
+  }
+
+  function summarizeLocoTuningParams(params, modelId) {
+    const raw = params && typeof params === 'object' ? (params[modelId] || params) : {}
+    const entries = Object.entries(raw || {}).filter(([, value]) => value !== undefined && value !== null && value !== '')
+    return entries.slice(0, 4).map(([key, value]) => {
+      const shortValue = typeof value === 'number' ? Number(value).toPrecision(3) : String(value)
+      return `${key}=${shortValue}`
+    }).join(' | ')
+  }
+
+  async function tuneLocoTrainingFromBatchRow(row) {
+    const modelId = String(row?.model_id || '').trim()
+    if (!row?.run_id || !modelId || !['catboost', 'lightgbm', 'xgboost'].includes(modelId)) {
+      toast('warning', 'Tuning', 'Selecciona una fila valida de CatBoost, LightGBM o XGBoost.')
+      return
+    }
+    const baseConfig = row.config_snapshot || {}
+    const progressId = makeLocoTrainingProgressId('tune')
+    const stopPolling = pollLocoTrainingProgress(progressId, setLocoTrainingProgress)
+    await withLoad('locoTraining', async () => {
+      try {
+        setLocoTrainingResult(null)
+        setLocoTrainingBatchJobs([])
+        setLocoTrainingBatchProgress({})
+        setLocoTrainingProgress({ status: 'running', stage: 'optuna_preparando', model: LOCO_TRAINING_MODEL_LABELS[modelId] || modelId, completed_steps: 0, current_step: 0, total_steps: Math.max(1, Number(locoTrainingTuneTrials || 12)), best_macro_f1: null })
+        const res = await apiPost('/api/diameter-research/loco-training/tune', {
+          data_selection: baseConfig.data_selection || row.data_selection || 'all',
+          test_size: Number(baseConfig.test_size ?? row.test_size ?? 0.2),
+          random_seed: Number(baseConfig.random_seed ?? row.random_seed ?? 42),
+          pixel_mode: baseConfig.pixel_mode || row.runResponse?.meta?.pixel_mode || 'circle_only',
+          circle_prune_px: Number(baseConfig.circle_prune_px ?? row.circle_prune_px ?? 0),
+          patch_size: Number(baseConfig.patch_size || 64),
+          uses_patch_zoom_factor: !!(baseConfig.uses_patch_zoom_factor ?? row.uses_patch_zoom_factor),
+          uses_source_radius_px: !!(baseConfig.uses_source_radius_px ?? row.uses_source_radius_px),
+          source_run_id: row.run_id,
+          source_model_id: modelId,
+          source_macro_f1: row.macro_f1 == null ? null : Number(row.macro_f1),
+          n_trials: clamp(Number(locoTrainingTuneTrials || 12), 1, 40),
+          inherit_binary_model: true,
+          progress_id: progressId,
+        })
+        const trialJobs = (Array.isArray(res?.trials) ? res.trials : []).map((trial, idx) => {
+          const trialInfo = trial?.tuning_trial || {}
+          return {
+            job_id: `tune_${res?.study_summary?.study_id || progressId}_${idx + 1}`,
+            job_type: 'tuning_trial',
+            config: {
+              ...baseConfig,
+              data_selection: baseConfig.data_selection || row.data_selection || 'all',
+              models: [modelId],
+              multiclass_model: true,
+              cv5_enabled: false,
+              job_type: 'tuning_trial',
+              trial_index: trialInfo.trial_index || idx + 1,
+              trial_count: trialInfo.trial_count || Number(locoTrainingTuneTrials || 12),
+              source_macro_f1: row.macro_f1 == null ? null : Number(row.macro_f1),
+              model_params: trialInfo.model_params || {},
+            },
+            status: trial?.ok === false ? 'error' : 'done',
+            error: trialInfo.reason || '',
+            response: trial || null,
+            created_at: new Date().toISOString(),
+          }
+        })
+        setLocoTrainingBatchJobs(trialJobs)
+        const ranked = buildLocoTrainingBatchRows(trialJobs)
+        if (ranked.length) {
+          setLocoTrainingResult(ranked[0].runResponse || null)
+          if (ranked[0].model_id) setLocoTrainingSelectedModel(ranked[0].model_id)
+        }
+        await fetchLocoTrainingRunsList()
+        toast('success', 'Tuning', `${trialJobs.filter((job) => job.status === 'done').length}/${trialJobs.length} trials completados.`)
+      } catch (err) {
+        toast('error', 'Tuning', errMsg(err))
+      } finally {
+        stopPolling()
+        try {
+          const progress = await apiGet(`/api/diameter-research/loco-training/progress/${encodeURIComponent(progressId)}`)
+          setLocoTrainingProgress(progress?.progress || null)
+        } catch {}
+      }
+    })
+  }
+
+  function tuneLocoTrainingFromRunMetric(row) {
+    if (!locoTrainingResult?.run_id || !row?.model_id) return
+    const meta = locoTrainingResult.meta || {}
+    tuneLocoTrainingFromBatchRow({
+      ...row,
+      run_id: locoTrainingResult.run_id,
+      runResponse: locoTrainingResult,
+      macro_f1: locoTrainingMacroF1(row),
+      data_selection: meta.data_selection || '',
+      test_size: meta.test_size,
+      circle_prune_px: meta.circle_prune_px,
+      random_seed: meta.random_seed,
+      uses_patch_zoom_factor: !!meta.uses_patch_zoom_factor,
+      uses_source_radius_px: !!meta.uses_source_radius_px,
+      config_snapshot: {
+        data_selection: meta.data_selection || 'all',
+        test_size: Number(meta.test_size ?? 0.2),
+        random_seed: Number(meta.random_seed ?? 42),
+        pixel_mode: meta.pixel_mode || 'circle_only',
+        circle_prune_px: Number(meta.circle_prune_px ?? 0),
+        patch_size: Number(meta.patch_size || 64),
+        uses_patch_zoom_factor: !!meta.uses_patch_zoom_factor,
+        uses_source_radius_px: !!meta.uses_source_radius_px,
+        models: [row.model_id],
+        multiclass_model: true,
+        cv5_enabled: false,
+      },
     })
   }
 
   async function refreshLocoTrainingRuns() {
     await withLoad('locoTraining', async () => {
       try {
-        const res = await apiGet('/api/diameter-research/loco-training/runs')
-        const items = Array.isArray(res?.items) ? res.items : []
-        setLocoTrainingRuns(items)
-        setLocoTestTrainingRunId((prev) => (prev && prev !== 'latest' && items.some((r) => r.run_id === prev) ? prev : (items[0]?.run_id || 'latest')))
-        setLocoModelRunId((prev) => (prev && prev !== 'latest' && items.some((r) => r.run_id === prev) ? prev : (items[0]?.run_id || 'latest')))
+        await Promise.all([fetchLocoTrainingRunsList(), fetchLocoSavedModelsList()])
       } catch (err) {
         toast('error', 'Training runs', errMsg(err))
       }
     })
+  }
+
+  async function saveLocoTrainingModel(trainingRunId, modelId, metrics = {}) {
+    const runId = String(trainingRunId || '').trim()
+    const mid = String(modelId || '').trim()
+    if (!runId || !mid) {
+      toast('warning', 'Guardar modelo', 'Selecciona un run y un modelo.')
+      return
+    }
+    await withLoad('locoTraining', async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/loco-training/save-model', {
+          training_run_id: runId,
+          model_id: mid,
+          metrics: metrics || {},
+        })
+        await fetchLocoSavedModelsList()
+        setLocoTrainingSelectedSavedModelId(res?.item?.saved_model_id || '')
+        toast('success', 'Guardar modelo', `${res?.item?.model || mid} guardado.`)
+      } catch (err) {
+        toast('error', 'Guardar modelo', errMsg(err))
+      }
+    })
+  }
+
+  async function deleteLocoSavedModel(savedModelId) {
+    const id = String(savedModelId || locoTrainingSelectedSavedModelId || '').trim()
+    if (!id) return
+    await withLoad('locoTraining', async () => {
+      try {
+        await apiPost('/api/diameter-research/loco-training/delete-saved-model', { saved_model_id: id })
+        await fetchLocoSavedModelsList()
+        toast('success', 'Modelo guardado', 'Modelo eliminado.')
+      } catch (err) {
+        toast('error', 'Modelo guardado', errMsg(err))
+      }
+    })
+  }
+
+  function useLocoSavedModel(item, target = 'test') {
+    if (!item?.saved_model_id || !item?.model_id) return
+    if (target === 'detector') {
+      setLocoModelRunId(item.saved_model_id)
+      setLocoModelId(item.model_id)
+      return
+    }
+    setLocoTestTrainingRunId(item.saved_model_id)
+    setLocoTestModelId(item.model_id)
+  }
+
+  function onLocoTestTrainingRunChange(value) {
+    setLocoTestTrainingRunId(value)
+    const saved = locoSavedModels.find((m) => m.saved_model_id === value)
+    if (saved?.model_id) setLocoTestModelId(saved.model_id)
+  }
+
+  function onLocoModelRunChange(value) {
+    void clearLocoModelBackendState()
+    setLocoModelRunId(value)
+    const saved = locoSavedModels.find((m) => m.saved_model_id === value)
+    if (saved?.model_id) setLocoModelId(saved.model_id)
+    resetLocoModelStageState({ clearResult: true })
+  }
+
+  function onLocoDetectorSupportRunChange(value) {
+    void clearLocoModelBackendState()
+    setDiamPriorRunId(value)
+    resetLocoModelStageState({ clearResult: true })
   }
 
   function locoTestPayloadCandidates() {
@@ -4748,6 +6164,10 @@ export default function App() {
 
   async function predictLocoTestCircles() {
     const candidates = locoTestPayloadCandidates()
+    if (!locoTestSelectedSavedModel?.saved_model_id) {
+      toast('warning', 'Test circle model', 'Selecciona un modelo guardado.')
+      return
+    }
     if (!sessionId || !imageId || !candidates.length) {
       toast('warning', 'Test circle model', 'Dibuja al menos un circulo.')
       return
@@ -4760,7 +6180,7 @@ export default function App() {
           image_id: imageId,
           source_mode: 'prior_mask',
           prior_run_id: diamPriorRunId,
-          training_run_id: locoTestTrainingRunId || 'latest',
+          training_run_id: locoTestTrainingRunId,
           model_id: locoTestModelId,
           threshold: Number(locoTestThreshold || 0.5),
           candidates,
@@ -4777,9 +6197,19 @@ export default function App() {
 
   function updateLocoModelParam(key, value) {
     setLocoModelParams((prev) => ({ ...prev, [key]: value }))
-    if (['grid_step', 'min_radius', 'max_radius', 'radius_step'].includes(key)) {
-      setLocoModelResult(null)
-      setLocoModelSelectedId('')
+    const baseKeys = new Set(['candidate_sampling_mode', 'grid_step', 'max_candidates', 'candidate_max_per_tile', 'tile_size_px', 'candidate_random_seed', 'min_radius', 'max_radius', 'radius_step'])
+    const thresholdKeys = new Set(['use_radius_thresholds', 'threshold', 'small_threshold', 'medium_threshold', 'large_threshold', 'small_radius_limit', 'large_radius_limit', 'crossing_threshold', 'return_rejected', 'max_return_rejected'])
+    const nmsKeys = new Set(['use_nms', 'nms_mode', 'circle_iou_threshold', 'nms_distance_factor', 'radius_similarity_factor'])
+    const spatialKeys = new Set(['use_spatial_final_filter', 'spatial_final_tile_px', 'spatial_final_max_per_tile', 'spatial_final_min_center_distance_factor'])
+    if (baseKeys.has(key)) {
+      void clearLocoModelBackendState()
+      resetLocoModelStageState({ clearResult: true })
+    } else if (thresholdKeys.has(key)) {
+      markLocoModelStageDirty('threshold')
+    } else if (nmsKeys.has(key)) {
+      markLocoModelStageDirty('nms')
+    } else if (spatialKeys.has(key)) {
+      markLocoModelStageDirty('spatial')
     }
     if (key !== 'locoModelPreset') {
       setLocoModelPreset('custom')
@@ -4787,18 +6217,95 @@ export default function App() {
   }
 
   function applyLocoModelPreset(presetKey) {
+    if (!presetKey || presetKey === 'custom') {
+      setLocoModelPreset('custom')
+      return
+    }
+    if (String(presetKey).startsWith('custom:')) {
+      const presetId = String(presetKey).slice('custom:'.length)
+      const customPreset = locoModelCustomPresets.find((item) => item.preset_id === presetId)
+      if (!customPreset) {
+        setLocoModelPreset('custom')
+        return
+      }
+      setLocoModelPreset(presetKey)
+      setLocoModelPresetName(customPreset.preset_name || '')
+      setLocoModelParams((prev) => ({ ...prev, ...(customPreset.params || {}) }))
+      setLocoModelLayers((prev) => ({ ...prev, ...DEFAULT_LOCO_MODEL_LAYERS, ...(customPreset.layers || {}) }))
+      void clearLocoModelBackendState()
+      resetLocoModelStageState({ clearResult: true })
+      return
+    }
     const preset = LOCO_PRESETS[presetKey]
-    if (!preset || presetKey === 'custom') {
+    if (!preset) {
       setLocoModelPreset('custom')
       return
     }
     setLocoModelPreset(presetKey)
+    setLocoModelPresetName('')
     setLocoModelParams((prev) => ({ ...prev, ...preset }))
-    setLocoModelResult(null)
-    setLocoModelSelectedId('')
+    void clearLocoModelBackendState()
+    resetLocoModelStageState({ clearResult: true })
   }
 
-  async function detectLocoModelCircles() {
+  async function saveLocoModelPreset() {
+    const name = String(locoModelPresetName || '').trim()
+    if (!name) {
+      toast('warning', 'Preset', 'Ingresa un nombre para el preset.')
+      return
+    }
+    await withLoad('locoModel', async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/loco-models/preset/save', {
+          preset_name: name,
+          params: locoModelParams,
+          layers: locoModelLayers,
+        })
+        const items = await fetchLocoModelCustomPresets()
+        const presetId = res?.item?.preset_id || items.find((item) => item.preset_name === name)?.preset_id || ''
+        if (presetId) setLocoModelPreset(makeLocoCustomPresetValue(presetId))
+        toast('success', 'Preset', `Preset ${name} guardado.`)
+      } catch (err) {
+        toast('error', 'Preset', errMsg(err))
+      }
+    })
+  }
+
+  async function deleteLocoModelPreset() {
+    if (!String(locoModelPreset || '').startsWith('custom:')) return
+    const presetId = String(locoModelPreset).slice('custom:'.length)
+    await withLoad('locoModel', async () => {
+      try {
+        await apiPost('/api/diameter-research/loco-models/preset/delete', { preset_id: presetId })
+        await fetchLocoModelCustomPresets()
+        setLocoModelPreset('custom')
+        setLocoModelPresetName('')
+        toast('success', 'Preset', 'Preset eliminado.')
+      } catch (err) {
+        toast('error', 'Preset', errMsg(err))
+      }
+    })
+  }
+
+  function applyLocoModelDetectorResult(res, successTitle) {
+    setLocoModelResult(res || null)
+    setLocoModelMeasurement(null)
+    const accepted = Array.isArray(res?.accepted) ? res.accepted : []
+    const first = accepted[0] || null
+    setLocoModelSelectedId(String(first?.candidate_id || ''))
+    syncLocoModelStageStateFromResponse(res)
+    if (successTitle) {
+      const stage = String(res?.summary?.result_stage || '')
+      const count = Array.isArray(res?.accepted) ? res.accepted.length : 0
+      toast('success', 'LOCO Detector', `${successTitle}: ${stage || 'resultado'} (${count} visibles).`)
+    }
+  }
+
+  async function runLocoModelBaseDetector() {
+    if (!locoDetectorSelectedSavedModel?.saved_model_id) {
+      toast('warning', 'LOCO Detector', 'Selecciona un modelo guardado.')
+      return
+    }
     if (!sessionId || !imageId || !imageUrl) {
       toast('warning', 'LOCO Detector', 'Carga una imagen primero.')
       return
@@ -4806,49 +6313,158 @@ export default function App() {
     await flushDraftIfNeeded()
     await withLoad('locoModel', async () => {
       try {
-        const res = await apiPost('/api/diameter-research/loco-models/detect-circles', {
-          session_id: sessionId,
-          image_id: imageId,
-          source_mode: 'prior_mask',
-          prior_run_id: diamPriorRunId,
-          model_run_id: locoModelRunId || 'latest',
-          model_id: locoModelId,
-          patch_size: 64,
-          grid_step: Number(locoModelParams.grid_step || 6),
-          min_radius: Number(locoModelParams.min_radius || 8),
-          max_radius: Number(locoModelParams.max_radius || 32),
-          radius_step: Number(locoModelParams.radius_step || 2),
-          threshold: Number(locoModelParams.threshold || 0.8),
-          use_radius_thresholds: !!locoModelParams.use_radius_thresholds,
-          small_threshold: Number(locoModelParams.small_threshold || 0.8),
-          medium_threshold: Number(locoModelParams.medium_threshold || 0.8),
-          large_threshold: Number(locoModelParams.large_threshold || 0.9),
-          small_radius_limit: Number(locoModelParams.small_radius_limit || 14),
-          large_radius_limit: Number(locoModelParams.large_radius_limit || 24),
-          use_nms: !!locoModelParams.use_nms,
-          nms_mode: locoModelParams.nms_mode || 'distance_radius',
-          nms_distance_factor: Number(locoModelParams.nms_distance_factor || 0.5),
-          radius_similarity_factor: Number(locoModelParams.radius_similarity_factor || 0.4),
-          circle_iou_threshold: Number(locoModelParams.circle_iou_threshold || 0.4),
-          candidate_sampling_mode: locoModelParams.candidate_sampling_mode || 'row_major',
-          candidate_random_seed: Number(locoModelParams.candidate_random_seed || 42),
-          tile_size_px: Number(locoModelParams.tile_size_px || 128),
-          candidate_max_per_tile: Number(locoModelParams.candidate_max_per_tile || 0),
-          return_rejected: !!locoModelParams.return_rejected,
-          max_candidates: Number(locoModelParams.max_candidates || 8000),
-          max_return_rejected: Number(locoModelParams.max_return_rejected || 5000),
-          crossing_threshold: Number(locoModelParams.crossing_threshold || 0.5),
-          use_spatial_final_filter: !!locoModelParams.use_spatial_final_filter,
-          spatial_final_tile_px: Number(locoModelParams.spatial_final_tile_px || 128),
-          spatial_final_max_per_tile: Number(locoModelParams.spatial_final_max_per_tile || 3),
-          spatial_final_min_center_distance_factor: Number(locoModelParams.spatial_final_min_center_distance_factor || 1.0),
-          scribble_map_b64: '',
-        })
-        setLocoModelResult(res || null)
-        setLocoModelMeasurement(null)
-        const first = Array.isArray(res?.accepted) ? res.accepted[0] : null
-        setLocoModelSelectedId(String(first?.candidate_id || ''))
-        toast('success', 'LOCO Detector', `${res?.summary?.accepted_after_nms || 0} circulos aceptados.`)
+        await clearLocoModelBackendState()
+        resetLocoModelStageState({ clearResult: true })
+        const res = await apiPost('/api/diameter-research/loco-models/detect-base', buildLocoModelDetectPayload())
+        applyLocoModelDetectorResult(res, 'Base lista')
+      } catch (err) {
+        toast('error', 'LOCO Detector', errMsg(err))
+      }
+    })
+  }
+
+  async function postLocoModelStage(path, detectorStateId) {
+    return apiPost(path, buildLocoModelDetectPayload({
+      detector_state_id: detectorStateId,
+    }))
+  }
+
+  async function applyLocoModelThreshold() {
+    const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
+    if (!detectorStateId || !locoModelStageState.baseReady) {
+      toast('warning', 'LOCO Detector', 'Primero ejecuta Run base detector.')
+      return
+    }
+    await flushDraftIfNeeded()
+    await withLoad('locoModel', async () => {
+      try {
+        const res = await postLocoModelStage('/api/diameter-research/loco-models/apply-threshold', detectorStateId)
+        applyLocoModelDetectorResult(res, 'Threshold aplicado')
+      } catch (err) {
+        toast('error', 'LOCO Detector', errMsg(err))
+      }
+    })
+  }
+
+  async function applyLocoModelThresholdOnward() {
+    const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
+    if (!detectorStateId || !locoModelStageState.baseReady) {
+      toast('warning', 'LOCO Detector', 'Primero ejecuta Run base detector.')
+      return
+    }
+    await flushDraftIfNeeded()
+    await withLoad('locoModel', async () => {
+      try {
+        let res = await postLocoModelStage('/api/diameter-research/loco-models/apply-threshold', detectorStateId)
+        if (locoModelParams.use_nms) {
+          res = await postLocoModelStage('/api/diameter-research/loco-models/apply-nms', detectorStateId)
+        }
+        if (locoModelParams.use_spatial_final_filter) {
+          res = await postLocoModelStage('/api/diameter-research/loco-models/apply-spatial', detectorStateId)
+        }
+        applyLocoModelDetectorResult(res, 'Threshold en adelante aplicado')
+      } catch (err) {
+        toast('error', 'LOCO Detector', errMsg(err))
+      }
+    })
+  }
+
+  async function applyLocoModelNms() {
+    const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
+    if (!detectorStateId || !locoModelStageState.baseReady || !locoModelStageState.thresholdReady || locoModelStageState.thresholdDirty) {
+      toast('warning', 'LOCO Detector', 'Threshold debe estar vigente antes de aplicar NMS.')
+      return
+    }
+    await flushDraftIfNeeded()
+    await withLoad('locoModel', async () => {
+      try {
+        const res = await postLocoModelStage('/api/diameter-research/loco-models/apply-nms', detectorStateId)
+        applyLocoModelDetectorResult(res, 'NMS aplicado')
+      } catch (err) {
+        toast('error', 'LOCO Detector', errMsg(err))
+      }
+    })
+  }
+
+  async function applyLocoModelNmsOnward() {
+    const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
+    if (!detectorStateId || !locoModelStageState.baseReady || !locoModelStageState.thresholdReady || locoModelStageState.thresholdDirty) {
+      toast('warning', 'LOCO Detector', 'Threshold debe estar vigente antes de aplicar NMS.')
+      return
+    }
+    await flushDraftIfNeeded()
+    await withLoad('locoModel', async () => {
+      try {
+        let res = await postLocoModelStage('/api/diameter-research/loco-models/apply-nms', detectorStateId)
+        if (locoModelParams.use_spatial_final_filter) {
+          res = await postLocoModelStage('/api/diameter-research/loco-models/apply-spatial', detectorStateId)
+        }
+        applyLocoModelDetectorResult(res, 'NMS en adelante aplicado')
+      } catch (err) {
+        toast('error', 'LOCO Detector', errMsg(err))
+      }
+    })
+  }
+
+  async function applyLocoModelSpatial() {
+    const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
+    if (!detectorStateId || !locoModelStageState.baseReady || !locoModelStageState.nmsReady || locoModelStageState.thresholdDirty || locoModelStageState.nmsDirty) {
+      toast('warning', 'LOCO Detector', 'NMS debe estar vigente antes de aplicar spatial.')
+      return
+    }
+    await flushDraftIfNeeded()
+    await withLoad('locoModel', async () => {
+      try {
+        const res = await postLocoModelStage('/api/diameter-research/loco-models/apply-spatial', detectorStateId)
+        applyLocoModelDetectorResult(res, 'Spatial aplicado')
+      } catch (err) {
+        toast('error', 'LOCO Detector', errMsg(err))
+      }
+    })
+  }
+
+  async function applyLocoModelSpatialOnward() {
+    await applyLocoModelSpatial()
+  }
+
+  async function applyLocoModelPendingFilters() {
+    if (!locoDetectorSelectedSavedModel?.saved_model_id) {
+      toast('warning', 'LOCO Detector', 'Selecciona un modelo guardado.')
+      return
+    }
+    if (!sessionId || !imageId || !imageUrl) {
+      toast('warning', 'LOCO Detector', 'Carga una imagen primero.')
+      return
+    }
+    await flushDraftIfNeeded()
+    await withLoad('locoModel', async () => {
+      try {
+        let res = null
+        let detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
+        if (!locoModelStageState.baseReady || !detectorStateId) {
+          await clearLocoModelBackendState()
+          res = await apiPost('/api/diameter-research/loco-models/detect-base', buildLocoModelDetectPayload())
+          detectorStateId = String(res?.detector_state_id || res?.summary?.detector_state_id || '')
+        }
+        if (!detectorStateId) {
+          throw new Error('No se pudo crear detector_state_id.')
+        }
+        if (locoModelStageState.thresholdDirty || !locoModelStageState.thresholdReady || !res?.summary?.threshold_ready) {
+          res = await postLocoModelStage('/api/diameter-research/loco-models/apply-threshold', detectorStateId)
+        }
+        const shouldRunNms = !!locoModelParams.use_nms && (locoModelStageState.nmsDirty || !locoModelStageState.nmsReady || !res?.summary?.nms_ready)
+        if (shouldRunNms) {
+          res = await postLocoModelStage('/api/diameter-research/loco-models/apply-nms', detectorStateId)
+        }
+        const shouldRunSpatial = !!locoModelParams.use_spatial_final_filter && (locoModelStageState.spatialDirty || !locoModelStageState.spatialReady || !res?.summary?.spatial_ready)
+        if (shouldRunSpatial) {
+          res = await postLocoModelStage('/api/diameter-research/loco-models/apply-spatial', detectorStateId)
+        }
+        if (!res) {
+          toast('success', 'LOCO Detector', 'No hay filtros pendientes.')
+          return
+        }
+        applyLocoModelDetectorResult(res, 'Detector actualizado')
       } catch (err) {
         toast('error', 'LOCO Detector', errMsg(err))
       }
@@ -4857,53 +6473,54 @@ export default function App() {
 
   async function measureLocoModelAccepted() {
     const accepted = Array.isArray(locoModelResult?.accepted) ? locoModelResult.accepted : []
-    if (!sessionId || !imageId || !accepted.length) {
-      toast('warning', 'LOCO Detector', 'Primero detecta circulos aceptados.')
+    const stage = String(locoModelResult?.summary?.result_stage || '')
+    if (!sessionId || !imageId || !accepted.length || stage === 'base') {
+      toast('warning', 'LOCO Detector', 'Aplica al menos threshold antes de enviar candidatos a Medicion de Diametros.')
       return
     }
     await flushDraftIfNeeded()
     await withLoad('locoModel', async () => {
       try {
-        const res = await apiPost('/api/diameter-research/loco-models/measure-accepted', {
-          session_id: sessionId,
-          image_id: imageId,
-          source_mode: 'prior_mask',
-          prior_run_id: diamPriorRunId,
-          candidates: accepted,
-          params: { measure_limit: accepted.length, circle_samples: 128 },
-          scribble_map_b64: '',
-        })
-        setLocoModelMeasurement(res || null)
-        if (res?.run_id) {
-          setDiamRunCache((prev) => ({ ...prev, [res.run_id]: res }))
-          setDiamActiveRunId(res.run_id)
-          setDiamResults(Array.isArray(res.results) ? res.results : [])
-          setDiamResultsMode('run')
-          if (res.overlay_b64) setDiamOverlayUrl(b64ToDataUrl(res.overlay_b64, res.overlay_mime || 'image/png'))
-          await refreshDiameterRuns(imageId, { silent: true })
-        }
-        // Populate diamPoints with accepted circle centers
-        const points = accepted.map((c) => ({
-          x: c.center_x ?? c.x ?? 0,
-          y: c.center_y ?? c.y ?? 0,
-          kind: 'circle',
-          radius: c.radius ?? c.r ?? 0,
-          score: c.valid_score ?? c.score ?? 0,
-        }))
-        await updateDiameterPoints('replace', { points })
-        // Navigate to Diameter Measurement tab
+        const circles = await replaceDiameterCirclesFromDetector(accepted)
+        setLocoModelMeasurement(null)
         handleGroupChange('detection')
         handleTabChange('diameter')
-        toast('success', 'LOCO Detector', `${res?.meta?.points_ok ?? 0} mediciones guardadas.`)
+        toast('success', 'LOCO Detector', `${circles.length} candidatos enviados a Medicion de Diametros como circulos.`)
       } catch (err) {
         toast('error', 'LOCO Detector', errMsg(err))
       }
     })
   }
 
+  function startDiameterCalibrationLine() {
+    if (!imageUrl) {
+      toast('warning', 'Calibracion', 'Carga una imagen primero.')
+      return
+    }
+    setDiamViewerMode('calibration')
+    toast('success', 'Calibracion', 'Dibuja una linea sobre la barra de escala.')
+  }
+
+  function clearDiameterCalibrationLine() {
+    updateDiamCalibration((prev) => ({
+      ...prev,
+      pixel_distance: 0,
+      unit_per_px: 0,
+      line_x1: null,
+      line_y1: null,
+      line_x2: null,
+      line_y2: null,
+    }))
+  }
+
   // --- Calibration functions ---
   async function saveCalibration() {
     if (!imageId) return
+    const line = calibrationLineFromState(diamCalibration)
+    if (!line) {
+      toast('warning', 'Calibracion', 'Dibuja la linea de escala antes de guardar.')
+      return
+    }
     await withLoad('calibration', async () => {
       try {
         await apiPost('/api/diameter-research/calibration/save', {
@@ -4921,16 +6538,19 @@ export default function App() {
     if (!imageId) return
     await withLoad('calibration', async () => {
       try {
-        const res = await apiPost('/api/diameter-research/calibration/load', {
-          image_id: imageId,
-        })
-        if (res) {
-          setDiamCalibration({
-            enabled: res.enabled ?? false,
-            known_nm: res.known_nm ?? 100,
-            pixel_distance: res.pixel_distance ?? 100,
-            nm_per_px: res.nm_per_px ?? 1.0,
-            unit: res.unit ?? 'nm',
+        const res = await apiGet(`/api/diameter-research/calibration/load?image_id=${encodeURIComponent(imageId)}`)
+        const calibration = res?.calibration
+        if (calibration) {
+          updateDiamCalibration({
+            enabled: calibration.enabled ?? false,
+            known_value: calibration.known_value ?? calibration.known_nm ?? DEFAULT_DIAM_CALIBRATION.known_value,
+            pixel_distance: calibration.pixel_distance ?? 0,
+            unit_per_px: calibration.unit_per_px ?? calibration.nm_per_px ?? 0,
+            unit: calibration.unit ?? DEFAULT_DIAM_CALIBRATION.unit,
+            line_x1: calibration.line_x1 ?? null,
+            line_y1: calibration.line_y1 ?? null,
+            line_x2: calibration.line_x2 ?? null,
+            line_y2: calibration.line_y2 ?? null,
           })
           toast('success', 'Calibracion', 'Calibracion cargada.')
         }
@@ -4947,13 +6567,8 @@ export default function App() {
         await apiPost('/api/diameter-research/calibration/delete', {
           image_id: imageId,
         })
-        setDiamCalibration({
-          enabled: false,
-          known_nm: 100,
-          pixel_distance: 100,
-          nm_per_px: 1.0,
-          unit: 'nm',
-        })
+        setDiamCalibration(DEFAULT_DIAM_CALIBRATION)
+        if (diamViewerMode === 'calibration') setDiamViewerMode('pan')
         toast('success', 'Calibracion', 'Calibracion eliminada.')
       } catch (err) {
         toast('error', 'Calibracion', errMsg(err))
@@ -4962,9 +6577,20 @@ export default function App() {
   }
 
   function clearLocoModelDetector() {
-    setLocoModelResult(null)
-    setLocoModelMeasurement(null)
-    setLocoModelSelectedId('')
+    void clearLocoModelBackendState()
+    resetLocoModelStageState({ clearResult: true })
+  }
+
+  async function clearLocoModelExcludeSelection() {
+    if (locoModelExcludeActiveIdx < 0) return
+    const nextRects = locoModelExcludeRects.filter((_, idx) => idx !== locoModelExcludeActiveIdx)
+    setLocoModelExcludeActiveIdx(-1)
+    await applyLocoModelExcludeRects(nextRects, { persist: true, clearResult: true })
+  }
+
+  async function clearAllLocoModelExclusions() {
+    setLocoModelExcludeActiveIdx(-1)
+    await applyLocoModelExcludeRects([], { persist: true, clearResult: true })
   }
 
   async function refreshDiameterRuns(customImageId = '', { silent = false } = {}) {
@@ -5101,6 +6727,39 @@ export default function App() {
     if (aa.lineKey || bb.lineKey) return Boolean(aa.lineKey && bb.lineKey && aa.lineKey === bb.lineKey)
     if (![aa.x, aa.y, bb.x, bb.y].every(Number.isFinite)) return false
     return Math.hypot(aa.x - bb.x, aa.y - bb.y) <= 2.5
+  }
+
+  function shouldRemoveDiameterResult(result, removal) {
+    const identity = resultIdentity(result)
+    const geometryId = String(removal?.geometryId || '')
+    const point = removal?.point || null
+    if (geometryId) {
+      return Boolean(identity.geometryId) && identity.geometryId === geometryId
+    }
+    if (!point) return false
+    if (![identity.x, identity.y].every(Number.isFinite)) return false
+    return samePoint({ x: identity.x, y: identity.y }, point, 2.5)
+  }
+
+  function pruneDiameterResultsForRemovals(removals) {
+    const removalList = (Array.isArray(removals) ? removals : [removals]).filter(Boolean)
+    if (!removalList.length) return
+    setDiamResults((prev) => {
+      const current = Array.isArray(prev) ? prev : []
+      return current.filter((result) => !removalList.some((removal) => shouldRemoveDiameterResult(result, removal)))
+    })
+    if (diamReviewTarget) {
+      const reviewIdentity = {
+        method_id: String(diamReviewTarget.method_id || ''),
+        circle_square_geometry_id: String(diamReviewTarget.geometry_id || ''),
+        x: Number(diamReviewTarget.point?.x),
+        y: Number(diamReviewTarget.point?.y),
+      }
+      if (removalList.some((removal) => shouldRemoveDiameterResult(reviewIdentity, removal))) {
+        setDiamReviewTarget(null)
+        setPointReviewOpen(false)
+      }
+    }
   }
 
   function mergeDiameterResults(previous, incoming) {
@@ -5322,6 +6981,7 @@ export default function App() {
       point_index: pointIdx,
       run_id: targetRunId,
       method_id: r.method_id || diamRunCache[targetRunId]?.method_id || '',
+      geometry_id: String(r.interactive_geometry_id || r.manual_geometry_id || r.circle_square_geometry_id || ''),
       status: String(r.status || ''),
       reason: String(r.reason || ''),
       diameter_px: r.diameter_px == null ? null : Number(r.diameter_px),
@@ -5488,67 +7148,6 @@ export default function App() {
     return saved
   }
 
-  async function runValidationCase() {
-    if (!sessionId || !imageId) return
-    const saved = validationActiveCaseId ? await saveValidationCase({ silent: true }) : await saveValidationCase({ silent: true })
-    const caseId = String(saved?.case_id || validationActiveCaseId || '').trim()
-    if (!caseId) return
-    await flushDraftIfNeeded()
-    const scribble = currentScribbleB64()
-    await withLoad('validationRun', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/validation/run-case', {
-          session_id: sessionId,
-          image_id: imageId,
-          case_id: caseId,
-          source_mode: diamSourceMode,
-          prior_run_id: diamPriorRunId,
-          params: diameterParamsPayload(),
-          scribble_map_b64: scribble,
-          methods: [
-            'hybrid_profile_diameter_v1',
-            'hybrid_profile_diameter_v2',
-            'hybrid_profile_diameter_v3_1',
-            'hybrid_profile_diameter_v3_2_auto',
-            'hybrid_profile_diameter_v3_2_small_mask',
-            'hybrid_profile_diameter_v3_2_large_image',
-            'circle_square_mask_diameter',
-            'manual_dual_side_caliper',
-            'manual_line_direct_caliper',
-            'ellipse_oriented_fit',
-          ],
-        })
-        const runs = res?.runs || {}
-        setDiamRunCache((prev) => {
-          const next = { ...prev }
-          Object.values(runs).forEach((runItem) => {
-            if (runItem?.run_id) next[runItem.run_id] = runItem
-          })
-          return next
-        })
-        if (res?.case) applyValidationCaseToForm(res.case)
-        await refreshValidationCases(imageId, { silent: true })
-        await refreshDiameterRuns(imageId, { silent: true })
-        toast('success', 'Validacion', 'Caso ejecutado con baselines y geometria interactiva.')
-      } catch (err) {
-        toast('error', 'Validacion', errMsg(err))
-      }
-    })
-  }
-
-  async function exportValidationAutofill() {
-    if (!imageId) return
-    await withLoad('validationExport', async () => {
-      try {
-        const res = await apiGet(`/api/diameter-research/validation/export?image_id=${encodeURIComponent(imageId)}`)
-        setValidationExportInfo(res || null)
-        toast('success', 'Validacion', 'MD + CSV + JSON generados.')
-      } catch (err) {
-        toast('error', 'Validacion', errMsg(err))
-      }
-    })
-  }
-
   const latestDecision = useMemo(() => {
     if (!activeRunId) return ''
     const row = reviewByRun[activeRunId]
@@ -5578,13 +7177,68 @@ export default function App() {
   const brushSliderValue = useMemo(() => brushPxToSlider(brushSize), [brushSize])
 
   const editorRenderMetrics = useMemo(() => getEditorRenderMetrics(), [imageDims, stageSize, viewerZoom, viewerOffset])
+
+  // Brush cursor overlay — draws a circle matching the brush size, positioned at mouse
+  useEffect(() => {
+    const canvas = brushCursorRef.current
+    const stage = editorStageRef.current
+    if (!canvas || !stage || !editorRenderMetrics) return
+    const dpr = window.devicePixelRatio || 1
+    const cssRadius = Math.max(1, annotBrushPx * editorRenderMetrics.scale)
+    const cssSize = cssRadius * 2 + 4
+    const physSize = Math.ceil(cssSize * dpr)
+    canvas.width = physSize
+    canvas.height = physSize
+    canvas.style.width = `${cssSize}px`
+    canvas.style.height = `${cssSize}px`
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.clearRect(0, 0, physSize, physSize)
+    const cx = physSize / 2
+    const cy = physSize / 2
+    const r = Math.max(1, cssRadius * dpr)
+    // Parse cursorColor, fall back to green
+    let colorR = 0, colorG = 204, colorB = 102
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(cursorColor.replace('#', ''))
+    if (m) { colorR = parseInt(m[1], 16); colorG = parseInt(m[2], 16); colorB = parseInt(m[3], 16) }
+    // Outer glow ring (slightly larger)
+    ctx.beginPath()
+    ctx.arc(cx, cy, r + Math.max(1, 1.5 * dpr), 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(${colorR},${colorG},${colorB},0.25)`
+    ctx.lineWidth = Math.max(1, 3 * dpr)
+    ctx.stroke()
+    // Main colored ring
+    ctx.beginPath()
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(${colorR},${colorG},${colorB},0.9)`
+    ctx.lineWidth = Math.max(1, 2 * dpr)
+    ctx.stroke()
+    // Thin white outline for contrast
+    ctx.beginPath()
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'
+    ctx.lineWidth = Math.max(1, 0.5 * dpr)
+    ctx.stroke()
+    // Crosshair at center
+    const cl = Math.max(2, 4 * dpr)
+    ctx.beginPath()
+    ctx.moveTo(cx - cl, cy)
+    ctx.lineTo(cx + cl, cy)
+    ctx.moveTo(cx, cy - cl)
+    ctx.lineTo(cx, cy + cl)
+    ctx.strokeStyle = `rgba(${colorR},${colorG},${colorB},0.7)`
+    ctx.lineWidth = Math.max(1, 1 * dpr)
+    ctx.stroke()
+    // Position canvas so its center is at the mouse cursor relative to the stage
+    const stageRect = stage.getBoundingClientRect()
+    const halfCss = cssSize / 2
+    canvas.style.left = `${brushMousePos.x - stageRect.left - halfCss}px`
+    canvas.style.top = `${brushMousePos.y - stageRect.top - halfCss}px`
+  }, [brushMousePos, editorRenderMetrics, annotBrushPx, cursorColor])
+
   const diameterRenderMetrics = useMemo(
     () => getDiameterRenderMetrics(),
     [imageDims, diamStageSize, diamViewerZoom, diamViewerOffset],
-  )
-  const locoRenderMetrics = useMemo(
-    () => getLocoRenderMetrics(),
-    [imageDims, locoStageSize, locoViewerZoom, locoViewerOffset],
   )
   const locoDatasetRenderMetrics = useMemo(
     () => getLocoDatasetRenderMetrics(),
@@ -5686,45 +7340,6 @@ export default function App() {
       .map((xy) => ({ x: Number(xy?.[0]), y: Number(xy?.[1]) }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
   }, [locoCandidate, locoPreviewResult])
-  const locoLabActiveProposals = useMemo(
-    () => (locoFilteredProposals.length ? locoFilteredProposals : locoProposals),
-    [locoFilteredProposals, locoProposals],
-  )
-  const locoLabSelectedProposal = useMemo(() => {
-    if (!locoLabActiveProposals.length) return null
-    return locoLabActiveProposals.find((p) => String(p.proposal_id || '') === String(locoSelectedProposalId || '')) || locoLabActiveProposals[0]
-  }, [locoLabActiveProposals, locoSelectedProposalId])
-  const locoLabMeasurementsByProposal = useMemo(() => {
-    const out = {}
-    ;(Array.isArray(locoMeasuredResults) ? locoMeasuredResults : []).forEach((m) => {
-      const pid = String(m?.proposal_id || '')
-      if (pid) out[pid] = m
-    })
-    return out
-  }, [locoMeasuredResults])
-  const locoLabVisibleProposals = useMemo(() => {
-    const list = Array.isArray(locoLabActiveProposals) ? locoLabActiveProposals : []
-    return list
-      .filter((p) => locoLayerVisibility.rejected || String(p?.status || '') === 'accepted' || String(p?.proposal_id || '') === String(locoLabSelectedProposal?.proposal_id || ''))
-      .slice(0, 650)
-  }, [locoLabActiveProposals, locoLayerVisibility.rejected, locoLabSelectedProposal])
-  const locoLabComponentBoxes = useMemo(() => {
-    const seen = new Set()
-    const out = []
-    ;(Array.isArray(locoLabActiveProposals) ? locoLabActiveProposals : []).forEach((p) => {
-      const bbox = Array.isArray(p?.component_bbox) ? p.component_bbox : null
-      if (!bbox || bbox.length < 4) return
-      const key = `${p.component_id || ''}-${bbox.join(',')}`
-      if (seen.has(key)) return
-      seen.add(key)
-      out.push({ key, x: Number(bbox[0]), y: Number(bbox[1]), w: Number(bbox[2]), h: Number(bbox[3]) })
-    })
-    return out
-  }, [locoLabActiveProposals])
-  const locoLabOkMeasurements = useMemo(
-    () => (Array.isArray(locoMeasuredResults) ? locoMeasuredResults : []).filter((m) => String(m?.status || '') === 'ok'),
-    [locoMeasuredResults],
-  )
   const locoDatasetSelectedCircle = useMemo(
     () => locoDatasetCircles.find((c) => String(c.candidate_id) === String(locoDatasetSelectedId)) || null,
     [locoDatasetCircles, locoDatasetSelectedId],
@@ -5757,6 +7372,34 @@ export default function App() {
     () => locoTrainingMetrics.filter((row) => row.status === 'ok'),
     [locoTrainingMetrics],
   )
+  const locoTrainingCv5BinaryRows = useMemo(
+    () => (Array.isArray(locoTrainingResult?.cv5_binary_metrics_summary) ? locoTrainingResult.cv5_binary_metrics_summary : []),
+    [locoTrainingResult],
+  )
+  const locoTrainingCv5MulticlassRows = useMemo(
+    () => (Array.isArray(locoTrainingResult?.cv5_multiclass_metrics_summary) ? locoTrainingResult.cv5_multiclass_metrics_summary : []),
+    [locoTrainingResult],
+  )
+  const locoTrainingIsMulticlassRun = useMemo(
+    () => !!(locoTrainingResult?.meta?.multiclass_model || (Array.isArray(locoTrainingResult?.multiclass_metrics_summary) && locoTrainingResult.multiclass_metrics_summary.length)),
+    [locoTrainingResult],
+  )
+  const locoMaskedSavedImages = useMemo(
+    () => savedImages.filter((img) => img.mask_thumbnail_b64),
+    [savedImages],
+  )
+  const locoTestSelectedSavedModel = useMemo(
+    () => locoSavedModels.find((m) => m.saved_model_id === locoTestTrainingRunId) || null,
+    [locoSavedModels, locoTestTrainingRunId],
+  )
+  const locoDetectorSelectedSavedModel = useMemo(
+    () => locoSavedModels.find((m) => m.saved_model_id === locoModelRunId) || null,
+    [locoSavedModels, locoModelRunId],
+  )
+  const diamCalibrationLine = useMemo(
+    () => calibrationLineFromState(diamCalibration),
+    [diamCalibration],
+  )
   const locoTrainingBest = useMemo(() => {
     const best = (field) => {
       const rows = locoTrainingOkMetrics.filter((row) => row[field] != null)
@@ -5769,6 +7412,41 @@ export default function App() {
       pr_auc: best('pr_auc'),
     }
   }, [locoTrainingOkMetrics])
+  const locoTrainingBatchRows = useMemo(
+    () => buildLocoTrainingBatchRows(locoTrainingBatchJobs),
+    [locoTrainingBatchJobs],
+  )
+  const locoTrainingVisibleBatchRows = useMemo(() => {
+    if (locoTrainingBatchTopK === 'all') return locoTrainingBatchRows
+    const limit = Math.max(1, Number(locoTrainingBatchTopK) || 1)
+    return locoTrainingBatchRows.slice(0, limit)
+  }, [locoTrainingBatchRows, locoTrainingBatchTopK])
+  const locoTrainingBatchSummary = useMemo(() => {
+    const total = locoTrainingBatchJobs.length
+    const pending = locoTrainingBatchJobs.filter((job) => job.status === 'pending').length
+    const running = locoTrainingBatchJobs.filter((job) => job.status === 'running').length
+    const done = locoTrainingBatchJobs.filter((job) => job.status === 'done').length
+    const error = locoTrainingBatchJobs.filter((job) => job.status === 'error').length
+    const completed = done + error
+    return {
+      total,
+      pending,
+      running,
+      done,
+      error,
+      completed,
+      progressPct: total ? Math.round((completed / total) * 100) : 0,
+    }
+  }, [locoTrainingBatchJobs])
+  const locoTrainingMcThresholdGrid = useMemo(() => {
+    const grid = locoTrainingResult?.multiclass_confusion_threshold_grids?.[locoTrainingSelectedModel]
+    return Array.isArray(grid) ? grid : []
+  }, [locoTrainingResult, locoTrainingSelectedModel])
+  const locoTrainingMcThresholdEntry = useMemo(() => {
+    if (!locoTrainingMcThresholdGrid.length) return null
+    const target = Number(locoTrainingMcCrossingThreshold || 0.5)
+    return locoTrainingMcThresholdGrid.slice().sort((a, b) => Math.abs(Number(a.threshold) - target) - Math.abs(Number(b.threshold) - target))[0] || null
+  }, [locoTrainingMcThresholdGrid, locoTrainingMcCrossingThreshold])
   const locoTrainingThresholdRows = useMemo(
     () => (Array.isArray(locoTrainingResult?.threshold_metrics) ? locoTrainingResult.threshold_metrics : []).filter((row) => row.model_id === locoTrainingSelectedModel),
     [locoTrainingResult, locoTrainingSelectedModel],
@@ -5828,6 +7506,39 @@ export default function App() {
     () => Array.isArray(locoModelResult?.rejected) ? locoModelResult.rejected : [],
     [locoModelResult],
   )
+  const locoModelStageSummary = useMemo(() => (locoModelResult?.summary || {}), [locoModelResult])
+  const locoModelStageFlags = useMemo(() => ({
+    baseReady: !!locoModelStageState.baseReady,
+    thresholdReady: !!locoModelStageState.thresholdReady,
+    nmsReady: !!locoModelStageState.nmsReady,
+    spatialReady: !!locoModelStageState.spatialReady,
+    baseDirty: !!locoModelStageState.baseDirty,
+    thresholdDirty: !!locoModelStageState.thresholdDirty,
+    nmsDirty: !!locoModelStageState.nmsDirty,
+    spatialDirty: !!locoModelStageState.spatialDirty,
+    resultStage: String(locoModelStageState.resultStage || locoModelStageSummary.result_stage || ''),
+    resultStale: locoModelStageIsStale(locoModelStageState, locoModelStageState.resultStage || locoModelStageSummary.result_stage || ''),
+  }), [locoModelStageState, locoModelStageSummary])
+  const locoModelHasStageBase = useMemo(
+    () => !!imageUrl && !!locoModelStageState.baseReady && !!String(locoModelStageState.detector_state_id || '').trim(),
+    [imageUrl, locoModelStageState.baseReady, locoModelStageState.detector_state_id],
+  )
+  const locoModelCanApplyThreshold = useMemo(
+    () => locoModelHasStageBase,
+    [locoModelHasStageBase],
+  )
+  const locoModelCanApplyNms = useMemo(
+    () => locoModelHasStageBase && !!locoModelStageState.thresholdReady && !locoModelStageState.thresholdDirty,
+    [locoModelHasStageBase, locoModelStageState.thresholdReady, locoModelStageState.thresholdDirty],
+  )
+  const locoModelCanApplySpatial = useMemo(
+    () => locoModelHasStageBase && !!locoModelStageState.nmsReady && !locoModelStageState.thresholdDirty && !locoModelStageState.nmsDirty,
+    [locoModelHasStageBase, locoModelStageState.nmsReady, locoModelStageState.thresholdDirty, locoModelStageState.nmsDirty],
+  )
+  const locoModelCanMeasure = useMemo(
+    () => locoModelAccepted.length > 0 && locoModelStageFlags.resultStage !== 'base',
+    [locoModelAccepted.length, locoModelStageFlags.resultStage],
+  )
   const locoModelSelectedCandidate = useMemo(() => {
     const rows = [...locoModelAccepted, ...locoModelRejected]
     return rows.find((c) => String(c.candidate_id) === String(locoModelSelectedId)) || null
@@ -5847,6 +7558,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <OriginToast />
       <header className="top">
         <div>
           <h1>Scribble Research</h1>
@@ -5860,14 +7572,34 @@ export default function App() {
         <span>{notice.text}</span>
       </div>
 
-      <Navigation
-        activeGroup={activeGroup}
-        activeTab={activeTab}
-        onGroupChange={handleGroupChange}
-        onTabChange={handleTabChange}
-      />
+      <div className="app-layout">
+        <Navigation
+          activeGroup={activeGroup}
+          activeTab={activeTab}
+          onGroupChange={handleGroupChange}
+          onTabChange={handleTabChange}
+        />
+        <div className="content-area">
+          {/* Tab strip for Level 2 sub-tabs (compact horizontal boxes) */}
+          {(() => {
+            const group = GROUPS.find((g) => g.key === activeGroup)
+            if (!group) return null
+            return (
+              <div className="tab-strip">
+                {group.tabs.map((t) => (
+                  <button
+                    key={t.key}
+                    className={`tab-strip-btn ${activeTab === t.key ? 'active' : ''}`}
+                    onClick={() => handleTabChange(t.key)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            )
+          })()}
 
-      <div className="layout">
+          <div className="layout">
         <aside className="left">
           {workspaceTab === 'workbench' ? (
             <>
@@ -5908,19 +7640,6 @@ export default function App() {
                 {localImageFiles.length ? (
                   <button onClick={() => loadLocalImage()} disabled={!selectedLocalPath || loading.localLoad}>Cargar seleccion local</button>
                 ) : null}
-                <label className="field">
-                  <span>GT opcional (binaria)</span>
-                  <input id="gt-file-input" type="file" accept="image/*,.png,.tif,.tiff" />
-                </label>
-                <div className="kpi">ID: <strong>{imageId || '-'}</strong></div>
-                <div className="kpi">Archivo: <strong>{imageName || '-'}</strong></div>
-                <div className="kpi">Exclusion: <strong>{excludeRect ? `${excludeRect.w}x${excludeRect.h}px` : 'sin rectangulo'}</strong></div>
-                {draftInfo ? <div className="kpi">Draft: <strong>{draftInfo}</strong></div> : null}
-                <div className="inline">
-                  <button onClick={saveScribblesNow} disabled={!imageId || loading.libraryList}>Guardar scribbles</button>
-                  <button onClick={() => refreshSavedImages()} disabled={loading.libraryList}>Refrescar guardadas</button>
-                </div>
-                <button onClick={refreshResults} disabled={!imageId || loading.listResults}>Refrescar resultados</button>
               </section>
 
               <section className="card">
@@ -5976,6 +7695,14 @@ export default function App() {
                       <strong>{annotBrushPx}px</strong>
                     </label>
                     <button className={`icon-tool ${brushAutoScale ? 'toggle-active' : ''}`} onClick={() => setBrushAutoScale((v) => !v)} disabled={!imageUrl} title="Escalado automatico por resolucion">Auto</button>
+                    <label className="cursor-color-picker" title="Color del cursor">
+                      <input
+                        type="color"
+                        value={cursorColor}
+                        onChange={(e) => setCursorColor(e.target.value)}
+                        disabled={!imageUrl}
+                      />
+                    </label>
                   </div>
                   <div className="shortcut-note">Ctrl + rueda hace zoom en la imagen. Alt + rueda cambia el pincel.</div>
                   <div className="tool-row">
@@ -6012,9 +7739,13 @@ export default function App() {
                       <label><input type="checkbox" checked={modelIncludeHalo} onChange={(e) => setModelIncludeHalo(e.target.checked)} disabled={!imageUrl} /> halo</label>
                       <label><input type="checkbox" checked={modelIncludeBackground} onChange={(e) => setModelIncludeBackground(e.target.checked)} disabled={!imageUrl} /> background</label>
                     </div>
-                    <div className="inline">
+                    <div className="inline" style={{ gridTemplateColumns: '1fr 1fr 1fr', width: '100%' }}>
                       <button className="primary" onClick={predictWithAssistModel} disabled={!imageUrl || !selectedAssistModelId || loading.modelsPredict}>Predecir</button>
                       <button onClick={applyModelPredictionAsScribbles} disabled={!modelPrediction?.suggestion_b64}>Aplicar</button>
+                      <button onClick={clearModelPrediction} disabled={!modelPrediction}>Cancelar</button>
+                    </div>
+                    <div className="inline" style={{ gridTemplateColumns: '1fr', marginTop: '6px', width: '100%' }}>
+                      <button className="primary" onClick={predictMaskAsExperiment} disabled={!imageUrl || !selectedAssistModelId || loading.modelsPredict}>Predecir mascara</button>
                     </div>
                     {modelPrediction ? (
                       <div className="model-prediction-strip">
@@ -6176,35 +7907,7 @@ export default function App() {
               <section className="card">
                 <h2>Diameter Research</h2>
                 <div className="kpi">ID imagen: <strong>{imageId || '-'}</strong></div>
-                <div className="side-tabs compact-diam-tabs">
-                  <button
-                    className={diamMethodPanel === 'automatic' ? 'active' : ''}
-                    onClick={() => {
-                      setDiamMethodPanel('automatic')
-                      if (!['hybrid_profile_diameter_v3_2_auto', 'hybrid_profile_diameter_v3_2_small_mask', 'hybrid_profile_diameter_v3_2_large_image', 'hybrid_profile_diameter_v3_1', 'hybrid_profile_diameter_v2', 'hybrid_profile_diameter_v1'].includes(diamMethodId)) {
-                        setDiamMethodId('hybrid_profile_diameter_v3_2_auto')
-                      }
-                    }}
-                  >
-                    Automatico
-                  </button>
-                  <button
-                    className={diamMethodPanel === 'manual' ? 'active' : ''}
-                    onClick={() => {
-                      setDiamMethodPanel('manual')
-                      if (!['circle_square_mask_diameter', 'manual_dual_side_caliper', 'manual_line_direct_caliper', 'ellipse_oriented_fit'].includes(diamMethodId)) {
-                        setDiamMethodId('circle_square_mask_diameter')
-                        setDiamViewerMode('circle')
-                      } else if (diamMethodId === 'circle_square_mask_diameter') {
-                        setDiamViewerMode('circle')
-                      } else {
-                        setDiamViewerMode('manual')
-                      }
-                    }}
-                  >
-                    Manual geometrico
-                  </button>
-                </div>
+                <div className="kpi">Modo: <strong>Manual geometrico</strong></div>
                 <label className="field">
                   <span>Metodo</span>
                   <select
@@ -6213,35 +7916,27 @@ export default function App() {
                       const nextMethod = e.target.value
                       setDiamMethodId(nextMethod)
                       if (nextMethod === 'circle_square_mask_diameter') {
-                        setDiamViewerMode('circle')
-                        updateDiamRawParam('circle_square_seed_mode', 'manual_circle')
+                        switchDiameterViewer('circle', { forceManualCircleSeed: true })
                       } else if (['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(nextMethod)) {
-                        setDiamViewerMode('manual')
+                        switchDiameterViewer('manual')
                       }
                     }}
                     disabled={!imageId}
                   >
-                    {diamMethodPanel === 'automatic' ? (
-                      <>
-                        <option value="hybrid_profile_diameter_v3_2_auto">Auto small/large</option>
-                        <option value="hybrid_profile_diameter_v3_2_small_mask">Small mask-driven</option>
-                        <option value="hybrid_profile_diameter_v3_2_large_image">Large image-driven</option>
-                        <option value="hybrid_profile_diameter_v3_1">v3.1 baseline local</option>
-                        <option value="hybrid_profile_diameter_v2">v2 robust</option>
-                        <option value="hybrid_profile_diameter_v1">v1 baseline</option>
-                      </>
-                    ) : (
-                      <>
-                        <option value="circle_square_mask_diameter">Circle-square mask</option>
-                        <option value="manual_dual_side_caliper">Linea mask</option>
-                        <option value="manual_line_direct_caliper">Linea manual</option>
-                        <option value="ellipse_oriented_fit">Ellipse oriented fit</option>
-                      </>
-                    )}
+                    <option value="circle_square_mask_diameter">Circle-square mask</option>
+                    <option value="manual_dual_side_caliper">Linea mask</option>
+                    <option value="manual_line_direct_caliper">Linea manual</option>
+                    <option value="ellipse_oriented_fit">Ellipse oriented fit</option>
                   </select>
                 </label>
                 <p className="small">
-                  `Auto` decide entre ruta image-driven y mask-driven. `Small` mide dentro de la mascara local. `Circle-square` queda bloqueado a circulo manual. `Linea mask` corta tu linea con la mascara; `Linea manual` usa exactamente el trazo dibujado.
+                  {diamMethodId === 'circle_square_mask_diameter'
+                    ? 'Circle-square usa un circulo manual como semilla y mide sobre la mascara del run de soporte.'
+                    : diamMethodId === 'manual_dual_side_caliper'
+                      ? 'Linea mask corta tu trazo con la mascara y mide solo el tramo respaldado por ella.'
+                      : diamMethodId === 'manual_line_direct_caliper'
+                        ? 'Linea manual usa exactamente la longitud del trazo que dibujas.'
+                        : 'Ellipse oriented fit ajusta una elipse sobre la mascara local y usa el eje menor como diametro.'}
                 </p>
                 <label className="field">
                   <span>Fuente de soporte</span>
@@ -6265,7 +7960,7 @@ export default function App() {
                   Soporte elegido: <strong>{selectedPriorRun ? `${selectedPriorRun.experiment_id}${selectedPriorRun.profile_name ? ` (${selectedPriorRun.profile_name})` : ''}` : 'sin runs'}</strong>
                 </div>
                 <div className="inline">
-                  <button onClick={() => refreshResults()} disabled={!imageId || loading.listResults}>Refrescar modalidades</button>
+                  <button onClick={() => refreshResults()} disabled={!imageId || loading.listResults}>Refrescar soporte</button>
                   <button onClick={() => setDiamPriorRunId('latest')} disabled={!imageId || diamPriorRunId === 'latest'}>Usar ultimo</button>
                 </div>
                 <div className="inline">
@@ -6313,95 +8008,13 @@ export default function App() {
 
               <section className="card">
                 <h2>Parametros</h2>
-                <div className="diam-param-grid">
-                  <label className="field">
-                    <span>support high</span>
-                    <input type="number" step="0.05" min="0" max="1" value={diamParams.support_high_threshold} onChange={(e) => updateDiamParam('support_high_threshold', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>support low</span>
-                    <input type="number" step="0.05" min="0" max="1" value={diamParams.support_low_threshold} onChange={(e) => updateDiamParam('support_low_threshold', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>dilation px</span>
-                    <input type="number" step="1" min="0" value={diamParams.support_dilation_px} onChange={(e) => updateDiamParam('support_dilation_px', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>window px</span>
-                    <input type="number" step="2" min="9" value={diamParams.local_window_px} onChange={(e) => updateDiamParam('local_window_px', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>profile length</span>
-                    <input type="number" step="2" min="8" value={diamParams.profile_length_px} onChange={(e) => updateDiamParam('profile_length_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>profile count</span>
-                    <input type="number" step="1" min="1" value={diamParams.profile_count} onChange={(e) => updateDiamParam('profile_count', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>spacing px</span>
-                    <input type="number" step="0.5" min="0" value={diamParams.profile_spacing_px} onChange={(e) => updateDiamParam('profile_spacing_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>edge score</span>
-                    <input type="number" step="0.02" min="0" value={diamParams.edge_min_score} onChange={(e) => updateDiamParam('edge_min_score', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>min profiles</span>
-                    <input type="number" step="1" min="1" value={diamParams.min_valid_profiles} onChange={(e) => updateDiamParam('min_valid_profiles', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>MAD scale</span>
-                    <input type="number" step="0.25" min="0.5" value={diamParams.max_mad_scale} onChange={(e) => updateDiamParam('max_mad_scale', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>mask radius</span>
-                    <input type="number" step="2" min="8" value={diamParams.mask_local_radius_px} onChange={(e) => updateDiamParam('mask_local_radius_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>mask recenter</span>
-                    <input type="number" step="1" min="1" value={diamParams.mask_recenter_radius_px} onChange={(e) => updateDiamParam('mask_recenter_radius_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>mask rays</span>
-                    <input type="number" step="2" min="8" value={diamParams.mask_ray_count} onChange={(e) => updateDiamParam('mask_ray_count', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>auto small px</span>
-                    <input type="number" step="1" min="2" value={diamParams.auto_small_context_width_px} onChange={(e) => updateDiamParam('auto_small_context_width_px', e.target.value)} />
-                  </label>
-                </div>
                 {diamMethodId === 'circle_square_mask_diameter' ? (
                   <>
                     <h3>Circle-square</h3>
                     <div className="diam-param-grid">
                       <label className="field">
-                        <span>seed mode</span>
-                        <input value="manual circle" disabled readOnly />
-                      </label>
-                      <label className="field">
-                        <span>seed radius</span>
-                        <input type="number" step="1" min="1" value={diamParams.circle_square_seed_radius_px} onChange={(e) => updateDiamParam('circle_square_seed_radius_px', e.target.value)} />
-                      </label>
-                      <label className="field">
-                        <span>max circle</span>
-                        <input type="number" step="2" min="4" value={diamParams.circle_square_max_radius_px} onChange={(e) => updateDiamParam('circle_square_max_radius_px', e.target.value)} />
-                      </label>
-                      <label className="field">
-                        <span>square length</span>
-                        <input type="number" step="0.05" min="0.25" value={diamParams.circle_square_length_factor} onChange={(e) => updateDiamParam('circle_square_length_factor', e.target.value)} />
-                      </label>
-                      <label className="field">
-                        <span>square width</span>
-                        <input type="number" step="0.05" min="0.25" value={diamParams.circle_square_width_factor} onChange={(e) => updateDiamParam('circle_square_width_factor', e.target.value)} />
-                      </label>
-                      <label className="field">
                         <span>samples</span>
                         <input type="number" step="2" min="3" value={diamParams.circle_square_samples} onChange={(e) => updateDiamParam('circle_square_samples', e.target.value, true)} />
-                      </label>
-                      <label className="field">
-                        <span>max recenter</span>
-                        <input type="number" step="1" min="0" value={diamParams.circle_square_max_recenter_shift_px} onChange={(e) => updateDiamParam('circle_square_max_recenter_shift_px', e.target.value)} />
                       </label>
                       <label className="field">
                         <span>aggregation</span>
@@ -6409,10 +8022,6 @@ export default function App() {
                           <option value="median">median</option>
                           <option value="trimmed_mean">trimmed mean</option>
                         </select>
-                      </label>
-                      <label className="check-field">
-                        <input type="checkbox" checked={Boolean(diamParams.circle_square_recenter_seed)} onChange={(e) => updateDiamRawParam('circle_square_recenter_seed', e.target.checked)} />
-                        <span>recenter seed</span>
                       </label>
                     </div>
                   </>
@@ -6462,107 +8071,17 @@ export default function App() {
                 )}
               </section>
 
-              <section className="card">
-                <h2>Analisis por punto</h2>
-                {diamReviewTarget ? (
-                  <div className="review-target-box">
-                    <strong>Punto en revision: #{Number(diamReviewTarget.point_index) + 1}</strong>
-                    <span>
-                      {Number(diamReviewTarget.point?.x || 0).toFixed(1)}, {Number(diamReviewTarget.point?.y || 0).toFixed(1)}
-                      {' | '}
-                      {diamReviewTarget.status || 'sin estado'}
-                      {diamReviewTarget.diameter_px == null ? '' : ` | ${Number(diamReviewTarget.diameter_px).toFixed(2)} px`}
-                    </span>
-                  </div>
-                ) : (
-                  <p className="small">Selecciona `Revisar` en la tabla de resultados por punto para abrir la inspeccion ampliada y escribir tu conclusion.</p>
-                )}
-                <div className="inline">
-                  <label className="field">
-                    <span>categoria</span>
-                    <select value={validationForm.category} onChange={(e) => updateValidationForm('category', e.target.value)}>
-                      <option value="borde_limpio">borde_limpio</option>
-                      <option value="halo_moderado">halo_moderado</option>
-                      <option value="halo_fuerte">halo_fuerte</option>
-                      <option value="interseccion">interseccion</option>
-                      <option value="fibra_curva">fibra_curva</option>
-                      <option value="bajo_contraste">bajo_contraste</option>
-                      <option value="mala_segmentacion">mala_segmentacion</option>
-                      <option value="otro">otro</option>
-                    </select>
-                  </label>
-                  <label className="field">
-                    <span>calidad manual</span>
-                    <select value={validationForm.quality_manual} onChange={(e) => updateValidationForm('quality_manual', e.target.value)}>
-                      <option value="high">high</option>
-                      <option value="medium">medium</option>
-                      <option value="low">low</option>
-                    </select>
-                  </label>
-                </div>
-                <label className="field">
-                  <span>revision medicion</span>
-                  <select value={validationForm.measurement_decision} onChange={(e) => updateValidationForm('measurement_decision', e.target.value)}>
-                    <option value="unreviewed">sin revisar</option>
-                    <option value="validated">validada</option>
-                    <option value="rejected">negada</option>
-                    <option value="uncertain">dudosa</option>
-                  </select>
-                </label>
-                <div className="tier-buttons validation-decision-buttons">
-                  <button className="tier tier-a" onClick={() => saveValidationCase({ overrides: { measurement_decision: 'validated' } })} disabled={!imageId || loading.validationSave}>Validar punto</button>
-                  <button className="tier tier-c" onClick={() => saveValidationCase({ overrides: { measurement_decision: 'uncertain' } })} disabled={!imageId || loading.validationSave}>Dudoso</button>
-                  <button className="tier tier-unusable" onClick={() => saveValidationCase({ overrides: { measurement_decision: 'rejected' } })} disabled={!imageId || loading.validationSave}>Negar punto</button>
-                </div>
-                <label className="field">
-                  <span>diametro manual px (opcional)</span>
-                  <input type="number" step="0.01" min="0" value={validationForm.manual_diameter_px} onChange={(e) => updateValidationForm('manual_diameter_px', e.target.value)} />
-                </label>
-                <p className="small">Si el resultado automatico es malo, activa `Manual` sobre la imagen y marca dos extremos del diametro. El valor en px se rellena solo.</p>
-                <label className="field">
-                  <span>nota tecnica</span>
-                  <textarea rows={2} value={validationForm.notes} onChange={(e) => updateValidationForm('notes', e.target.value)} />
-                </label>
-                <label className="field">
-                  <span>conclusion del punto</span>
-                  <textarea rows={3} value={validationForm.result_comment} onChange={(e) => updateValidationForm('result_comment', e.target.value)} />
-                </label>
-                <div className="inline">
-                  <button onClick={() => saveValidationCase()} disabled={!imageId || !diamPoints.length || loading.validationSave}>Guardar caso</button>
-                  <button className="primary" onClick={runValidationCase} disabled={!imageId || !diamPoints.length || loading.validationRun}>Run Step 5 comparativo</button>
-                </div>
-                <div className="inline">
-                  <button onClick={() => refreshValidationCases()} disabled={!imageId || loading.validationList}>Refrescar casos</button>
-                  <button onClick={exportValidationAutofill} disabled={!imageId || loading.validationExport}>Export analisis</button>
-                </div>
-                {validationExportInfo ? <p className="small">Autofill: {validationExportInfo.autofill_md}</p> : null}
-                {!validationCases.length ? (
-                  <div className="placeholder small">Sin casos.</div>
-                ) : (
-                  <div className="validation-case-list">
-                    {validationCases.map((c) => (
-                      <button
-                        key={c.case_id}
-                        className={`validation-case-row ${c.case_id === validationActiveCaseId ? 'selected' : ''}`}
-                        onClick={() => applyValidationCaseToForm(c)}
-                        disabled={loading.validationList}
-                      >
-                        <strong>{c.case_id}</strong>
-                        <span>{c.category || 'otro'} | {c.measurement_decision || 'sin revisar'} | manual {c.manual_diameter_px ?? '-'}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </section>
-
               {/* Calibration Panel */}
               <section className="card">
                 <CalibrationPanel
                   calibration={diamCalibration}
-                  onChange={setDiamCalibration}
+                  onChange={updateDiamCalibration}
                   onSave={saveCalibration}
                   onLoad={loadCalibration}
                   onDelete={deleteCalibration}
+                  onStartDraw={startDiameterCalibrationLine}
+                  onClearLine={clearDiameterCalibrationLine}
+                  drawing={diamViewerMode === 'calibration'}
                   loading={loading.calibration}
                   imageId={imageId}
                 />
@@ -6594,142 +8113,18 @@ export default function App() {
                     <Histogram
                       values={diamResults
                         .filter((r) => r.status === 'ok' && r.diameter_px != null)
-                        .map((r) => {
-                          const d = Number(r.diameter_px)
-                          if (diamCalibration.enabled && diamHistogramUnit !== 'px') {
-                            const factor = diamCalibration.nm_per_px || (diamCalibration.known_nm / Math.max(1, diamCalibration.pixel_distance))
-                            return diamHistogramUnit === 'um' ? (d * factor) / 1000 : d * factor
-                          }
-                          return d
-                        })}
+                        .map((r) => convertDiameterValue(r.diameter_px, diamHistogramUnit))
+                        .filter((v) => v != null)}
                       unit={diamHistogramUnit}
                       bins={diamHistogramBins}
                     />
-                    <button
-                      onClick={() => {
-                        const csv = exportHistogramCsv(
-                          diamResults.filter((r) => r.status === 'ok' && r.diameter_px != null).map((r) => Number(r.diameter_px)),
-                          diamHistogramUnit,
-                          diamHistogramBins,
-                        )
-                        const blob = new Blob([csv], { type: 'text/csv' })
-                        const url = URL.createObjectURL(blob)
-                        const a = document.createElement('a')
-                        a.href = url
-                        a.download = `diametros_distribucion_${imageId || 'unknown'}.csv`
-                        a.click()
-                        URL.revokeObjectURL(url)
-                      }}
-                    >
+                    <button onClick={exportDiameterValuesCsv}>
                       Exportar CSV
                     </button>
                   </>
                 ) : (
                   <p className="small">Sin resultados de diametro para mostrar distribucion.</p>
                 )}
-              </section>
-            </>
-          ) : workspaceTab === 'loco' ? (
-            <>
-              <section className="card">
-                <h2>LOCO Lab</h2>
-                <div className="kpi">ID imagen: <strong>{imageId || '-'}</strong></div>
-                <p className="small">Laboratorio experimental para propuestas circulares, filtros, cortes de mascara y medicion tipo circle-square.</p>
-                <label className="field">
-                  <span>Fuente de soporte</span>
-                  <input value="prior_mask" disabled readOnly />
-                </label>
-                <label className="field">
-                  <span>Run de soporte</span>
-                  <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
-                    <option value="latest">ultimo run disponible</option>
-                    {runs.map((r, idx) => (
-                      <option key={r.run_id} value={r.run_id}>
-                        {idx + 1}. {r.experiment_id}{r.profile_name ? ` (${r.profile_name})` : ''} | {r.run_status_level} | {r.created_at || r.run_id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="inline">
-                  <button onClick={() => refreshResults()} disabled={!imageId || loading.listResults}>Refrescar soporte</button>
-                  <button onClick={() => setDiamPriorRunId('latest')} disabled={!imageId || diamPriorRunId === 'latest'}>Usar ultimo</button>
-                </div>
-                <div className="inline">
-                  <button className="primary" onClick={generateLocoLabProposals} disabled={!imageId || loading.locoLab}>Generar propuestas</button>
-                  <button onClick={filterLocoLabProposals} disabled={!locoProposals.length || loading.locoLab}>Filtrar</button>
-                  <button onClick={measureLocoLabProposals} disabled={!locoLabActiveProposals.length || loading.locoLab}>Medir</button>
-                </div>
-              </section>
-
-              <section className="card">
-                <h2>Etapas</h2>
-                <div className="loco-step-list">
-                  {LOCO_LAB_STAGES.map((step) => (
-                    <button
-                      key={step.key}
-                      className={step.key === locoLabStage ? 'selected' : ''}
-                      onClick={() => setLocoLabStage(step.key)}
-                      disabled={!imageId}
-                    >
-                      <strong>{step.label}</strong>
-                    </button>
-                  ))}
-                </div>
-                <div className="kpi">Propuestas: <strong>{locoLabActiveProposals.length}</strong></div>
-                <div className="kpi">Aceptadas: <strong>{locoLabActiveProposals.filter((p) => p.status === 'accepted').length}</strong></div>
-                <div className="kpi">Mediciones OK: <strong>{locoLabOkMeasurements.length}</strong></div>
-              </section>
-
-              <section className="card">
-                <h2>Parametros LOCO Lab</h2>
-                <label className="field">
-                  <span>ruta propuesta</span>
-                  <select value={locoProposalMethod} onChange={(e) => setLocoProposalMethod(e.target.value)}>
-                    <option value="circle_grid">Circle Proposal Grid</option>
-                  </select>
-                </label>
-                <div className="diam-param-grid loco-param-grid">
-                  <label className="field">
-                    <span>grid stride</span>
-                    <input type="number" min="3" step="1" value={locoLabParams.grid_stride_px} onChange={(e) => updateLocoLabParam('grid_stride_px', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>radio min</span>
-                    <input type="number" min="1" step="1" value={locoLabParams.radius_min_px} onChange={(e) => updateLocoLabParam('radius_min_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>radio max</span>
-                    <input type="number" min="1" step="1" value={locoLabParams.radius_max_px} onChange={(e) => updateLocoLabParam('radius_max_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>radio step</span>
-                    <input type="number" min="0.5" step="0.5" value={locoLabParams.radius_step_px} onChange={(e) => updateLocoLabParam('radius_step_px', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>score min</span>
-                    <input type="number" min="0" max="1" step="0.02" value={locoLabParams.min_score} onChange={(e) => updateLocoLabParam('min_score', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>ratio mascara</span>
-                    <input type="number" min="0" max="1" step="0.02" value={locoLabParams.mask_required_ratio} onChange={(e) => updateLocoLabParam('mask_required_ratio', e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>max candidatos</span>
-                    <input type="number" min="1" step="50" value={locoLabParams.max_candidates} onChange={(e) => updateLocoLabParam('max_candidates', e.target.value, true)} />
-                  </label>
-                  <label className="field">
-                    <span>measure limit</span>
-                    <input type="number" min="1" step="10" value={locoLabParams.measure_limit} onChange={(e) => updateLocoLabParam('measure_limit', e.target.value, true)} />
-                  </label>
-                  <label className="check-field">
-                    <input type="checkbox" checked={Boolean(locoLabParams.require_four_cuts)} onChange={(e) => updateLocoLabRawParam('require_four_cuts', e.target.checked)} />
-                    <span>exigir 4 cortes</span>
-                  </label>
-                </div>
-                <div className="inline">
-                  <button onClick={clearLocoLab} disabled={!locoProposals.length && !locoMeasuredResults.length}>Limpiar LOCO</button>
-                  <button onClick={saveLocoLabRun} disabled={(!locoLabActiveProposals.length && !locoMeasuredResults.length) || loading.locoLab}>Guardar run LOCO</button>
-                </div>
               </section>
             </>
           ) : workspaceTab === 'locoDataset' ? (
@@ -6751,7 +8146,6 @@ export default function App() {
                   <button onClick={previewLocoDatasetFeatures} disabled={!locoDatasetCircles.length || loading.locoDataset}>Calcular features</button>
                   <button className="primary" onClick={saveLocoDataset} disabled={!locoDatasetCircles.length || loading.locoDataset}>Generate Dataset</button>
                   <button onClick={clearLocoDatasetCanvas} disabled={!locoDatasetCircles.length && !locoDatasetDraftCircle}>Limpiar imagen</button>
-                  <button className="danger" onClick={cleanLegacyInvalid} disabled={loading.locoDataset}>Borrar invalid legacy</button>
                 </div>
                 <p className="small">Dataset: main</p>
               </section>
@@ -6832,6 +8226,64 @@ export default function App() {
                   )) : <div className="placeholder small">Sin circulos anotados.</div>}
                 </div>
               </section>
+
+              <section className="card">
+                <h2>Imagenes con mascara</h2>
+                <div className="inline">
+                  <button onClick={() => {
+                    console.log('[DEBUG-REFRESH] Refreshing saved images, current circleTypeCounts:', JSON.stringify(circleTypeCounts))
+                    refreshSavedImages()
+                  }} disabled={loading.libraryList}>Refrescar</button>
+                </div>
+                {!savedImages.length ? (
+                  <div className="placeholder small">Sin imagenes guardadas.</div>
+                ) : (
+                  <div className="saved-image-list">
+                    {savedImages.filter((img) => img.mask_thumbnail_b64).map((img) => {
+                      const isActive = img.image_id === imageId || img.image_id === selectedSavedImageId
+                      return (
+                        <button
+                          key={`masked-${img.image_id}`}
+                          className={`saved-image-row ${isActive ? 'selected' : ''}`}
+                          onClick={() => loadSavedImage(img.image_id)}
+                          disabled={loading.libraryLoad}
+                          title={`${img.image_name || img.image_id}\nClick para cargar en el editor`}
+                        >
+                          <div className="model-dataset-table-image" style={{ width: 'auto', gridTemplateColumns: '58px 58px', gap: '4px' }}>
+                            {img.thumbnail_b64 ? (
+                              <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt="" style={{ width: '58px', height: '44px' }} />
+                            ) : <span className="saved-image-empty" />}
+                            {img.mask_thumbnail_b64 ? (
+                              <img src={b64ToDataUrl(img.mask_thumbnail_b64, img.mask_thumbnail_mime || 'image/png')} alt="mask" style={{ width: '58px', height: '44px' }} />
+                            ) : <span className="saved-image-empty" />}
+                          </div>
+                          <span>
+                            <strong>{img.image_name || img.image_id}</strong>
+                              <em>{(() => {
+                              const ds = locoDatasetCircleCounts[img.image_id]
+                              const ct = circleTypeCounts[img.image_id]
+                              const parts = []
+                              // Prefer LOCO Dataset counts (generated), fallback to diameter points (auto-saved)
+                              const src = (ds && (ds.valid || ds.invalid_crossing || ds.invalid_other)) ? ds : ct
+                              if (src) {
+                                if (src.valid || src.invalid_crossing || src.invalid_other) {
+                                  if (src.valid) parts.push(`${src.valid}V`)
+                                  if (src.invalid_crossing || src.crossing) parts.push(`${src.invalid_crossing || src.crossing || 0}C`)
+                                  if (src.invalid_other || src.other_valid) parts.push(`${src.invalid_other || src.other_valid || 0}O`)
+                                }
+                              }
+                              return parts.length ? parts.join(' ') : 'sin circulos'
+                              })()}</em>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {!savedImages.filter((img) => img.mask_thumbnail_b64).length ? (
+                  <p className="small">Ninguna imagen tiene mascara predicha. Ejecuta un experimento primero.</p>
+                ) : null}
+              </section>
             </>
           ) : workspaceTab === 'locoAugment' ? (
             <>
@@ -6890,6 +8342,7 @@ export default function App() {
                   <button onClick={previewLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length}>Preview selected</button>
                   <button className="primary" onClick={applyLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length || !locoAugItems.length}>Apply to all dataset</button>
                   <button onClick={clearLocoAugmented} disabled={loading.locoAugment || !(locoAugCounts.augmented_total > 0)}>Clear augmented</button>
+                  <button onClick={openLocoAugmentedFolder} disabled={loading.openFolder || !(String(locoAugInfo?.augmented_dir || '').trim() || (locoAugCounts.augmented_total > 0 && String(locoAugDatasetDir || '').trim()))}>Abrir carpeta augmented</button>
                 </div>
                 {locoAugInfo ? (
                   <p className="small">
@@ -6922,7 +8375,6 @@ export default function App() {
                 <label className="field">
                   <span>pixeles</span>
                   <select value={locoTrainingPixelMode} onChange={(e) => setLocoTrainingPixelMode(e.target.value)}>
-                    <option value="square_64">square_64 legacy</option>
                     <option value="circle_only">circle_only</option>
                   </select>
                 </label>
@@ -6932,11 +8384,120 @@ export default function App() {
                 </label>
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseZoom} onChange={(e) => setLocoTrainingUseZoom(e.target.checked)} /><span>patch_zoom_factor</span></label>
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseSourceRadius} onChange={(e) => setLocoTrainingUseSourceRadius(e.target.checked)} /><span>radio real en aumentados</span></label>
+                <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseCv5} onChange={(e) => setLocoTrainingUseCv5(e.target.checked)} /><span>CV5</span></label>
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingMulticlass} onChange={(e) => setLocoTrainingMulticlass(e.target.checked)} /><span>modelo multiclase (valid/crossing/other)</span></label>
-                <button className="primary" onClick={trainLocoModels} disabled={loading.locoTraining}>Train Models</button>
-                {locoTrainingResult ? (
-                  <p className="small">{locoTrainingResult.run_id}<br />{locoTrainingResult.meta?.pixel_mode || '-'} prune {locoTrainingResult.meta?.circle_prune_px ?? 0} | {locoTrainingResult.meta?.feature_count ?? '-'} cols<br />{locoTrainingResult.run_dir}</p>
+                <div className="inline">
+                  <button className="primary" onClick={trainLocoModels} disabled={loading.locoTraining}>Train Models</button>
+                  <button onClick={addLocoTrainingBatchJob} disabled={loading.locoTraining}>Agregar al batch</button>
+                </div>
+                {locoTrainingProgress && (loading.locoTraining || locoTrainingProgress.status === 'done') ? (
+                  <div className="batch-progress-box">
+                    <div className="batch-progress-head">
+                      <strong>{formatLocoTrainingStage(locoTrainingProgress.stage)}</strong>
+                      <span>{locoTrainingProgress.model || ''}</span>
+                    </div>
+                    <div className="batch-progress-track">
+                      <div className="batch-progress-fill" style={{ width: `${progressPercent(locoTrainingProgress)}%` }} />
+                    </div>
+                    <div className="batch-progress-meta">
+                      <span>{locoTrainingProgress.completed_steps ?? 0} / {locoTrainingProgress.total_steps ?? 0}</span>
+                      <span>{locoTrainingProgress.status || 'running'}</span>
+                      {locoTrainingProgress.best_macro_f1 == null ? null : <span>best {Number(locoTrainingProgress.best_macro_f1).toFixed(3)}</span>}
+                    </div>
+                  </div>
                 ) : null}
+                <p className="small">Batch usa esta configuracion como snapshot y fuerza multiclase para todos los jobs.</p>
+                {locoTrainingResult ? (
+                  <p className="small">{locoTrainingResult.run_id}<br />{locoTrainingResult.meta?.pixel_mode || '-'} prune {locoTrainingResult.meta?.circle_prune_px ?? 0} | {locoTrainingResult.meta?.feature_count ?? '-'} cols | CV5 {locoTrainingResult.meta?.cv5_enabled ? 'on' : 'off'}<br />{locoTrainingResult.run_dir}</p>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <h2>Tuning</h2>
+                <label className="field">
+                  <span>intentos</span>
+                  <input type="number" min="1" max="40" step="1" value={locoTrainingTuneTrials} onChange={(e) => setLocoTrainingTuneTrials(clamp(Number(e.target.value || 12), 1, 40))} />
+                </label>
+                {locoTrainingProgress && String(locoTrainingProgress.stage || '').startsWith('optuna') ? (
+                  <div className="batch-progress-box">
+                    <div className="batch-progress-head">
+                      <strong>{formatLocoTrainingStage(locoTrainingProgress.stage)}</strong>
+                      <span>{locoTrainingProgress.model || ''}</span>
+                    </div>
+                    <div className="batch-progress-track">
+                      <div className="batch-progress-fill" style={{ width: `${progressPercent(locoTrainingProgress)}%` }} />
+                    </div>
+                    <div className="batch-progress-meta">
+                      <span>trial {locoTrainingProgress.completed_steps ?? 0} / {locoTrainingProgress.total_steps ?? 0}</span>
+                      <span>{locoTrainingProgress.status || 'running'}</span>
+                      {locoTrainingProgress.best_macro_f1 == null ? <span>best -</span> : <span>best {Number(locoTrainingProgress.best_macro_f1).toFixed(3)}</span>}
+                    </div>
+                  </div>
+                ) : null}
+                <p className="small">Usa el boton Tuning en una fila del batch para optimizar solo ese modelo multiclase.</p>
+              </section>
+
+              <section className="card">
+                <h2>Batch</h2>
+                <div className="batch-progress-box">
+                  <div className="batch-progress-head">
+                    <strong>Progreso</strong>
+                    <span>{locoTrainingBatchSummary.completed} / {locoTrainingBatchSummary.total || 0}</span>
+                  </div>
+                  <div className="batch-progress-track">
+                    <div className="batch-progress-fill" style={{ width: `${locoTrainingBatchSummary.progressPct}%` }} />
+                  </div>
+                  <div className="batch-progress-meta">
+                    <span>pending {locoTrainingBatchSummary.pending} | running {locoTrainingBatchSummary.running}</span>
+                    <span>done {locoTrainingBatchSummary.done} | error {locoTrainingBatchSummary.error}</span>
+                  </div>
+                </div>
+                <div className="inline">
+                  <button className="primary" onClick={runLocoTrainingBatch} disabled={loading.locoTraining || !locoTrainingBatchJobs.length}>Ejecutar batch</button>
+                  <button onClick={clearLocoTrainingBatchJobs} disabled={loading.locoTraining || !locoTrainingBatchJobs.length}>Limpiar batch</button>
+                </div>
+                <div className="training-batch-list">
+                  {locoTrainingBatchJobs.length ? locoTrainingBatchJobs.map((job, idx) => {
+                    const jobProgress = job.progress || locoTrainingBatchProgress[job.job_id] || null
+                    return (
+                    <div key={job.job_id} className={`training-batch-item status-${job.status}`}>
+                      <div className="training-batch-head">
+                        <strong>Job {idx + 1}</strong>
+                        <span className="training-batch-status">{job.status}</span>
+                      </div>
+                      <div className="training-batch-meta">
+                        <span>{job.config?.data_selection || '-'}</span>
+                        <span>test {Number(job.config?.test_size || 0).toFixed(2)}</span>
+                        <span>prune {job.config?.circle_prune_px ?? 0}</span>
+                        <span>seed {job.config?.random_seed ?? '-'}</span>
+                        <span>zoom {job.config?.uses_patch_zoom_factor ? 'on' : 'off'}</span>
+                        <span>radius {job.config?.uses_source_radius_px ? 'on' : 'off'}</span>
+                        <span>CV5 {job.config?.cv5_enabled ? 'on' : 'off'}</span>
+                      </div>
+                      {jobProgress ? (
+                        <div className="batch-progress-box">
+                          <div className="batch-progress-head">
+                            <strong>{formatLocoTrainingStage(jobProgress.stage)}</strong>
+                            <span>{jobProgress.model || ''}</span>
+                          </div>
+                          <div className="batch-progress-track">
+                            <div className="batch-progress-fill" style={{ width: `${progressPercent(jobProgress)}%` }} />
+                          </div>
+                          <div className="batch-progress-meta">
+                            <span>{jobProgress.completed_steps ?? 0} / {jobProgress.total_steps ?? 0}</span>
+                            <span>{jobProgress.status || job.status}</span>
+                            {jobProgress.best_macro_f1 == null ? null : <span>best {Number(jobProgress.best_macro_f1).toFixed(3)}</span>}
+                          </div>
+                        </div>
+                      ) : null}
+                      {job.response?.run_id ? <p className="small">run {job.response.run_id}</p> : null}
+                      {job.error ? <p className="small">{job.error}</p> : null}
+                      <div className="training-batch-actions">
+                        <button className="small-action" onClick={() => removeLocoTrainingBatchJob(job.job_id)} disabled={loading.locoTraining}>Eliminar</button>
+                      </div>
+                    </div>
+                  )}) : <div className="placeholder small">Sin jobs en cola.</div>}
+                </div>
               </section>
 
               <section className="card">
@@ -6965,27 +8526,66 @@ export default function App() {
                   </div>
                 ) : null}
               </section>
+
+              <section className="card">
+                <h2>Modelos guardados</h2>
+                <div className="inline">
+                  <button onClick={fetchLocoSavedModelsList} disabled={loading.locoTraining}>Refrescar</button>
+                  <button className="bad" onClick={() => deleteLocoSavedModel()} disabled={loading.locoTraining || !locoTrainingSelectedSavedModelId}>Eliminar</button>
+                </div>
+                <div className="table-wrap model-table">
+                  <table>
+                    <thead>
+                      <tr><th>modelo</th><th>origen</th><th>usar</th></tr>
+                    </thead>
+                    <tbody>
+                      {locoSavedModels.length ? locoSavedModels.map((item) => (
+                        <tr
+                          key={item.saved_model_id}
+                          className={item.saved_model_id === locoTrainingSelectedSavedModelId ? 'selected-row' : ''}
+                          onClick={() => setLocoTrainingSelectedSavedModelId(item.saved_model_id)}
+                        >
+                          <td>{item.model || item.model_id}</td>
+                          <td>{item.source_run_id || '-'}</td>
+                          <td>
+                            <button className="small-action" onClick={(e) => { e.stopPropagation(); useLocoSavedModel(item, 'test') }}>Test</button>
+                            <button className="small-action" onClick={(e) => { e.stopPropagation(); useLocoSavedModel(item, 'detector') }}>Detector</button>
+                          </td>
+                        </tr>
+                      )) : (
+                        <tr><td colSpan="3" className="placeholder">Sin modelos guardados.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
             </>
           ) : workspaceTab === 'locoTest' ? (
             <>
               <section className="card">
                 <h2>Test circle model</h2>
                 <label className="field">
-                  <span>training run</span>
-                  <select value={locoTestTrainingRunId} onChange={(e) => setLocoTestTrainingRunId(e.target.value)}>
-                    <option value="latest">latest</option>
-                    {locoTrainingRuns.map((r) => (
-                      <option key={r.run_id} value={r.run_id}>{r.created_at || r.run_id} | {r.sample_count} samples</option>
+                  <span>modelo guardado</span>
+                  <select value={locoTestTrainingRunId} onChange={(e) => onLocoTestTrainingRunChange(e.target.value)}>
+                    <option value="">Selecciona un modelo guardado</option>
+                    {locoSavedModels.map((m) => (
+                      <option key={m.saved_model_id} value={m.saved_model_id}>{m.model || m.model_id} | {m.created_at || m.saved_model_id}</option>
                     ))}
                   </select>
                 </label>
                 <label className="field">
                   <span>model</span>
-                  <select value={locoTestModelId} onChange={(e) => setLocoTestModelId(e.target.value)}>
-                    <option value="catboost">CatBoost</option>
-                    <option value="lightgbm">LightGBM</option>
-                    <option value="xgboost">XGBoost</option>
-                    <option value="extratrees">ExtraTrees</option>
+                  <select value={locoTestModelId} onChange={(e) => setLocoTestModelId(e.target.value)} disabled={!!locoTestSelectedSavedModel}>
+                    {locoTestSelectedSavedModel ? (
+                      <option value={locoTestSelectedSavedModel.model_id}>{locoTestSelectedSavedModel.model || locoTestSelectedSavedModel.model_id}</option>
+                    ) : (
+                      <>
+                        <option value="catboost">CatBoost</option>
+                        <option value="lightgbm">LightGBM</option>
+                        <option value="xgboost">XGBoost</option>
+                        <option value="extratrees">ExtraTrees</option>
+                      </>
+                    )}
                   </select>
                 </label>
                 <label className="field">
@@ -7005,9 +8605,47 @@ export default function App() {
                 </label>
                 <div className="inline">
                   <button onClick={refreshLocoTrainingRuns} disabled={loading.locoTraining}>Refrescar modelos</button>
-                  <button className="primary" onClick={predictLocoTestCircles} disabled={!locoTestCircles.length || loading.locoTest}>Predict circles</button>
+                  <button className="primary" onClick={predictLocoTestCircles} disabled={!locoTestCircles.length || loading.locoTest || !locoTestTrainingRunId}>Predict circles</button>
                   <button onClick={clearLocoTestCanvas} disabled={!locoTestCircles.length && !locoTestDraftCircle}>Limpiar imagen</button>
                 </div>
+              </section>
+
+              <section className="card">
+                <h2>Imagenes con mascara</h2>
+                <div className="inline">
+                  <button onClick={refreshSavedImages} disabled={loading.libraryList}>Refrescar</button>
+                </div>
+                {!savedImages.length ? (
+                  <div className="placeholder small">Sin imagenes guardadas.</div>
+                ) : (
+                  <div className="saved-image-list">
+                    {locoMaskedSavedImages.map((img) => {
+                      const isActive = img.image_id === imageId || img.image_id === selectedSavedImageId
+                      return (
+                        <button
+                          key={`test-masked-${img.image_id}`}
+                          className={`saved-image-row ${isActive ? 'selected' : ''}`}
+                          onClick={() => loadSavedImage(img.image_id)}
+                          disabled={loading.libraryLoad}
+                          title={`${img.image_name || img.image_id}\nClick para cargar en el editor`}
+                        >
+                          <div className="model-dataset-table-image" style={{ width: 'auto', gridTemplateColumns: '58px 58px', gap: '4px' }}>
+                            {img.thumbnail_b64 ? (
+                              <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt="" style={{ width: '58px', height: '44px' }} />
+                            ) : <span className="saved-image-empty" />}
+                            {img.mask_thumbnail_b64 ? (
+                              <img src={b64ToDataUrl(img.mask_thumbnail_b64, img.mask_thumbnail_mime || 'image/png')} alt="mask" style={{ width: '58px', height: '44px' }} />
+                            ) : <span className="saved-image-empty" />}
+                          </div>
+                          <span><strong>{img.image_name || img.image_id}</strong></span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {!locoMaskedSavedImages.length ? (
+                  <p className="small">Ninguna imagen tiene mascara predicha. Ejecuta un experimento primero.</p>
+                ) : null}
               </section>
 
               <section className="card">
@@ -7050,26 +8688,32 @@ export default function App() {
               <section className="card">
                 <h2>LOCO Detector</h2>
                 <label className="field">
-                  <span>training run</span>
-                  <select value={locoModelRunId} onChange={(e) => setLocoModelRunId(e.target.value)}>
-                    <option value="latest">latest</option>
-                    {locoTrainingRuns.map((r) => (
-                      <option key={r.run_id} value={r.run_id}>{r.created_at || r.run_id} | {r.sample_count} samples</option>
+                  <span>modelo guardado</span>
+                  <select value={locoModelRunId} onChange={(e) => onLocoModelRunChange(e.target.value)}>
+                    <option value="">Selecciona un modelo guardado</option>
+                    {locoSavedModels.map((m) => (
+                      <option key={m.saved_model_id} value={m.saved_model_id}>{m.model || m.model_id} | {m.created_at || m.saved_model_id}</option>
                     ))}
                   </select>
                 </label>
                 <label className="field">
                   <span>model</span>
-                  <select value={locoModelId} onChange={(e) => setLocoModelId(e.target.value)}>
-                    <option value="catboost">CatBoost</option>
-                    <option value="lightgbm">LightGBM</option>
-                    <option value="xgboost">XGBoost</option>
-                    <option value="extratrees">ExtraTrees</option>
+                  <select value={locoModelId} onChange={(e) => setLocoModelId(e.target.value)} disabled={!!locoDetectorSelectedSavedModel}>
+                    {locoDetectorSelectedSavedModel ? (
+                      <option value={locoDetectorSelectedSavedModel.model_id}>{locoDetectorSelectedSavedModel.model || locoDetectorSelectedSavedModel.model_id}</option>
+                    ) : (
+                      <>
+                        <option value="catboost">CatBoost</option>
+                        <option value="lightgbm">LightGBM</option>
+                        <option value="xgboost">XGBoost</option>
+                        <option value="extratrees">ExtraTrees</option>
+                      </>
+                    )}
                   </select>
                 </label>
                 <label className="field">
                   <span>Run de soporte</span>
-                  <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
+                  <select value={diamPriorRunId} onChange={(e) => onLocoDetectorSupportRunChange(e.target.value)} disabled={!imageId}>
                     <option value="latest">ultimo run disponible</option>
                     {runs.map((r, idx) => (
                       <option key={r.run_id} value={r.run_id}>{idx + 1}. {r.experiment_id} | {r.run_status_level}</option>
@@ -7078,10 +8722,82 @@ export default function App() {
                 </label>
                 <div className="inline">
                   <button onClick={refreshLocoTrainingRuns} disabled={loading.locoTraining}>Refrescar modelos</button>
-                  <button className="primary" onClick={detectLocoModelCircles} disabled={!imageUrl || loading.locoModel}>Detect circles</button>
-                  <button onClick={clearLocoModelDetector} disabled={!locoModelResult}>Limpiar detector</button>
+                  <button className="primary" onClick={runLocoModelBaseDetector} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Run base detector</button>
                 </div>
-                <button onClick={measureLocoModelAccepted} disabled={!locoModelAccepted.length || loading.locoModel}>Run Diameter on Accepted</button>
+                <div className="inline detector-stage-actions">
+                  <button onClick={applyLocoModelThreshold} disabled={!locoModelCanApplyThreshold || loading.locoModel}>Apply threshold</button>
+                  <button onClick={applyLocoModelThresholdOnward} disabled={!locoModelCanApplyThreshold || loading.locoModel}>Apply threshold onward</button>
+                </div>
+                <div className="inline detector-stage-actions">
+                  <button onClick={applyLocoModelNms} disabled={!locoModelCanApplyNms || loading.locoModel}>Apply NMS</button>
+                  <button onClick={applyLocoModelNmsOnward} disabled={!locoModelCanApplyNms || loading.locoModel}>Apply NMS onward</button>
+                </div>
+                <div className="inline detector-stage-actions">
+                  <button onClick={applyLocoModelSpatial} disabled={!locoModelCanApplySpatial || loading.locoModel}>Apply spatial</button>
+                  <button onClick={applyLocoModelSpatialOnward} disabled={!locoModelCanApplySpatial || loading.locoModel}>Apply spatial onward</button>
+                  <button className="primary" onClick={applyLocoModelPendingFilters} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Apply pending filters</button>
+                </div>
+                <div className="inline">
+                  <button onClick={clearLocoModelDetector} disabled={!locoModelResult}>Limpiar detector</button>
+                  <button onClick={measureLocoModelAccepted} disabled={!locoModelCanMeasure || loading.locoModel}>Enviar Accepted a Medicion</button>
+                </div>
+                <div className="detector-stage-status">
+                  <span className={`stage-pill ${locoModelStageState.baseReady && !locoModelStageState.baseDirty ? 'ready' : (locoModelStageState.baseDirty ? 'dirty' : '')}`}>Base {locoModelStageState.baseReady ? (locoModelStageState.baseDirty ? 'desactualizada' : 'lista') : (locoModelStageState.baseDirty ? 'pendiente' : 'vacia')}</span>
+                  <span className={`stage-pill ${locoModelStageState.thresholdReady && !locoModelStageState.thresholdDirty ? 'ready' : (locoModelStageState.thresholdDirty ? 'dirty' : '')}`}>Threshold {locoModelStageState.thresholdReady ? (locoModelStageState.thresholdDirty ? 'desactualizado' : 'listo') : 'pendiente'}</span>
+                  <span className={`stage-pill ${locoModelStageState.nmsReady && !locoModelStageState.nmsDirty ? 'ready' : (locoModelStageState.nmsDirty ? 'dirty' : '')}`}>NMS {locoModelStageState.nmsReady ? (locoModelStageState.nmsDirty ? 'desactualizado' : 'listo') : 'pendiente'}</span>
+                  <span className={`stage-pill ${locoModelStageState.spatialReady && !locoModelStageState.spatialDirty ? 'ready' : (locoModelStageState.spatialDirty ? 'dirty' : '')}`}>Spatial {locoModelStageState.spatialReady ? (locoModelStageState.spatialDirty ? 'desactualizado' : 'listo') : 'pendiente'}</span>
+                </div>
+              </section>
+
+              <section className="card">
+                <h2>Zonas de exclusion</h2>
+                <div className="inline detector-stage-actions">
+                  <button className={locoModelTool === 'exclude' ? 'primary' : ''} onClick={() => setLocoModelTool((prev) => prev === 'exclude' ? 'pan' : 'exclude')} disabled={!imageUrl}>
+                    {locoModelTool === 'exclude' ? 'Modo exclusion activo' : 'Modo exclusion'}
+                  </button>
+                  <button onClick={clearLocoModelExcludeSelection} disabled={locoModelExcludeActiveIdx < 0 || loading.locoModelExclude}>Borrar seleccion</button>
+                  <button onClick={clearAllLocoModelExclusions} disabled={!locoModelExcludeRects.length || loading.locoModelExclude}>Limpiar exclusiones</button>
+                </div>
+                <div className="kpi">Rectangulos: <strong>{locoModelExcludeRects.length}</strong></div>
+                <p className="small">Dibuja rectangulos sobre la imagen para impedir que el detector busque candidatos en esas zonas.</p>
+              </section>
+
+              <section className="card">
+                <h2>Imagenes con mascara</h2>
+                <div className="inline">
+                  <button onClick={refreshSavedImages} disabled={loading.libraryList}>Refrescar</button>
+                </div>
+                {!savedImages.length ? (
+                  <div className="placeholder small">Sin imagenes guardadas.</div>
+                ) : (
+                  <div className="saved-image-list">
+                    {locoMaskedSavedImages.map((img) => {
+                      const isActive = img.image_id === imageId || img.image_id === selectedSavedImageId
+                      return (
+                        <button
+                          key={`detector-masked-${img.image_id}`}
+                          className={`saved-image-row ${isActive ? 'selected' : ''}`}
+                          onClick={() => loadSavedImage(img.image_id)}
+                          disabled={loading.libraryLoad}
+                          title={`${img.image_name || img.image_id}\nClick para cargar en el detector`}
+                        >
+                          <div className="model-dataset-table-image" style={{ width: 'auto', gridTemplateColumns: '58px 58px', gap: '4px' }}>
+                            {img.thumbnail_b64 ? (
+                              <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt="" style={{ width: '58px', height: '44px' }} />
+                            ) : <span className="saved-image-empty" />}
+                            {img.mask_thumbnail_b64 ? (
+                              <img src={b64ToDataUrl(img.mask_thumbnail_b64, img.mask_thumbnail_mime || 'image/png')} alt="mask" style={{ width: '58px', height: '44px' }} />
+                            ) : <span className="saved-image-empty" />}
+                          </div>
+                          <span><strong>{img.image_name || img.image_id}</strong></span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {!locoMaskedSavedImages.length ? (
+                  <p className="small">Ninguna imagen tiene mascara predicha. Ejecuta un experimento primero.</p>
+                ) : null}
               </section>
 
               <section className="card">
@@ -7092,8 +8808,23 @@ export default function App() {
                     {Object.entries(LOCO_PRESETS).map(([key, p]) => (
                       <option key={key} value={key}>{p.label}</option>
                     ))}
+                    {locoModelCustomPresets.length ? (
+                      <optgroup label="presets guardados">
+                        {locoModelCustomPresets.map((item) => (
+                          <option key={item.preset_id} value={makeLocoCustomPresetValue(item.preset_id)}>{item.preset_name}</option>
+                        ))}
+                      </optgroup>
+                    ) : null}
                   </select>
                 </label>
+                <label className="field">
+                  <span>nombre preset</span>
+                  <input type="text" value={locoModelPresetName} onChange={(e) => setLocoModelPresetName(e.target.value)} placeholder="Mi preset TEM" />
+                </label>
+                <div className="inline">
+                  <button onClick={saveLocoModelPreset} disabled={loading.locoModel}>Guardar preset actual</button>
+                  <button onClick={deleteLocoModelPreset} disabled={loading.locoModel || !String(locoModelPreset).startsWith('custom:')}>Eliminar preset</button>
+                </div>
                 <p className="small">Selecciona un perfil seg\u00fan el tipo de fibra y nivel de estrictez. Los par\u00e1metros se ajustan autom\u00e1ticamente. Al modificar cualquier par\u00e1metro manualmente, vuelve a "Personalizado".</p>
               </section>
 
@@ -7152,7 +8883,7 @@ export default function App() {
               <section className="card">
                 <h2>NMS y capas</h2>
                 <label className="check-field"><input type="checkbox" checked={!!locoModelParams.use_nms} onChange={(e) => updateLocoModelParam('use_nms', e.target.checked)} /><ParamSpan paramKey="use_nms">Circle-NMS</ParamSpan></label>
-                <label className="check-field"><input type="checkbox" checked={!!locoModelParams.return_rejected} onChange={(e) => { updateLocoModelParam('return_rejected', e.target.checked); setLocoModelLayers((prev) => ({ ...prev, rejected: e.target.checked })) }} /><ParamSpan paramKey="return_rejected">mostrar rechazados</ParamSpan></label>
+                <label className="check-field"><input type="checkbox" checked={!!locoModelParams.return_rejected} onChange={(e) => { updateLocoModelParam('return_rejected', e.target.checked); updateLocoModelLayer('rejected', e.target.checked) }} /><ParamSpan paramKey="return_rejected">mostrar rechazados</ParamSpan></label>
                 {locoModelParams.return_rejected ? (
                   <label className="field" style={{ marginTop: 4 }}><ParamSpan paramKey="max_return_rejected">max rechazados</ParamSpan><input type="number" min="0" max="50000" step="100" value={locoModelParams.max_return_rejected} onChange={(e) => updateLocoModelParam('max_return_rejected', Number(e.target.value || 5000))} onBlur={clampOnBlur('max_return_rejected', 0, 50000, 100, 5000)} /><span className="small" style={{ marginLeft: 4 }}>0=todos</span></label>
                 ) : null}
@@ -7163,11 +8894,11 @@ export default function App() {
                   <label className="field"><ParamSpan paramKey="radius_similarity_factor">radio similar</ParamSpan><input type="number" min="0" step="0.05" value={locoModelParams.radius_similarity_factor} onChange={(e) => updateLocoModelParam('radius_similarity_factor', Number(e.target.value || 0.4))} onBlur={clampOnBlur('radius_similarity_factor', 0, 3, 0.05, 0.4)} /></label>
                 </div>
                 <div className="loco-layer-grid">
-                  <label><input type="checkbox" checked={!!locoModelLayers.mask} onChange={(e) => setLocoModelLayers((prev) => ({ ...prev, mask: e.target.checked }))} /> mascara</label>
-                  <label><input type="checkbox" checked={!!locoModelLayers.accepted} onChange={(e) => setLocoModelLayers((prev) => ({ ...prev, accepted: e.target.checked }))} /> aceptados</label>
-                  <label><input type="checkbox" checked={!!locoModelLayers.rejected} onChange={(e) => setLocoModelLayers((prev) => ({ ...prev, rejected: e.target.checked }))} /> rechazados</label>
-                  <label><input type="checkbox" checked={!!locoModelLayers.scores} onChange={(e) => setLocoModelLayers((prev) => ({ ...prev, scores: e.target.checked }))} /> scores</label>
-                  <label><input type="checkbox" checked={!!locoModelLayers.tiles} onChange={(e) => setLocoModelLayers((prev) => ({ ...prev, tiles: e.target.checked }))} /> tiles</label>
+                  <label><input type="checkbox" checked={!!locoModelLayers.mask} onChange={(e) => updateLocoModelLayer('mask', e.target.checked)} /> mascara</label>
+                  <label><input type="checkbox" checked={!!locoModelLayers.accepted} onChange={(e) => updateLocoModelLayer('accepted', e.target.checked)} /> aceptados</label>
+                  <label><input type="checkbox" checked={!!locoModelLayers.rejected} onChange={(e) => updateLocoModelLayer('rejected', e.target.checked)} /> rechazados</label>
+                  <label><input type="checkbox" checked={!!locoModelLayers.scores} onChange={(e) => updateLocoModelLayer('scores', e.target.checked)} /> scores</label>
+                  <label><input type="checkbox" checked={!!locoModelLayers.tiles} onChange={(e) => updateLocoModelLayer('tiles', e.target.checked)} /> tiles</label>
                 </div>
               </section>
 
@@ -7185,17 +8916,19 @@ export default function App() {
               {locoModelResult ? (
                 <section className="card">
                   <h2>Resumen</h2>
-                  <div className="kpi">Total candidatos: <strong>{locoModelResult.summary?.total_candidates ?? 0}</strong></div>
-                  <div className="kpi">Muestra: <strong>{locoModelResult.summary?.sampled_candidates ?? locoModelResult.summary?.total_candidates ?? 0}</strong></div>
-                  <div className="kpi">Modelo: <strong>{locoModelResult.summary?.evaluated_candidates ?? 0}</strong></div>
-                  <div className="kpi">Threshold: <strong>{locoModelResult.summary?.accepted_before_nms ?? 0}</strong></div>
-                  <div className="kpi">Final NMS: <strong>{locoModelResult.summary?.accepted_after_nms ?? 0}</strong></div>
-                  <div className="kpi">NMS removidos: <strong>{locoModelResult.summary?.removed_by_nms ?? 0}</strong></div>
-                  {locoModelResult.summary?.accepted_after_spatial != null ? <div className="kpi">Final spatial: <strong>{locoModelResult.summary.accepted_after_spatial}</strong></div> : null}
-                  {locoModelResult.summary?.removed_by_spatial ? <div className="kpi">Spatial removidos: <strong>{locoModelResult.summary.removed_by_spatial}</strong></div> : null}
-                  <div className="kpi">Multiclase: <strong>{locoModelResult.has_multiclass ? 'âœ“' : 'âœ—'}</strong></div>
+                  <div className="kpi">Total candidatos: <strong>{locoModelStageSummary?.total_candidates ?? 0}</strong></div>
+                  <div className="kpi">Muestra: <strong>{locoModelStageSummary?.sampled_candidates ?? locoModelStageSummary?.total_candidates ?? 0}</strong></div>
+                  <div className="kpi">Excluidos por zona: <strong>{locoModelStageSummary?.excluded_by_zone ?? 0}</strong></div>
+                  <div className="kpi">Base evaluados: <strong>{locoModelStageSummary?.evaluated_candidates ?? 0}</strong></div>
+                  <div className="kpi">Threshold aceptados: <strong>{locoModelStageFlags.thresholdReady ? (locoModelStageSummary?.accepted_before_nms ?? 0) : '-'}</strong></div>
+                  <div className="kpi">After NMS: <strong>{locoModelStageFlags.nmsReady ? (locoModelStageSummary?.accepted_after_nms ?? 0) : '-'}</strong></div>
+                  <div className="kpi">After spatial: <strong>{locoModelStageFlags.spatialReady ? (locoModelStageSummary?.accepted_after_spatial ?? 0) : '-'}</strong></div>
+                  <div className="kpi">NMS removidos: <strong>{locoModelStageFlags.nmsReady ? (locoModelStageSummary?.removed_by_nms ?? 0) : '-'}</strong></div>
+                  <div className="kpi">Spatial removidos: <strong>{locoModelStageFlags.spatialReady ? (locoModelStageSummary?.removed_by_spatial ?? 0) : '-'}</strong></div>
+                  <div className="kpi">Multiclase: <strong>{locoModelResult.has_multiclass ? 'si' : 'no'}</strong></div>
                   {locoModelResult.has_multiclass ? <div className="kpi">crossing th: <strong>{Number(locoModelResult.crossing_threshold || 0.5).toFixed(2)}</strong></div> : null}
-                  <div className="kpi">Run: <strong>{locoModelResult.run_id}</strong></div>
+                  <div className="kpi">Etapa visible: <strong>{locoModelStageFlags.resultStage || '-'}</strong></div>
+                  <div className="kpi">Estado visible: <strong>{locoModelStageFlags.resultStale ? 'desactualizada' : 'vigente'}</strong></div>
                 </section>
               ) : null}
             </>
@@ -7221,6 +8954,8 @@ export default function App() {
                     <select value={trainConfig.classifier} onChange={(e) => updateTrainConfig('classifier', e.target.value)}>
                       <option value="extratrees">ExtraTrees</option>
                       <option value="rf">RandomForest</option>
+                      <option value="catboost">CatBoost</option>
+                      <option value="xgboost">XGBoost</option>
                     </select>
                   </label>
                 </div>
@@ -7318,6 +9053,16 @@ export default function App() {
                   ) : null}
                 </div>
                 {!imageUrl ? <div className="placeholder">Carga una imagen para empezar.</div> : null}
+                <canvas
+                  ref={brushCursorRef}
+                  className="brush-cursor-overlay"
+                  style={{
+                    position: 'absolute',
+                    pointerEvents: 'none',
+                    zIndex: 20,
+                    display: viewerMode === 'mark' && imageUrl ? 'block' : 'none',
+                  }}
+                />
               </div>
               <canvas ref={labelsCanvasRef} className="hidden" />
           </article>
@@ -7387,21 +9132,21 @@ export default function App() {
                 className={`icon-tool ${diamViewerMode === 'mark' ? 'toggle-active' : ''}`}
                 onClick={() => {
                   if (diamMethodId === 'circle_square_mask_diameter') {
-                    setDiamViewerMode('circle')
+                    switchDiameterViewer('circle', { forceManualCircleSeed: true })
                     toast('warning', 'Circle-square', 'Este metodo usa solo circulo manual.')
                     return
                   }
-                  setDiamViewerMode('mark')
+                  switchDiameterViewer('mark')
                 }}
                 disabled={!imageUrl || diamMethodId === 'circle_square_mask_diameter'}
                 title={diamMethodId === 'circle_square_mask_diameter' ? 'Circle-square bloquea puntos: usa Circulo' : 'Agregar o seleccionar puntos'}
               >
                 Punto
               </button>
-              <button className={`icon-tool ${diamViewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => setDiamViewerMode('pan')} disabled={!imageUrl} title="Mover vista">Mano</button>
-              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_dual_side_caliper' ? 'toggle-active' : ''}`} onClick={() => { setDiamMethodPanel('manual'); setDiamMethodId('manual_dual_side_caliper'); setDiamViewerMode('manual') }} disabled={!imageUrl} title="Linea que se corta con la mascara (D)">Linea mask</button>
-              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_line_direct_caliper' ? 'toggle-active' : ''}`} onClick={() => { setDiamMethodPanel('manual'); setDiamMethodId('manual_line_direct_caliper'); setDiamViewerMode('manual') }} disabled={!imageUrl} title="Linea 100% manual (X)">Linea manual</button>
-              <button className={`icon-tool ${diamViewerMode === 'circle' ? 'toggle-active' : ''}`} onClick={() => { setDiamMethodPanel('manual'); setDiamMethodId('circle_square_mask_diameter'); setDiamViewerMode('circle'); updateDiamRawParam('circle_square_seed_mode', 'manual_circle') }} disabled={!imageUrl} title="Dibujar circulo semilla (C)">Circulo</button>
+              <button className={`icon-tool ${diamViewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('pan')} disabled={!imageUrl} title="Mover vista">Mano</button>
+              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_dual_side_caliper' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_dual_side_caliper' })} disabled={!imageUrl} title="Linea que se corta con la mascara (D)">Linea mask</button>
+              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_line_direct_caliper' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_line_direct_caliper' })} disabled={!imageUrl} title="Linea 100% manual (X)">Linea manual</button>
+              <button className={`icon-tool ${diamViewerMode === 'circle' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('circle', { methodPanel: 'manual', methodId: 'circle_square_mask_diameter', forceManualCircleSeed: true })} disabled={!imageUrl} title="Dibujar circulo semilla (C)">Circulo</button>
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={undoDiameterManual} disabled={!diamManualHistory.length} title="Deshacer geometria manual (Ctrl+Z)">Undo</button>
               <button className="icon-tool" onClick={redoDiameterManual} disabled={!diamManualFuture.length} title="Rehacer geometria manual (Ctrl+Y)">Redo</button>
@@ -7477,6 +9222,18 @@ export default function App() {
                       ) : null}
                     </div>
                     <div className="diameter-annotation-layer">
+                      {diamCalibrationLine ? (
+                        <svg className="manual-line-overlay calibration" viewBox={`0 0 ${Math.max(1, imageDims.w)} ${Math.max(1, imageDims.h)}`}>
+                          <line
+                            x1={Number(diamCalibrationLine.start.x)}
+                            y1={Number(diamCalibrationLine.start.y)}
+                            x2={Number(diamCalibrationLine.end.x)}
+                            y2={Number(diamCalibrationLine.end.y)}
+                          />
+                          <circle cx={Number(diamCalibrationLine.start.x)} cy={Number(diamCalibrationLine.start.y)} r="0.85" />
+                          <circle cx={Number(diamCalibrationLine.end.x)} cy={Number(diamCalibrationLine.end.y)} r="0.85" />
+                        </svg>
+                      ) : null}
                       {[
                         ...manualMaskLines.map((draft, lineIndex) => ({ kind: 'mask', draft, lineIndex })),
                         ...manualDirectLines.map((draft, lineIndex) => ({ kind: 'direct', draft, lineIndex })),
@@ -7527,7 +9284,7 @@ export default function App() {
                           {diameterManualCirclePreviews.map((circle) => (
                             <circle
                               key={`manual-circle-svg-${circle.geometry_id || circle.idx}`}
-                              className={circle.idx === manualCircleActiveIdx ? 'selected' : ''}
+                              className={`circle-type-${circle.type || 'valid'} ${circle.idx === manualCircleActiveIdx ? 'selected' : ''}`}
                               cx={Number(circle.center.x)}
                               cy={Number(circle.center.y)}
                               r={circle.radius}
@@ -7538,7 +9295,7 @@ export default function App() {
                       {diameterManualCirclePreviews.map((circle) => (
                         <button
                           key={`manual-circle-hit-${circle.geometry_id || circle.idx}`}
-                          className={`manual-circle-hit ${circle.idx === manualCircleActiveIdx ? 'selected' : ''}`}
+                          className={`manual-circle-hit circle-type-${circle.type || 'valid'} ${circle.idx === manualCircleActiveIdx ? 'selected' : ''}`}
                           style={{
                             left: `${Number(circle.center.x) - Number(circle.radius)}px`,
                             top: `${Number(circle.center.y) - Number(circle.radius)}px`,
@@ -7818,264 +9575,6 @@ export default function App() {
               ) : null}
             </div>
           </article>
-          <article className={`card viewer loco-viewer ${workspaceTab === 'loco' ? '' : 'hidden-panel'}`}>
-            <h2>LOCO Lab</h2>
-            <div className="viewer-toolbar loco-toolbar">
-              <button className={`icon-tool ${locoViewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => setLocoViewerMode('pan')} disabled={!imageUrl} title="Mover vista (M)"><ToolIcon name="hand" />Mano</button>
-              <span className="toolbar-sep" />
-              <button className="icon-tool" onClick={() => zoomLocoBy(0.84)} disabled={!imageUrl}>-</button>
-              <button className="icon-tool" onClick={() => zoomLocoBy(1.2)} disabled={!imageUrl}>+</button>
-              <button className="icon-tool" onClick={resetLocoView} disabled={!imageUrl}>Reset</button>
-              <span className="zoom-chip">{Math.round(locoViewerZoom * 100)}%</span>
-              <span className="toolbar-sep" />
-              <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
-                <option value="latest">prior mask: ultimo</option>
-                {runs.map((r) => (
-                  <option key={`loco-prior-${r.run_id}`} value={r.run_id}>{r.run_id}</option>
-                ))}
-              </select>
-              <button onClick={() => refreshResults()} disabled={!imageId || loading.listResults}>Refrescar soporte</button>
-              <span className="toolbar-sep" />
-              {LOCO_LAB_STAGES.map((stage) => (
-                <button
-                  key={`loco-stage-${stage.key}`}
-                  className={`icon-tool ${locoLabStage === stage.key ? 'toggle-active' : ''}`}
-                  onClick={() => setLocoLabStage(stage.key)}
-                >
-                  {stage.label}
-                </button>
-              ))}
-              <span className="toolbar-sep" />
-              <button className="primary" onClick={generateLocoLabProposals} disabled={!imageId || loading.locoLab}>Generar propuestas</button>
-              <button onClick={clearLocoLab} disabled={!locoProposals.length && !locoMeasuredResults.length}>Limpiar LOCO</button>
-            </div>
-
-            <div className="loco-workspace loco-lab-workspace">
-              <div
-                ref={locoStageRef}
-                className={`stage loco-stage mode-pan ${locoIsPanning ? 'is-panning' : ''} ${imageUrl ? 'has-image' : ''}`}
-                onPointerDown={onLocoPointerDown}
-                onPointerMove={onLocoPointerMove}
-                onPointerUp={onLocoPointerUp}
-                onPointerCancel={onLocoPointerUp}
-                onPointerLeave={onLocoPointerUp}
-              >
-                {imageUrl ? (
-                  <div
-                    className="loco-content"
-                    style={{
-                      width: `${Math.max(1, imageDims.w)}px`,
-                      height: `${Math.max(1, imageDims.h)}px`,
-                      transform: locoRenderMetrics
-                        ? `translate(${locoRenderMetrics.x}px, ${locoRenderMetrics.y}px) scale(${locoRenderMetrics.scale})`
-                        : 'translate(-99999px, -99999px) scale(1)',
-                    }}
-                  >
-                    <div className="diameter-raster-layer">
-                      <img src={imageUrl} alt="loco-base" draggable={false} />
-                      {locoLayerVisibility.mask && diamVisualMaskUrl ? (
-                        <img
-                          src={diamVisualMaskUrl}
-                          alt="prior mask loco"
-                          className="diam-mask-layer"
-                          style={{ opacity: diamMaskOpacity }}
-                          draggable={false}
-                        />
-                      ) : null}
-                    </div>
-                    <div className="loco-annotation-layer">
-                      <svg className="loco-overlay loco-lab-overlay" viewBox={`0 0 ${Math.max(1, imageDims.w)} ${Math.max(1, imageDims.h)}`}>
-                        {locoLayerVisibility.proposals && locoLabVisibleProposals.map((p) => {
-                          const c = p.center_xy || [0, 0]
-                          const selected = String(p.proposal_id || '') === String(locoLabSelectedProposal?.proposal_id || '')
-                          const status = String(p.status || 'rejected')
-                          return (
-                            <circle
-                              key={`loco-lab-circle-${p.proposal_id}`}
-                              className={`loco-lab-circle ${status} ${selected ? 'selected' : ''}`}
-                              cx={Number(c[0])}
-                              cy={Number(c[1])}
-                              r={Math.max(0.5, Number(p.radius_px) || 0.5)}
-                            />
-                          )
-                        })}
-                        {locoLayerVisibility.components && locoLabComponentBoxes.map((box) => (
-                          <rect key={`loco-lab-component-${box.key}`} className="loco-lab-component" x={box.x} y={box.y} width={box.w} height={box.h} />
-                        ))}
-                        {locoLayerVisibility.intersections && locoLabSelectedProposal?.intersection_points?.map((pt, idx) => (
-                          <circle key={`loco-lab-cut-${idx}`} className="loco-lab-cut" cx={Number(pt.x)} cy={Number(pt.y)} r="2" />
-                        ))}
-                        {locoLayerVisibility.quadrilaterals && locoLabOkMeasurements.map((m) => {
-                          const verts = Array.isArray(m.quadrilateral_vertices) ? m.quadrilateral_vertices : []
-                          if (verts.length < 4) return null
-                          const points = verts.map((v) => `${Number(v.x)},${Number(v.y)}`).join(' ')
-                          return <polygon key={`loco-lab-quad-${m.proposal_id}`} className="loco-lab-quad" points={points} />
-                        })}
-                        {locoLayerVisibility.diameter && locoLabOkMeasurements.map((m) => {
-                          const left = m.left_edge_xy || []
-                          const right = m.right_edge_xy || []
-                          if (left.length < 2 || right.length < 2) return null
-                          return <line key={`loco-lab-dia-${m.proposal_id}`} className="loco-lab-diameter" x1={Number(left[0])} y1={Number(left[1])} x2={Number(right[0])} y2={Number(right[1])} />
-                        })}
-                      </svg>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="placeholder">Carga una imagen para usar LOCO Lab.</div>
-                )}
-              </div>
-
-              <aside className="loco-debug-panel loco-lab-panel">
-                <div className="loco-step-head">
-                  <strong>{LOCO_LAB_STAGES.find((s) => s.key === locoLabStage)?.label || 'LOCO Lab'}</strong>
-                  <span>{loading.locoLab ? 'procesando' : 'listo'}</span>
-                </div>
-                <div className="kpi-row">
-                  <span>Propuestas: <strong>{locoLabActiveProposals.length}</strong></span>
-                  <span>Aceptadas: <strong>{locoLabActiveProposals.filter((p) => p.status === 'accepted').length}</strong></span>
-                  <span>Medidas: <strong>{locoLabOkMeasurements.length}/{locoMeasuredResults.length}</strong></span>
-                  <span>Soporte: <strong>{diamPriorRunId || 'latest'}</strong></span>
-                </div>
-
-                <div className="loco-layer-grid">
-                  {Object.entries({
-                    mask: 'mascara',
-                    components: 'componentes',
-                    proposals: 'propuestas',
-                    rejected: 'rechazadas',
-                    intersections: 'cortes',
-                    quadrilaterals: 'cuadrilateros',
-                    diameter: 'diametro',
-                  }).map(([key, label]) => (
-                    <label key={`loco-layer-${key}`} className="mask-toggle">
-                      <input type="checkbox" checked={!!locoLayerVisibility[key]} onChange={() => toggleLocoLayer(key)} />
-                      {label}
-                    </label>
-                  ))}
-                  <label className="compact-slider mask-opacity-control">
-                    transparencia
-                    <input type="range" min="0.05" max="0.9" step="0.05" value={diamMaskOpacity} onChange={(e) => setDiamMaskOpacity(Number(e.target.value || 0.38))} disabled={!locoLayerVisibility.mask || !diamVisualMaskUrl} />
-                    <span>{Math.round(diamMaskOpacity * 100)}%</span>
-                  </label>
-                </div>
-
-                {locoLabStage === 'proposals' ? (
-                  <div className="loco-lab-section">
-                    <h3>Propuestas</h3>
-                    <label>
-                      ruta
-                      <select value={locoProposalMethod} onChange={(e) => setLocoProposalMethod(e.target.value)}>
-                        <option value="circle_grid">Circle Proposal Grid</option>
-                      </select>
-                    </label>
-                    <div className="diam-param-grid loco-param-grid">
-                      <label>grid stride<input type="number" min="3" step="1" value={locoLabParams.grid_stride_px} onChange={(e) => updateLocoLabParam('grid_stride_px', e.target.value, true)} /></label>
-                      <label>radio min<input type="number" min="1" step="1" value={locoLabParams.radius_min_px} onChange={(e) => updateLocoLabParam('radius_min_px', e.target.value)} /></label>
-                      <label>radio max<input type="number" min="1" step="1" value={locoLabParams.radius_max_px} onChange={(e) => updateLocoLabParam('radius_max_px', e.target.value)} /></label>
-                      <label>radio step<input type="number" min="0.5" step="0.5" value={locoLabParams.radius_step_px} onChange={(e) => updateLocoLabParam('radius_step_px', e.target.value)} /></label>
-                      <label>max candidatos<input type="number" min="1" step="50" value={locoLabParams.max_candidates} onChange={(e) => updateLocoLabParam('max_candidates', e.target.value, true)} /></label>
-                    </div>
-                    <button className="primary" onClick={generateLocoLabProposals} disabled={!imageId || loading.locoLab}>Generar propuestas</button>
-                  </div>
-                ) : null}
-
-                {locoLabStage === 'filters' ? (
-                  <div className="loco-lab-section">
-                    <h3>Filtros</h3>
-                    <div className="diam-param-grid loco-param-grid">
-                      <label>score min<input type="number" min="0" max="1" step="0.02" value={locoLabParams.min_score} onChange={(e) => updateLocoLabParam('min_score', e.target.value)} /></label>
-                      <label>ratio mascara<input type="number" min="0" max="1" step="0.02" value={locoLabParams.mask_required_ratio} onChange={(e) => updateLocoLabParam('mask_required_ratio', e.target.value)} /></label>
-                      <label>max cortes<input type="number" min="1" step="1" value={locoLabParams.max_intersections} onChange={(e) => updateLocoLabParam('max_intersections', e.target.value, true)} /></label>
-                      <label className="check-row"><input type="checkbox" checked={Boolean(locoLabParams.require_four_cuts)} onChange={(e) => updateLocoLabRawParam('require_four_cuts', e.target.checked)} /> exigir 4 cortes</label>
-                    </div>
-                    <button className="primary" onClick={filterLocoLabProposals} disabled={!locoProposals.length || loading.locoLab}>Aplicar filtros</button>
-                  </div>
-                ) : null}
-
-                {locoLabStage === 'circles' ? (
-                  <div className="loco-lab-section">
-                    <h3>Circulos</h3>
-                    {!locoLabActiveProposals.length ? (
-                      <div className="placeholder small">Sin propuestas.</div>
-                    ) : (
-                      <div className="loco-candidate-list">
-                        {locoLabActiveProposals.slice(0, 90).map((p) => (
-                          <button
-                            key={`loco-lab-row-${p.proposal_id}`}
-                            className={String(p.proposal_id) === String(locoLabSelectedProposal?.proposal_id) ? 'selected' : ''}
-                            onClick={() => setLocoSelectedProposalId(p.proposal_id)}
-                          >
-                            <span>{p.method}</span>
-                            <strong>{Number(p.score || 0).toFixed(3)}</strong>
-                            <em>{p.intersection_count ?? 0} cortes</em>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {locoLabSelectedProposal ? (
-                      <div className="loco-result-card">
-                        <h3>Seleccionado</h3>
-                        <div className="kpi">ID: <strong>{locoLabSelectedProposal.proposal_id}</strong></div>
-                        <div className="kpi">Radio: <strong>{Number(locoLabSelectedProposal.radius_px || 0).toFixed(1)} px</strong></div>
-                        <div className="kpi">Ratio mascara: <strong>{Number(locoLabSelectedProposal.mask_ratio || 0).toFixed(3)}</strong></div>
-                        <div className="kpi">Simetria: <strong>{Number(locoLabSelectedProposal.symmetry_score || 0).toFixed(3)}</strong></div>
-                        <div className="kpi">Razon: <strong>{locoLabSelectedProposal.reason || '-'}</strong></div>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {locoLabStage === 'measure' ? (
-                  <div className="loco-lab-section">
-                    <h3>Medicion</h3>
-                    <div className="diam-param-grid loco-param-grid">
-                      <label>limite medir<input type="number" min="1" step="10" value={locoLabParams.measure_limit} onChange={(e) => updateLocoLabParam('measure_limit', e.target.value, true)} /></label>
-                    </div>
-                    <div className="inline">
-                      <button className="primary" onClick={measureLocoLabProposals} disabled={!locoLabActiveProposals.length || loading.locoLab}>Medir aceptadas</button>
-                      <button onClick={saveLocoLabRun} disabled={(!locoLabActiveProposals.length && !locoMeasuredResults.length) || loading.locoLab}>Guardar run LOCO</button>
-                    </div>
-                    {!locoMeasuredResults.length ? (
-                      <div className="placeholder small">Sin mediciones.</div>
-                    ) : (
-                      <div className="table-wrap loco-lab-table">
-                        <table>
-                          <thead><tr><th>id</th><th>diam</th><th>score</th><th>estado</th></tr></thead>
-                          <tbody>
-                            {locoMeasuredResults.slice(0, 80).map((m) => (
-                              <tr key={`loco-measure-${m.proposal_id}`} className={m.status === 'ok' ? '' : 'rejected-row'}>
-                                <td>{m.proposal_id}</td>
-                                <td>{m.diameter_px == null ? '-' : Number(m.diameter_px).toFixed(2)}</td>
-                                <td>{Number(m.score || m.confidence || 0).toFixed(3)}</td>
-                                <td>{m.status}{m.reason ? `: ${m.reason}` : ''}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                ) : null}
-
-                {locoLabStage === 'evaluate' ? (
-                  <div className="loco-lab-section">
-                    <h3>Evaluacion</h3>
-                    <div className="inline">
-                      <button className="primary" onClick={evaluateLocoLab} disabled={!imageId || loading.locoLab}>Evaluar</button>
-                      <button onClick={saveLocoLabRun} disabled={(!locoLabActiveProposals.length && !locoMeasuredResults.length) || loading.locoLab}>Guardar run LOCO</button>
-                    </div>
-                    <div className="loco-result-card">
-                      <div className="kpi">Propuestas: <strong>{locoEvaluation?.proposal_count ?? locoLabActiveProposals.length}</strong></div>
-                      <div className="kpi">Aceptadas: <strong>{locoEvaluation?.accepted_count ?? locoLabActiveProposals.filter((p) => p.status === 'accepted').length}</strong></div>
-                      <div className="kpi">Mediciones OK: <strong>{locoEvaluation?.measurement_ok_count ?? locoLabOkMeasurements.length}</strong></div>
-                      <div className="kpi">Mediana diam: <strong>{locoEvaluation?.diameter_median_px == null ? '-' : `${Number(locoEvaluation.diameter_median_px).toFixed(2)} px`}</strong></div>
-                    </div>
-                    {locoEvaluation?.by_method ? <pre className="meta">{JSON.stringify(locoEvaluation.by_method, null, 2)}</pre> : null}
-                  </div>
-                ) : null}
-              </aside>
-            </div>
-          </article>
           <article className={`card viewer loco-viewer ${workspaceTab === 'locoDataset' ? '' : 'hidden-panel'}`}>
             <h2>Generate Dataset</h2>
             <div className="viewer-toolbar loco-toolbar">
@@ -8088,6 +9587,8 @@ export default function App() {
               <button className="icon-tool" onClick={resetLocoDatasetView} disabled={!imageUrl}>Reset</button>
               <span className="zoom-chip">{Math.round(locoDatasetZoom * 100)}%</span>
               <span className="toolbar-sep" />
+              <button className={`icon-tool ${locoModelTool === 'exclude' ? 'toggle-active' : ''}`} onClick={() => setLocoModelTool((prev) => prev === 'exclude' ? 'pan' : 'exclude')} disabled={!imageUrl}>Excluir</button>
+              <span className="toolbar-sep" />
               <label className="compact-slider mask-opacity-control">
                 mascara
                 <input type="range" min="0.05" max="0.9" step="0.05" value={diamMaskOpacity} onChange={(e) => setDiamMaskOpacity(Number(e.target.value || 0.38))} disabled={!diamVisualMaskUrl} />
@@ -8097,7 +9598,6 @@ export default function App() {
               <button onClick={previewLocoDatasetFeatures} disabled={!locoDatasetCircles.length || loading.locoDataset}>Features</button>
               <button className="primary" onClick={saveLocoDataset} disabled={!locoDatasetCircles.length || loading.locoDataset}>Generate Dataset</button>
               <button onClick={clearLocoDatasetCanvas} disabled={!locoDatasetCircles.length && !locoDatasetDraftCircle}>Limpiar imagen</button>
-              <button className="danger" onClick={cleanLegacyInvalid} disabled={loading.locoDataset}>Borrar invalid legacy</button>
             </div>
 
             <div className="loco-workspace loco-lab-workspace">
@@ -8257,19 +9757,18 @@ export default function App() {
               <label className="field inline-field">
                 <span>bloque</span>
                 <select value={locoAugBlockType} onChange={(e) => setLocoAugBlockType(e.target.value)}>
-                  <option value="rotate">Rotate</option>
-                  <option value="flip">Flip</option>
-                  <option value="morphology">Morphology</option>
-                  <option value="perturb">Binary perturbation</option>
-                  <option value="resize_method">Resize method</option>
-                  <option value="resolution">Resolution simulation</option>
+                  {locoAugVisibleBlockTypes.map((type) => (
+                    <option key={type} value={type}>{locoAugBlockLabel(type)}</option>
+                  ))}
                 </select>
               </label>
               <button onClick={() => setLocoAugPipeline((prev) => [...prev, defaultLocoAugBlock(locoAugBlockType)])}>Agregar bloque</button>
+              <button onClick={() => setLocoAugPipeline((prev) => [...prev, ...locoAugVisibleBlockTypes.map((type) => defaultLocoAugBlock(type))])}>Agregar todos</button>
               <span className="toolbar-sep" />
               <button onClick={previewLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length}>Preview selected</button>
               <button className="primary" onClick={applyLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length || !locoAugItems.length}>Apply to all dataset</button>
               <button onClick={clearLocoAugmented} disabled={loading.locoAugment || !(locoAugCounts.augmented_total > 0)}>Clear augmented</button>
+              <button onClick={openLocoAugmentedFolder} disabled={loading.openFolder || !(String(locoAugInfo?.augmented_dir || '').trim() || (locoAugCounts.augmented_total > 0 && String(locoAugDatasetDir || '').trim()))}>Abrir carpeta augmented</button>
               <span className="zoom-chip">{Math.max(1, Number(locoAugPasses) || 1)} pasadas/img</span>
             </div>
 
@@ -8399,10 +9898,194 @@ export default function App() {
           </article>
           <article className={`card viewer models-viewer ${workspaceTab === 'locoTraining' ? '' : 'hidden-panel'}`}>
             <h2>Training</h2>
-            {locoTrainingResult ? (
-              <div className="training-workspace">
-                {/* â”€â”€ Section 1: Binary model comparison â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+            <div className="training-workspace">
+              <section className="training-section">
+                <h3>Batch actual</h3>
+                <p className="small">Ranking por Macro-F1 multiclase del batch actual. Selecciona una fila para abrir el resumen detallado de ese run y modelo.</p>
+                <div className="training-batch-toolbar">
+                  <label className="field inline-field">
+                    <span>visualizar</span>
+                    <select value={locoTrainingBatchTopK} onChange={(e) => setLocoTrainingBatchTopK(e.target.value)}>
+                      <option value="1">top 1</option>
+                      <option value="3">top 3</option>
+                      <option value="5">top 5</option>
+                      <option value="all">all</option>
+                    </select>
+                  </label>
+                  <span className="zoom-chip">{locoTrainingVisibleBatchRows.length} filas</span>
+                </div>
+                <div className="table-wrap model-table training-batch-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>rank</th>
+                        <th>trial</th>
+                        <th>Macro-F1</th>
+                        <th>delta</th>
+                        <th>modelo</th>
+                        <th>accuracy</th>
+                        <th>F1 valid</th>
+                        <th>F1 crossing</th>
+                        <th>F1 other</th>
+                        <th>datos</th>
+                        <th>test</th>
+                        <th>poda</th>
+                        <th>seed</th>
+                        <th>flags</th>
+                        <th>run</th>
+                        <th>estado</th>
+                        <th>params</th>
+                        <th>tuning</th>
+                        <th>guardar</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {locoTrainingVisibleBatchRows.length ? locoTrainingVisibleBatchRows.map((row) => {
+                        const isSelected = row.run_id && locoTrainingResult?.run_id === row.run_id && locoTrainingSelectedModel === row.model_id
+                        const statusText = row.reason ? `${row.status}: ${row.reason}` : row.status
+                        return (
+                          <tr
+                            key={row.key}
+                            className={isSelected ? 'selected-row' : ''}
+                            onClick={() => {
+                              if (row.runResponse) setLocoTrainingResult(row.runResponse)
+                              if (row.model_id) setLocoTrainingSelectedModel(row.model_id)
+                            }}
+                          >
+                            <td>{row.rank}</td>
+                            <td>{row.trial_index ? `${row.trial_index}/${row.trial_count || '?'}` : '-'}</td>
+                            <td>{row.macro_f1 == null ? '-' : Number(row.macro_f1).toFixed(3)}</td>
+                            <td>{row.source_macro_f1 == null || row.macro_f1 == null ? '-' : `${Number(row.macro_f1 - row.source_macro_f1) >= 0 ? '+' : ''}${Number(row.macro_f1 - row.source_macro_f1).toFixed(3)}`}</td>
+                            <td>{row.model}</td>
+                            <td>{row.accuracy == null ? '-' : Number(row.accuracy).toFixed(3)}</td>
+                            <td>{row.f1_valid == null ? '-' : Number(row.f1_valid).toFixed(3)}</td>
+                            <td>{row.f1_crossing == null ? '-' : Number(row.f1_crossing).toFixed(3)}</td>
+                            <td>{row.f1_other == null ? '-' : Number(row.f1_other).toFixed(3)}</td>
+                            <td>{row.data_selection || '-'}</td>
+                            <td>{row.test_size == null ? '-' : Number(row.test_size).toFixed(2)}</td>
+                            <td>{row.circle_prune_px ?? '-'}</td>
+                            <td>{row.random_seed ?? '-'}</td>
+                            <td>{`${row.uses_patch_zoom_factor ? 'zoom' : 'sin zoom'} | ${row.uses_source_radius_px ? 'radius' : 'sin radius'}`}</td>
+                            <td>{row.run_id || `job ${row.job_index}`}</td>
+                            <td>{statusText}</td>
+                            <td>{summarizeLocoTuningParams(row.model_params, row.model_id) || '-'}</td>
+                            <td>
+                              <button
+                                className="small-action"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  tuneLocoTrainingFromBatchRow(row)
+                                }}
+                                disabled={loading.locoTraining || row.status !== 'ok' || !row.run_id || !['catboost', 'lightgbm', 'xgboost'].includes(row.model_id)}
+                              >
+                                Tuning
+                              </button>
+                            </td>
+                            <td>
+                              <button
+                                className="small-action"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  saveLocoTrainingModel(row.run_id, row.model_id, row)
+                                }}
+                                disabled={loading.locoTraining || row.status !== 'ok' || !row.run_id}
+                              >
+                                Guardar
+                              </button>
+                            </td>
+                          </tr>
+                        )
+                      }) : (
+                        <tr>
+                          <td colSpan="19" className="placeholder">Sin resultados batch todavia.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              {locoTrainingResult ? (
+              <>
+                {locoTrainingResult?.meta?.cv5_enabled || locoTrainingCv5BinaryRows.length || locoTrainingCv5MulticlassRows.length ? (
                 <section className="training-section">
+                  <h3>CV5 del run seleccionado</h3>
+                  <p className="small">
+                    {locoTrainingResult?.cv5_meta?.enabled ? 'Activo' : 'Inactivo'}
+                    {` | folds ${locoTrainingResult?.cv5_meta?.fold_count ?? 0} | grupos ${locoTrainingResult?.cv5_meta?.group_count ?? '-'} | muestras ${locoTrainingResult?.cv5_meta?.sample_count ?? '-'}`}
+                  </p>
+                  {locoTrainingCv5MulticlassRows.length ? (
+                    <div className="table-wrap model-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>modelo</th>
+                            <th>Macro-F1</th>
+                            <th>accuracy</th>
+                            <th>F1 valid</th>
+                            <th>F1 crossing</th>
+                            <th>F1 other</th>
+                            <th>samples</th>
+                            <th>folds</th>
+                            <th>status</th>
+                            <th>guardar</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {locoTrainingCv5MulticlassRows.map((row) => (
+                            <tr key={`cv5-mc-${row.model_id}`}>
+                              <td>{row.model}</td>
+                              <td>{row.status === 'ok' && locoTrainingMacroF1(row) != null ? Number(locoTrainingMacroF1(row)).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.accuracy).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.f1_valid).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.f1_crossing).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.f1_other).toFixed(3) : '-'}</td>
+                              <td>{row.sample_count ?? '-'}</td>
+                              <td>{row.fold_count ?? '-'}</td>
+                              <td>{row.status}{row.reason ? `: ${row.reason}` : ''}</td>
+                              <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : locoTrainingCv5BinaryRows.length ? (
+                    <div className="table-wrap model-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>model</th>
+                            <th>f1_valid</th>
+                            <th>PR-AUC</th>
+                            <th>accuracy</th>
+                            <th>balanced_accuracy</th>
+                            <th>samples</th>
+                            <th>folds</th>
+                            <th>status</th>
+                            <th>guardar</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {locoTrainingCv5BinaryRows.map((row) => (
+                            <tr key={`cv5-bin-${row.model_id}`}>
+                              <td>{row.model}</td>
+                              <td>{row.status === 'ok' ? Number(row.f1_valid).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.pr_auc).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.accuracy).toFixed(3) : '-'}</td>
+                              <td>{row.status === 'ok' ? Number(row.balanced_accuracy).toFixed(3) : '-'}</td>
+                              <td>{row.sample_count ?? '-'}</td>
+                              <td>{row.fold_count ?? '-'}</td>
+                              <td>{row.status}{row.reason ? `: ${row.reason}` : ''}</td>
+                              <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </section>
+                ) : null}
+                {/* â”€â”€ Section 1: Binary model comparison â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+                <section className={`training-section ${locoTrainingIsMulticlassRun ? 'hidden-panel' : ''}`}>
                   <h3>Comparador (binario)</h3>
                   <div className="table-wrap model-table">
                     <table>
@@ -8416,6 +10099,7 @@ export default function App() {
                           <th>accuracy</th>
                           <th>balanced_accuracy</th>
                           <th>status</th>
+                          <th>guardar</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -8429,6 +10113,7 @@ export default function App() {
                             <td>{row.accuracy == null ? '-' : Number(row.accuracy).toFixed(3)}</td>
                             <td>{row.balanced_accuracy == null ? '-' : Number(row.balanced_accuracy).toFixed(3)}</td>
                             <td>{row.status}{row.reason ? `: ${row.reason}` : ''}</td>
+                            <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -8437,8 +10122,8 @@ export default function App() {
                 </section>
 
                 {/* â”€â”€ Section 2: Binary confusion matrix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-                <section className="training-section">
-                  <h3>Matriz de confusiÃ³n (binario)</h3>
+                <section className={`training-section ${locoTrainingIsMulticlassRun ? 'hidden-panel' : ''}`}>
+                  <h3>Matriz de confusion (binario)</h3>
                   {locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.status === 'unavailable' ? (
                     <p className="small">{locoTrainingResult.confusion_matrices[locoTrainingSelectedModel].reason}</p>
                   ) : (
@@ -8453,10 +10138,10 @@ export default function App() {
                 {/* â”€â”€ Section 3: Multiclass metrics summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.multiclass_metrics_summary) && locoTrainingResult.multiclass_metrics_summary.length > 0 ? (
                 <section className="training-section">
-                  <h3>MÃ©tricas multiclase (valid / crossing / other)</h3>
+                  <h3>Metricas multiclase holdout (valid / crossing / other)</h3>
                   <div className="table-wrap model-table">
                     <table>
-                      <thead><tr><th>modelo</th><th>accuracy</th><th>P_valid</th><th>R_valid</th><th>F1_valid</th><th>P_cross</th><th>R_cross</th><th>F1_cross</th><th>P_other</th><th>R_other</th><th>F1_other</th><th>test</th><th>train</th></tr></thead>
+                      <thead><tr><th>modelo</th><th>accuracy</th><th>P_valid</th><th>R_valid</th><th>F1_valid</th><th>P_cross</th><th>R_cross</th><th>F1_cross</th><th>P_other</th><th>R_other</th><th>F1_other</th><th>test</th><th>train</th><th>tuning</th><th>guardar</th></tr></thead>
                       <tbody>
                         {(Array.isArray(locoTrainingResult.multiclass_metrics_summary) ? locoTrainingResult.multiclass_metrics_summary : []).map((row) => (
                           <tr key={`mc-${row.model_id}`}>
@@ -8473,6 +10158,16 @@ export default function App() {
                             <td>{row.status === 'ok' ? Number(row.f1_other).toFixed(3) : '-'}</td>
                             <td>{row.test_samples ?? '-'}</td>
                             <td>{row.train_samples ?? '-'}</td>
+                            <td>
+                              <button
+                                className="small-action"
+                                onClick={() => tuneLocoTrainingFromRunMetric(row)}
+                                disabled={loading.locoTraining || row.status !== 'ok' || !['catboost', 'lightgbm', 'xgboost'].includes(row.model_id)}
+                              >
+                                Tuning
+                              </button>
+                            </td>
+                            <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -8484,24 +10179,45 @@ export default function App() {
                 {/* â”€â”€ Section 4: Multiclass confusion matrix 3x3 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.multiclass_confusion_matrices) === false && locoTrainingResult?.multiclass_confusion_matrices?.[locoTrainingSelectedModel] && typeof locoTrainingResult.multiclass_confusion_matrices[locoTrainingSelectedModel] !== 'string' ? (
                 <section className="training-section">
-                  <h3>Matriz de confusiÃ³n multiclase 3Ã—3</h3>
+                  <h3>Matriz de confusion multiclase holdout 3x3</h3>
+                  <p className="small">Holdout del run {locoTrainingResult.run_id || '-'} | modelo {LOCO_TRAINING_MODEL_LABELS[locoTrainingSelectedModel] || locoTrainingSelectedModel}</p>
                   {(() => {
-                    const cm = locoTrainingResult.multiclass_confusion_matrices[locoTrainingSelectedModel]
+                    const cm = locoTrainingMcThresholdEntry?.confusion_matrix || locoTrainingResult.multiclass_confusion_matrices[locoTrainingSelectedModel]
                     if (!cm || cm.status === 'unavailable') return <p className="small">{cm?.reason || 'N/A'}</p>
                     const labels = ['valid', 'crossing', 'other']
                     return (
-                      <div className="confusion-grid confusion-3x3">
-                        <span></span><strong>Pred valid</strong><strong>Pred crossing</strong><strong>Pred other</strong>
-                        {[0,1,2].map((r) => (
-                          <React.Fragment key={`cm3-r${r}`}>
-                            <strong>Real {labels[r]}</strong>
-                            {[0,1,2].map((c) => {
-                              const val = Array.isArray(cm) ? cm[r]?.[c] : (r === c ? cm?.tp : 0)
-                              const isCorrect = r === c
-                              return <span key={`cm3-${r}-${c}`} className={isCorrect ? '' : 'bad-cell'}>{val ?? '-'}</span>
-                            })}
-                          </React.Fragment>
-                        ))}
+                      <div className="training-threshold-layout">
+                        <div className="confusion-grid confusion-3x3">
+                          <span></span><strong>Pred valid</strong><strong>Pred crossing</strong><strong>Pred other</strong>
+                          {[0,1,2].map((r) => (
+                            <React.Fragment key={`cm3-r${r}`}>
+                              <strong>Real {labels[r]}</strong>
+                              {[0,1,2].map((c) => {
+                                const val = Array.isArray(cm) ? cm[r]?.[c] : (r === c ? cm?.tp : 0)
+                                const isCorrect = r === c
+                                return <span key={`cm3-${r}-${c}`} className={isCorrect ? '' : 'bad-cell'}>{val ?? '-'}</span>
+                              })}
+                            </React.Fragment>
+                          ))}
+                        </div>
+                        <aside className="training-threshold-panel">
+                          <strong>crossing threshold</strong>
+                          <input
+                            type="range"
+                            min="0.05"
+                            max="0.95"
+                            step="0.05"
+                            value={locoTrainingMcCrossingThreshold}
+                            onChange={(e) => setLocoTrainingMcCrossingThreshold(Number(e.target.value || 0.5))}
+                            disabled={!locoTrainingMcThresholdGrid.length}
+                          />
+                          <span>{Number(locoTrainingMcThresholdEntry?.threshold ?? locoTrainingMcCrossingThreshold).toFixed(2)}</span>
+                          <p className="small">
+                            {locoTrainingMcThresholdEntry?.accuracy == null
+                              ? 'Sin grilla de threshold para este modelo.'
+                              : `accuracy ${Number(locoTrainingMcThresholdEntry.accuracy).toFixed(3)}`}
+                          </p>
+                        </aside>
                       </div>
                     )
                   })()}
@@ -8510,8 +10226,8 @@ export default function App() {
 
                 {/* â”€â”€ Section 5: Per-class metrics (long format) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.multiclass_class_metrics) && locoTrainingResult.multiclass_class_metrics.length > 0 ? (
-                <section className="training-section">
-                  <h3>MÃ©tricas por clase (formato largo)</h3>
+                <TrainingDisclosure title="Métricas por clase (formato largo)">
+                  <h3>Metricas por clase (formato largo)</h3>
                   <div className="table-wrap model-table">
                     <table>
                       <thead><tr><th>model</th><th>class</th><th>precision</th><th>recall</th><th>f1</th><th>support</th></tr></thead>
@@ -8529,12 +10245,12 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
                 ) : null}
 
                 {/* â”€â”€ Section 6: Crossing rejection metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.crossing_metrics) && locoTrainingResult.crossing_metrics.length > 0 ? (
-                <section className="training-section">
+                <TrainingDisclosure title="Crossing rejection metrics">
                   <h3>Crossing rejection metrics</h3>
                   <div className="table-wrap model-table">
                     <table>
@@ -8553,12 +10269,12 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
                 ) : null}
 
                 {/* â”€â”€ Section 7: Combined decision thresholds grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.combined_decision_thresholds) && locoTrainingResult.combined_decision_thresholds.length > 0 ? (
-                <section className="training-section">
+                <TrainingDisclosure title="Combined decision thresholds">
                   <h3>Combined decision thresholds</h3>
                   <p className="small">valid_threshold (binary) &times; crossing_threshold (multiclass) &mdash; combined decision: binary_score {'>='} vt AND crossing_prob {'<='} ct</p>
                   <div className="table-wrap model-table">
@@ -8584,12 +10300,12 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
                 ) : null}
 
                 {/* â”€â”€ Section 8: Best combined thresholds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.best_combined_thresholds) && locoTrainingResult.best_combined_thresholds.length > 0 ? (
-                <section className="training-section">
+                <TrainingDisclosure title="Mejores reglas combinadas">
                   <h3>Mejores reglas combinadas</h3>
                   <div className="table-wrap model-table">
                     <table>
@@ -8610,11 +10326,13 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
                 ) : null}
 
                 {/* â”€â”€ Section 9: Binary thresholds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-                <section className="training-section">
+                {!locoTrainingIsMulticlassRun ? (<>
+                <>
+                <TrainingDisclosure title="Thresholds (binario)">
                   <h3>Thresholds (binario)</h3>
                   <div className="table-wrap model-table">
                     <table>
@@ -8633,10 +10351,10 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
 
                 {/* â”€â”€ Section 10: Binary performance by radius â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-                <section className="training-section">
+                <TrainingDisclosure title="Performance by radius size (binario)">
                   <h3>Performance by radius size (binario)</h3>
                   <div className="table-wrap model-table">
                     <table>
@@ -8657,11 +10375,13 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
 
                 {/* â”€â”€ Section 11: Multiclass performance by radius â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+                </>
+                </>) : null}
                 {Array.isArray(locoTrainingResult?.multiclass_radius_group_metrics) && locoTrainingResult.multiclass_radius_group_metrics.length > 0 ? (
-                <section className="training-section">
+                <TrainingDisclosure title="Performance by radius size (multiclase)">
                   <h3>Performance by radius size (multiclase)</h3>
                   <div className="table-wrap model-table">
                     <table>
@@ -8681,10 +10401,11 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </TrainingDisclosure>
                 ) : null}
 
                 {/* â”€â”€ Section 12: Binary error review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+                {!locoTrainingIsMulticlassRun ? (<>
                 <section className="training-section">
                   <h3>Error Review (binario)</h3>
                   <div className="training-error-grid">
@@ -8699,6 +10420,7 @@ export default function App() {
                 </section>
 
                 {/* â”€â”€ Section 13: Multiclass error review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+                </>) : null}
                 {Array.isArray(locoTrainingResult?.error_review_multiclass) && locoTrainingResult.error_review_multiclass.length > 0 ? (
                 <section className="training-section">
                   <h3>Error Review (multiclase)</h3>
@@ -8743,7 +10465,7 @@ export default function App() {
                 {/* â”€â”€ Section 14: Combined decision error review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.error_review_combined) && locoTrainingResult.error_review_combined.length > 0 ? (
                 <section className="training-section">
-                  <h3>Error Review (decisiÃ³n combinada)</h3>
+                  <h3>Error Review (decision combinada)</h3>
                   <div className="filter-row">
                     <label className="field">
                       <span>class</span>
@@ -8790,10 +10512,13 @@ export default function App() {
                   </div>
                 </section>
                 ) : null}
-              </div>
-            ) : (
-              <div className="placeholder">Configura Training en el panel izquierdo y toca Train Models.</div>
-            )}
+              </>
+              ) : (
+                <section className="training-section">
+                  <div className="placeholder">Configura Training en el panel izquierdo, ejecuta Train Models o selecciona una fila del batch actual.</div>
+                </section>
+              )}
+            </div>
           </article>
           <article className={`card viewer loco-viewer ${workspaceTab === 'locoTest' ? '' : 'hidden-panel'}`}>
             <h2>Test circle model</h2>
@@ -8927,19 +10652,19 @@ export default function App() {
                 <input type="range" min="0.05" max="0.9" step="0.05" value={diamMaskOpacity} onChange={(e) => setDiamMaskOpacity(Number(e.target.value || 0.38))} disabled={!diamVisualMaskUrl} />
                 <span>{Math.round(diamMaskOpacity * 100)}%</span>
               </label>
-              <button className="primary" onClick={detectLocoModelCircles} disabled={!imageUrl || loading.locoModel}>Detect circles</button>
-              <button onClick={measureLocoModelAccepted} disabled={!locoModelAccepted.length || loading.locoModel}>Run Diameter on Accepted</button>
+              <button className="primary" onClick={runLocoModelBaseDetector} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Run base</button>
+              <button onClick={applyLocoModelPendingFilters} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Apply pending</button>
+              <button onClick={measureLocoModelAccepted} disabled={!locoModelCanMeasure || loading.locoModel}>Run Diameter on Accepted</button>
             </div>
 
             <div className="loco-workspace loco-lab-workspace">
               <div
                 ref={locoModelStageRef}
-                className={`stage loco-stage mode-pan ${locoModelIsPanning ? 'is-panning' : ''} ${imageUrl ? 'has-image' : ''}`}
+                className={`stage loco-stage mode-${locoModelTool === 'exclude' ? 'exclude' : 'pan'} ${locoModelIsPanning ? 'is-panning' : ''} ${imageUrl ? 'has-image' : ''}`}
                 onPointerDown={onLocoModelPointerDown}
                 onPointerMove={onLocoModelPointerMove}
                 onPointerUp={onLocoModelPointerUp}
                 onPointerCancel={onLocoModelPointerUp}
-                onPointerLeave={onLocoModelPointerUp}
               >
                 {imageUrl ? (
                   <div
@@ -8960,6 +10685,28 @@ export default function App() {
                     </div>
                     <div className="loco-annotation-layer">
                       <svg className="loco-overlay loco-model-overlay" viewBox={`0 0 ${Math.max(1, imageDims.w)} ${Math.max(1, imageDims.h)}`}>
+                        {locoModelExcludeRects.map((rect, idx) => (
+                          <g key={`det-exclude-${idx}`}>
+                            <rect
+                              className={`loco-model-exclude-rect ${idx === locoModelExcludeActiveIdx ? 'selected' : ''}`}
+                              x={rect.x}
+                              y={rect.y}
+                              width={rect.w}
+                              height={rect.h}
+                            />
+                            <rect
+                              className="loco-model-exclude-hit"
+                              x={rect.x}
+                              y={rect.y}
+                              width={rect.w}
+                              height={rect.h}
+                              onPointerDown={(e) => {
+                                e.stopPropagation()
+                                setLocoModelExcludeActiveIdx(idx)
+                              }}
+                            />
+                          </g>
+                        ))}
                         {locoModelLayers.tiles && locoModelParams.candidate_sampling_mode === 'tile_balanced' ? (() => {
                           const tw = Number(locoModelParams.tile_size_px || 128)
                           const iw = Math.max(1, imageDims.w)
@@ -9003,7 +10750,7 @@ export default function App() {
                           return (
                             <g key={`det-acc-${c.candidate_id}`}>
                               <circle
-                                className={`loco-model-circle accepted ${measured ? 'measured' : ''} ${selected ? 'selected' : ''}`}
+                                className={`loco-model-circle ${String(c.status || '') === 'scored' ? 'pending' : 'accepted'} ${measured ? 'measured' : ''} ${selected ? 'selected' : ''}`}
                                 cx={Number(c.center_x)}
                                 cy={Number(c.center_y)}
                                 r={Math.max(1, Number(c.radius_px) || 1)}
@@ -9041,19 +10788,26 @@ export default function App() {
                   <div className="loco-result-card">
                     <strong>{locoModelResult.model_id}</strong>
                     <span>{locoModelResult.model_run_id}</span>
-                    <p className="small">{locoModelResult.run_id}<br />{locoModelResult.run_dir}</p>
+                    <p className="small">
+                      {locoModelResult.run_id || `estado ${locoModelStageSummary?.detector_state_id || '-'}`}
+                      <br />
+                      {locoModelResult.run_dir || `etapa ${locoModelStageFlags.resultStage || '-'}`}
+                    </p>
                   </div>
                 ) : null}
                 <div className="kpi-row">
-                  <span>Total <strong>{locoModelResult?.summary?.total_candidates ?? 0}</strong></span>
-                  <span>Muestra <strong>{locoModelResult?.summary?.sampled_candidates ?? locoModelResult?.summary?.total_candidates ?? 0}</strong></span>
-                  <span>Evaluados <strong>{locoModelResult?.summary?.evaluated_candidates ?? 0}</strong></span>
-                  <span>Threshold <strong>{locoModelResult?.summary?.accepted_before_nms ?? 0}</strong></span>
-                  <span>Final <strong>{locoModelResult?.summary?.accepted_after_nms ?? 0}</strong></span>
-                  <span>Rechazados <strong>{locoModelResult?.summary?.rejected_by_threshold ?? 0}</strong></span>
-                  <span>NMS <strong>{locoModelResult?.summary?.removed_by_nms ?? 0}</strong></span>
+                  <span>Total <strong>{locoModelStageSummary?.total_candidates ?? 0}</strong></span>
+                  <span>Muestra <strong>{locoModelStageSummary?.sampled_candidates ?? locoModelStageSummary?.total_candidates ?? 0}</strong></span>
+                  <span>Excluidos <strong>{locoModelStageSummary?.excluded_by_zone ?? 0}</strong></span>
+                  <span>Base <strong>{locoModelStageSummary?.evaluated_candidates ?? 0}</strong></span>
+                  <span>Threshold <strong>{locoModelStageFlags.thresholdReady ? (locoModelStageSummary?.accepted_before_nms ?? 0) : '-'}</strong></span>
+                  <span>NMS <strong>{locoModelStageFlags.nmsReady ? (locoModelStageSummary?.accepted_after_nms ?? 0) : '-'}</strong></span>
+                  <span>Spatial <strong>{locoModelStageFlags.spatialReady ? (locoModelStageSummary?.accepted_after_spatial ?? 0) : '-'}</strong></span>
+                  <span>Rechazados <strong>{locoModelStageFlags.thresholdReady ? (locoModelStageSummary?.rejected_by_threshold ?? 0) : '-'}</strong></span>
                   <span>Multiclase <strong>{locoModelResult?.has_multiclass ? 'âœ“' : 'âœ—'}</strong></span>
                   {locoModelResult?.has_multiclass ? <span>cross th <strong>{Number(locoModelResult?.crossing_threshold || 0.5).toFixed(2)}</strong></span> : null}
+                  <span>Etapa <strong>{locoModelStageFlags.resultStage || '-'}</strong></span>
+                  <span>Estado <strong>{locoModelStageFlags.resultStale ? 'desactualizada' : 'vigente'}</strong></span>
                 </div>
 
                 {locoModelSelectedCandidate ? (
@@ -9135,6 +10889,14 @@ export default function App() {
                   <button onClick={() => refreshModelDataset()} disabled={loading.modelsDataset}>Refrescar dataset</button>
                   <button onClick={selectTrainableImages} disabled={!modelDataset.length}>Seleccionar validas</button>
                   <button onClick={clearTrainImages} disabled={!trainImageIds.length}>Limpiar seleccion</button>
+                  <button
+                    className="bad"
+                    onClick={() => { if (window.confirm(`Eliminar ${trainImageIds.length} imagen(es) seleccionada(s) y sus scribbles?`)) deleteSelectedDatasetImages() }}
+                    disabled={!trainImageIds.length || loading.modelsDatasetDelete}
+                  >
+                    Eliminar seleccionadas
+                    {loading.modelsDatasetDelete ? '...' : ''}
+                  </button>
                 </div>
                 <div className="table-wrap model-table">
                   <table>
@@ -9142,48 +10904,173 @@ export default function App() {
                       <tr>
                         <th>usar</th>
                         <th>imagen</th>
-                        <th>path</th>
-                        <th>modificacion</th>
-                        <th>fibra</th>
-                        <th>halo</th>
-                        <th>fondo</th>
-                        <th>estado</th>
+                        <th className="sortable-th" onClick={() => setModelSort((s) => s.key === 'path' ? { key: 'path', dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: 'path', dir: 'asc' })}>
+                          path{modelSort.key === 'path' ? (modelSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                        </th>
+                        <th className="sortable-th" onClick={() => setModelSort((s) => s.key === 'mtime' ? { key: 'mtime', dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: 'mtime', dir: 'asc' })}>
+                          modificacion{modelSort.key === 'mtime' ? (modelSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                        </th>
+                        <th>mascara</th>
+                        <th>cargar</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {modelDataset.map((item) => {
-                        const counts = item.class_counts || {}
-                        const trainable = !!(item.trainable_multiclass || item.trainable_binary)
-                        const thumbs = modelDatasetPreviewUrls(item)
-                        return (
-                          <tr key={`model-dataset-${item.image_id}`}>
-                            <td>
-                              <input
-                                type="checkbox"
-                                checked={!!selectedTrainImages[item.image_id]}
-                                onChange={() => toggleTrainImage(item.image_id)}
-                                disabled={!trainable}
-                              />
-                            </td>
-                            <td>
-                              <div
-                                className="model-dataset-table-image"
-                                title={`${item.image_name || item.image_id}\nDoble click para ampliar`}
-                                onDoubleClick={() => openModelImagePreview(item)}
-                              >
-                                {thumbs.real ? <img src={thumbs.real} alt="" /> : <span className="model-dataset-empty">imagen</span>}
-                                {thumbs.scribble ? <img src={thumbs.scribble} alt="" /> : <span className="model-dataset-empty">scribble</span>}
-                              </div>
-                            </td>
-                            <td title={item.source_path || ''}>{shortPathTail(item.source_path)}</td>
-                            <td>{item.source_mtime || item.updated_at || '-'}</td>
-                            <td>{counts.fiber || 0}</td>
-                            <td>{counts.halo || 0}</td>
-                            <td>{counts.background || 0}</td>
-                            <td>{trainable ? 'usable' : 'faltan clases'}</td>
-                          </tr>
-                        )
-                      })}
+                      {(() => {
+                        const hasMaskData = Object.keys(maskRunListByImage).length > 0
+                        const withMasks = hasMaskData
+                          ? modelDataset.filter((item) => {
+                              const runs = maskRunListByImage[item.image_id]
+                              return runs?.length > 0
+                            })
+                          : [...modelDataset]
+                        const sorted = [...withMasks].sort((a, b) => {
+                          const dir = modelSort.dir === 'asc' ? 1 : -1
+                          let va, vb
+                          switch (modelSort.key) {
+                            case 'path':
+                              va = (a.source_path || a.image_name || '').toLowerCase()
+                              vb = (b.source_path || b.image_name || '').toLowerCase()
+                              return va < vb ? -dir : va > vb ? dir : 0
+                            case 'mtime':
+                              va = a.source_mtime || a.updated_at || ''
+                              vb = b.source_mtime || b.updated_at || ''
+                              return va < vb ? -dir : va > vb ? dir : 0
+                            default:
+                              return 0
+                          }
+                        })
+                        return sorted.map((item) => {
+                          const thumbs = modelDatasetPreviewUrls(item)
+                          return (
+                            <tr key={`model-dataset-${item.image_id}`}>
+                              <td>
+                                <input
+                                  type="checkbox"
+                                  checked={!!selectedTrainImages[item.image_id]}
+                                  onChange={() => toggleTrainImage(item.image_id)}
+                                />
+                              </td>
+                              <td>
+                                <div
+                                  className="scribble-grid"
+                                  title={`${item.image_name || item.image_id}\nDoble click para ampliar`}
+                                  onDoubleClick={() => openModelImagePreview(item)}
+                                >
+                                  {/* Top-left: Real image */}
+                                  <div className="scribble-grid-cell" onContextMenu={(e) => handleImageContextMenu(e, item.image_id)}>
+                                    <span className="scribble-grid-label">Imagen</span>
+                                    {thumbs.real ? (
+                                      <img src={thumbs.real} alt="" className="scribble-grid-thumb" />
+                                    ) : (
+                                      <div className="scribble-grid-empty-cell">
+                                        <span className="scribble-grid-empty-text">sin imagen</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {/* Top-right: manual */}
+                                  <div
+                                    className={`scribble-grid-cell ${selectedGridOrigin[item.image_id] === 'manual' ? 'scribble-grid-cell-selected' : ''}`}
+                                    onClick={() => setSelectedGridOrigin(prev => ({ ...prev, [item.image_id]: 'manual' }))}
+                                    onContextMenu={(e) => handleGridContextMenu(e, item.image_id, 'manual')}
+                                  >
+                                    <span className="scribble-grid-label">manual</span>
+                                    <ScribblePreviewCanvas
+                                      scribbleThumbSrc={(() => {
+                                        const val = scribbleThumbsByOrigin[item.image_id]?.['manual'] || ''
+                                        console.log(`[DBG-RENDER] image_id=${item.image_id}, origin=manual, scribbleThumbSrc=${val ? 'non-empty' : 'empty'}`)
+                                        return val
+                                      })()}
+                                      imageId={item.image_id}
+                                      selectedOrigin="manual"
+                                    />
+                                  </div>
+                                  {/* Bottom-left: modelo */}
+                                  <div
+                                    className={`scribble-grid-cell ${selectedGridOrigin[item.image_id] === 'modelo' ? 'scribble-grid-cell-selected' : ''}`}
+                                    onClick={() => setSelectedGridOrigin(prev => ({ ...prev, [item.image_id]: 'modelo' }))}
+                                    onContextMenu={(e) => handleGridContextMenu(e, item.image_id, 'modelo')}
+                                  >
+                                    <span className="scribble-grid-label">modelo</span>
+                                    <ScribblePreviewCanvas
+                                      scribbleThumbSrc={(() => {
+                                        const val = scribbleThumbsByOrigin[item.image_id]?.['modelo'] || ''
+                                        console.log(`[DBG-RENDER] image_id=${item.image_id}, origin=modelo, scribbleThumbSrc=${val ? 'non-empty' : 'empty'}`)
+                                        return val
+                                      })()}
+                                      imageId={item.image_id}
+                                      selectedOrigin="modelo"
+                                    />
+                                  </div>
+                                  {/* Bottom-right: modelo_modificado */}
+                                  <div
+                                    className={`scribble-grid-cell ${selectedGridOrigin[item.image_id] === 'modelo_modificado' ? 'scribble-grid-cell-selected' : ''}`}
+                                    onClick={() => setSelectedGridOrigin(prev => ({ ...prev, [item.image_id]: 'modelo_modificado' }))}
+                                    onContextMenu={(e) => handleGridContextMenu(e, item.image_id, 'modelo_modificado')}
+                                  >
+                                    <span className="scribble-grid-label">modificado</span>
+                                    <ScribblePreviewCanvas
+                                      scribbleThumbSrc={(() => {
+                                        const val = scribbleThumbsByOrigin[item.image_id]?.['modelo_modificado'] || ''
+                                        console.log(`[DBG-RENDER] image_id=${item.image_id}, origin=modelo_modificado, scribbleThumbSrc=${val ? 'non-empty' : 'empty'}`)
+                                        return val
+                                      })()}
+                                      imageId={item.image_id}
+                                      selectedOrigin="modelo_modificado"
+                                    />
+                                  </div>
+                                </div>
+                              </td>
+                              <td title={item.source_path || ''}>{shortPathTail(item.source_path)}</td>
+                              <td>{item.source_mtime || item.updated_at || '-'}</td>
+                              <td>
+                                {(() => {
+                                  const runs = maskRunListByImage[item.image_id]
+                                  if (!runs?.length) {
+                                    return <div className="scribble-grid-empty-cell" style={{ width: 200, height: 150 }}><span className="scribble-grid-empty-text">sin mascara</span></div>
+                                  }
+                                  const idx = maskIndexByImage[item.image_id] || 0
+                                  const runId = runs[idx]?.run_id
+                                  const thumb = maskThumbByRun[runId]
+                                  return (
+                                    <div className="mask-preview-cell" onDoubleClick={(e) => { e.stopPropagation(); openMaskPreview(item.image_id, runId) }}>
+                                      {thumb ? (
+                                        <img
+                                          src={`data:image/png;base64,${thumb.b64}`}
+                                          alt={`mask ${idx + 1}/${runs.length}`}
+                                          className="mask-preview-thumb"
+                                          style={{ width: Math.max(thumb.w, 104), height: Math.max(thumb.h, 72) }}
+                                        />
+                                      ) : (
+                                        <div className="scribble-grid-empty-cell" style={{ width: 200, height: 150 }}>
+                                          <span className="scribble-grid-empty-text">cargando...</span>
+                                        </div>
+                                      )}
+                                      <div className="mask-nav">
+                                        <button className="mask-nav-btn" onClick={(e) => { e.stopPropagation(); maskPrev(item.image_id) }}>▲</button>
+                                        <span className="mask-nav-label">{idx + 1}/{runs.length}</span>
+                                        <button className="mask-nav-btn" onClick={(e) => { e.stopPropagation(); maskNext(item.image_id) }}>▼</button>
+                                      </div>
+                                    </div>
+                                  )
+                                })()}
+                              </td>
+                              <td>
+                                <button
+                                  className="btn-small"
+                                  onClick={() => {
+                                    const originToLoad = selectedGridOrigin[item.image_id] || item.scribble_origin || ''
+                                    loadSavedImage(item.image_id, originToLoad)
+                                  }}
+                                  disabled={loading.libraryLoad}
+                                  title="Cargar esta imagen en Scribble"
+                                >
+                                  Cargar
+                                </button>
+                              </td>
+                            </tr>
+                          )
+                        })
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -9191,6 +11078,21 @@ export default function App() {
 
               <section>
                 <h2>Modelos guardados</h2>
+                {assistModels.length > 0 && (
+                  <div className="inline" style={{ marginBottom: 8 }}>
+                    <button
+                      className="bad"
+                      onClick={() => {
+                        const count = Object.values(selectedAssistModelIds).filter(Boolean).length
+                        if (window.confirm(`Eliminar ${count} modelo(s) seleccionado(s)?`)) deleteSelectedAssistModels()
+                      }}
+                      disabled={!Object.values(selectedAssistModelIds).some(Boolean) || loading.modelsDelete}
+                    >
+                      Eliminar seleccionados
+                      {loading.modelsDelete ? '...' : ''}
+                    </button>
+                  </div>
+                )}
                 {!assistModels.length ? (
                   <div className="placeholder small">Entrena un modelo desde el panel lateral.</div>
                 ) : (
@@ -9198,6 +11100,7 @@ export default function App() {
                     <table>
                       <thead>
                         <tr>
+                          <th>usar</th>
                           <th>modelo</th>
                           <th>modo</th>
                           <th>imagenes</th>
@@ -9209,6 +11112,13 @@ export default function App() {
                       <tbody>
                         {assistModels.map((model) => (
                           <tr key={`registry-${model.model_id}`} className={model.model_id === selectedAssistModelId ? 'selected-row' : ''} onClick={() => setSelectedAssistModelId(model.model_id)}>
+                            <td onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={!!selectedAssistModelIds[model.model_id]}
+                                onChange={() => toggleAssistModelSelection(model.model_id)}
+                              />
+                            </td>
                             <td>{model.model_name || model.model_id}{model.model_id === defaultAssistModelId ? ' *' : ''}</td>
                             <td>{model.class_mode || '-'}</td>
                             <td>{model.image_count || 0}</td>
@@ -9233,22 +11143,50 @@ export default function App() {
               <div>
                 <h2>{modelImagePreview.image_name || 'Imagen'}</h2>
                 <p>
-                  {shortPathTail(modelImagePreview.source_path)} | {modelImagePreview.source_mtime || '-'}
-                  {modelImagePreview.loading ? ' | cargando imagen real...' : ''}
+                  {modelImagePreview.mask != null && modelImagePreview.maskExperimentId ? (
+                    <>modelo: {modelImagePreview.maskExperimentId}</>
+                  ) : (
+                    <>{shortPathTail(modelImagePreview.source_path)} | {modelImagePreview.source_mtime || '-'}</>
+                  )}
+                  {modelImagePreview.loading ? ' | cargando...' : ''}
                   {modelImagePreview.error ? ` | ${modelImagePreview.error}` : ''}
                 </p>
               </div>
+              {modelImagePreview.mask != null ? (
+                <div className="mask-modal-nav">
+                  <button className="mask-nav-btn" onClick={maskModalPrev} disabled={modelImagePreview.maskTotal <= 1}>▲</button>
+                  <span className="mask-nav-label">{modelImagePreview.maskIndex + 1}/{modelImagePreview.maskTotal}</span>
+                  <button className="mask-nav-btn" onClick={maskModalNext} disabled={modelImagePreview.maskTotal <= 1}>▼</button>
+                </div>
+              ) : null}
               <button className="icon-tool" onClick={() => setModelImagePreview(null)}>Cerrar</button>
             </div>
-            <div className="image-preview-grid">
-              <figure>
-                <figcaption>Imagen real</figcaption>
-                {modelImagePreview.real ? <img src={modelImagePreview.real} alt="imagen real" /> : <div className="placeholder">Sin imagen.</div>}
-              </figure>
-              <figure>
-                <figcaption>Scribble</figcaption>
-                {modelImagePreview.scribble ? <img src={modelImagePreview.scribble} alt="scribble" /> : <div className="placeholder">Sin scribble.</div>}
-              </figure>
+            <div className="image-preview-grid" style={modelImagePreview.mask != null ? { gridTemplateColumns: '1fr', maxWidth: 800, justifySelf: 'center' } : {}}>
+              {modelImagePreview.mask != null ? (
+                <figure className="mask-figure">
+                  <figcaption>Mascara</figcaption>
+                  {modelImagePreview.mask ? <img src={modelImagePreview.mask} alt="mascara" /> : <div className="placeholder">no disponible</div>}
+                </figure>
+              ) : (
+                <>
+                  <figure>
+                    <figcaption>Imagen real</figcaption>
+                    {modelImagePreview.real ? <img src={modelImagePreview.real} alt="imagen real" /> : <div className="placeholder">Sin imagen.</div>}
+                  </figure>
+                  <figure>
+                    <figcaption>manual</figcaption>
+                    {modelImagePreview.manual ? <img src={modelImagePreview.manual} alt="manual" /> : <div className="placeholder">no disponible</div>}
+                  </figure>
+                  <figure>
+                    <figcaption>modelo</figcaption>
+                    {modelImagePreview.modelo ? <img src={modelImagePreview.modelo} alt="modelo" /> : <div className="placeholder">no disponible</div>}
+                  </figure>
+                  <figure>
+                    <figcaption>modificado</figcaption>
+                    {modelImagePreview.modelo_modificado ? <img src={modelImagePreview.modelo_modificado} alt="modificado" /> : <div className="placeholder">no disponible</div>}
+                  </figure>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -9412,6 +11350,73 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      {contextMenu && (
+        <>
+          <div className="context-menu-overlay" onClick={closeContextMenu} />
+          <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+            {contextMenu.type === 'scribble' ? (
+              <>
+                <button onClick={() => {
+                  loadSavedImage(contextMenu.imageId, contextMenu.origin)
+                  closeContextMenu()
+                }}>
+                  Cargar
+                </button>
+                <button className="bad-text" onClick={async () => {
+                  closeContextMenu()
+                  if (!window.confirm(`Eliminar scribbles de origen "${contextMenu.origin}"?`)) return
+                  const sid = await ensureSessionReady()
+                  if (!sid) return
+                  await withLoad('modelsDatasetDelete', async () => {
+                    try {
+                      await apiPost('/api/scribble/draft/clear', {
+                        session_id: sid,
+                        image_id: contextMenu.imageId,
+                        origin: contextMenu.origin,
+                      })
+                      await refreshModelDataset(sid)
+                      toast('success', 'Scribble eliminado', `Origen "${contextMenu.origin}" limpiado.`)
+                    } catch (err) {
+                      toast('error', 'Scribble', errMsg(err))
+                    }
+                  })
+                }}>
+                  Eliminar scribbles
+                </button>
+              </>
+            ) : (
+              <button className="bad-text" onClick={async () => {
+                closeContextMenu()
+                if (!window.confirm('Eliminar imagen y todos sus scribbles?')) return
+                const sid = await ensureSessionReady()
+                if (!sid) return
+                await withLoad('modelsDatasetDelete', async () => {
+                  try {
+                    await apiPost('/api/library/delete', { session_id: sid, image_id: contextMenu.imageId })
+                    if (String(imageId || '') === contextMenu.imageId) {
+                      setImageId('')
+                      setImageName('')
+                      setImageUrl('')
+                      resetImageScopedState()
+                      resetScribbleDraftState()
+                      resetAnnotHistory()
+                    }
+                    await refreshSavedImages(sid)
+                    await refreshModelDataset(sid)
+                    toast('success', 'Imagen eliminada', contextMenu.imageId)
+                  } catch (err) {
+                    toast('error', 'Eliminar', errMsg(err))
+                  }
+                })
+              }}>
+                Eliminar imagen y scribbles
+              </button>
+            )}
+          </div>
+        </>
+      )}
+        </div>
+      </div>
     </div>
   )
 }

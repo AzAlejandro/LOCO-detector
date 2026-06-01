@@ -7,7 +7,7 @@
     "frontend:install": "npm --prefix frontend install",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
-    "backend:dev": ".venv\\Scripts\\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8011 --reload --app-dir .",
+    "backend:dev": ".venv\\Scripts\\python.exe app.py",
     "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\""
   },
   "devDependencies": {

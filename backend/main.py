@@ -24,6 +24,7 @@ from .library_store import (
     delete_library_image,
     list_library_images,
     load_library_image,
+    load_library_mask_thumbnail,
     load_library_thumbnail,
     register_library_image,
     save_prior_cache,
@@ -113,6 +114,7 @@ class LibraryLoadReq(BaseModel):
     session_id: str
     image_id: str
     restore_scribbles: bool = True
+    scribble_origin: str = ''
 
 
 class LibraryDeleteReq(BaseModel):
@@ -139,11 +141,13 @@ class ScribbleDraftSaveReq(BaseModel):
     session_id: str
     image_id: str
     scribble_map_b64: str = ''
+    scribble_origin: str = ''
 
 
 class ScribbleDraftClearReq(BaseModel):
     session_id: str
     image_id: str
+    origin: str = ''
 
 
 def _ok(status: str, *, level: str = 'info', payload: dict[str, Any] | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -549,9 +553,19 @@ def api_library_images(session_id: str = '') -> dict[str, Any]:
             thumb_b64, thumb_mime = encode_display_b64(thumb)
         except Exception:
             thumb_b64 = ''
+        mask_thumb_b64 = ''
+        mask_thumb_mime = 'image/png'
+        try:
+            mask_thumb = load_library_mask_thumbnail(image_id)
+            if mask_thumb is not None:
+                mask_thumb_b64, mask_thumb_mime = encode_display_b64(mask_thumb)
+        except Exception:
+            mask_thumb_b64 = ''
         item = dict(row)
         item['thumbnail_b64'] = thumb_b64
         item['thumbnail_mime'] = thumb_mime
+        item['mask_thumbnail_b64'] = mask_thumb_b64
+        item['mask_thumbnail_mime'] = mask_thumb_mime
         items.append(item)
     return _ok('Imagenes guardadas listadas.', payload={'items': items})
 
@@ -577,7 +591,8 @@ def api_library_load(req: LibraryLoadReq) -> dict[str, Any]:
     draft_payload: dict[str, Any] = {'found': False, 'image_id': loaded_id}
     if req.restore_scribbles:
         try:
-            draft = load_scribble_draft(image_id)
+            origin_to_load = str(req.scribble_origin or '').strip().lower()
+            draft = load_scribble_draft(image_id, origin=origin_to_load)
             if bool(draft.get('found', False)):
                 labels = np.asarray(draft.get('labels'), dtype=np.uint8)
                 if labels.shape != rgb.shape[:2]:
@@ -765,7 +780,7 @@ def api_scribble_draft_save(req: ScribbleDraftSaveReq) -> dict[str, Any]:
     if image_id != str(sess.image_id or '').strip():
         raise HTTPException(status_code=400, detail='image_id no corresponde a la imagen activa de la sesion.')
     labels = decode_scribble_b64(req.scribble_map_b64, target_shape=sess.image_rgb.shape[:2])
-    meta = save_scribble_draft(image_id, labels)
+    meta = save_scribble_draft(image_id, labels, origin=req.scribble_origin)
     return _ok(
         'Draft de scribble guardado.',
         level='success',
@@ -776,19 +791,21 @@ def api_scribble_draft_save(req: ScribbleDraftSaveReq) -> dict[str, Any]:
             'n_halo': int(meta.get('n_halo', 0)),
             'n_bg': int(meta.get('n_bg', 0)),
             'format_version': str(meta.get('format_version', 'v3_multiclass_halo')),
+            'scribble_origin': str(meta.get('scribble_origin', '')),
         },
     )
 
 
 @app.get('/api/scribble/draft/load')
-def api_scribble_draft_load(session_id: str, image_id: str) -> dict[str, Any]:
+def api_scribble_draft_load(session_id: str, image_id: str, origin: str = '') -> dict[str, Any]:
     sess = _require_session(session_id)
     if sess.image_rgb is None:
         raise HTTPException(status_code=400, detail='Carga una imagen antes de restaurar draft.')
     sid = str(image_id or '').strip()
     if not sid:
         raise HTTPException(status_code=400, detail='image_id requerido.')
-    payload = load_scribble_draft(sid)
+    origin_key = str(origin or '').strip().lower()
+    payload = load_scribble_draft(sid, origin=origin_key)
     if not bool(payload.get('found', False)):
         return _ok('Sin draft para la imagen.', payload={'found': False, 'image_id': sid})
 
@@ -815,7 +832,7 @@ def api_scribble_draft_clear(req: ScribbleDraftClearReq) -> dict[str, Any]:
     sid = str(req.image_id or '').strip()
     if not sid:
         raise HTTPException(status_code=400, detail='image_id requerido.')
-    info = clear_scribble_draft(sid)
+    info = clear_scribble_draft(sid, origin=str(req.origin or '').strip().lower())
     return _ok('Draft limpiado.', level='success', payload=info)
 
 
@@ -934,6 +951,30 @@ def api_results_get(run_id: str) -> dict[str, Any]:
     payload = _run_to_payload(item)
     level = str(payload.get('run_status_level', 'success'))
     return _ok('Resultado cargado.', level=level, payload=payload)
+
+
+@app.get('/api/results/mask-thumb')
+def api_results_mask_thumb(run_id: str) -> dict[str, Any]:
+    if not str(run_id or '').strip():
+        raise HTTPException(status_code=400, detail='run_id requerido.')
+    try:
+        item = load_run(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    mask = (np.asarray(item['mask']) > 0).astype(np.uint8) * 255
+    h, w = mask.shape[:2]
+    max_dim = 200
+    scale = min(max_dim / max(w, h), 1.0)
+    if scale < 1.0:
+        new_w, new_h = int(w * scale), int(h * scale)
+        mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+    thumb_b64 = encode_gray_png_b64(mask)
+    return _ok('Mask thumb loaded.', payload={
+        'run_id': item.get('run_id', ''),
+        'mask_thumb_b64': thumb_b64,
+        'width': int(mask.shape[1]),
+        'height': int(mask.shape[0]),
+    })
 
 
 @app.post('/api/review/mark')

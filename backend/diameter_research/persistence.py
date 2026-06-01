@@ -118,7 +118,7 @@ def normalize_points(points: list[dict[str, Any]] | None) -> list[dict[str, floa
             continue
         if not np.isfinite([x, y]).all():
             continue
-        out.append({'x': float(x), 'y': float(y)})
+        out.append({'x': float(x), 'y': float(y), 'circle_type': str(item.get('circle_type', '') or ''), 'radius_px': float(item.get('radius_px', 0) or 0)})
     return out
 
 

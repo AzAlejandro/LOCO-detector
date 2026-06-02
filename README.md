@@ -22,6 +22,51 @@ LOCO Detector is a standalone, installable program that detects circular cross-s
 
 ## Quick Start
 
+## Text Encoding
+
+Repository text files should use `UTF-8` without BOM. This supports `ñ` and
+accented characters while staying compatible with Python, JavaScript, Markdown,
+Docker, and shell tooling.
+
+### Docker distribution
+
+For sharing the application across machines, Docker is the recommended
+distribution path. The Docker images contain source code and CPU-only
+dependencies, but never preload the heavy project work stored under `outputs/`.
+
+Requirements:
+
+- Docker Desktop with Docker Compose
+- the project ZIP exported from `Configuracion` when existing training work
+  must be restored
+
+On Windows, run:
+
+```bat
+run_docker.bat
+```
+
+Or use Docker Compose directly:
+
+```bash
+docker compose up --build -d
+```
+
+Open [http://localhost:5178](http://localhost:5178). On a new machine, enter
+`Configuracion`, inspect the exported ZIP and import it. Docker keeps imported
+files in a local named volume so they survive container restarts; the ZIP
+remains the official mechanism for moving work between machines.
+
+Stop the containers without deleting imported local work:
+
+```bash
+docker compose down
+```
+
+The Windows-only native folder picker is not available from the Linux
+container. Use browser uploads and `Configuracion` project ZIP import when
+running the Docker distribution.
+
 ### Prerequisites
 
 - Python 3.10+
@@ -82,15 +127,13 @@ VITE_API_BASE=http://127.0.0.1:8011
 
 To change the backend port, edit `BACKEND_PORT` and `VITE_API_BASE` in `.env`. The frontend reads `VITE_API_BASE` from `frontend/.env`, which is automatically synced by `run_local.bat` and `run_silent.vbs`.
 
-> ⚠️ **ComfyUI** runs on port **8188** and is never managed by LOCO scripts. The `stop_servers.ps1` script explicitly skips port 8188.
-
 ### Diagnose ports
 
 ```powershell
 .\diagnose_ports.ps1
 ```
 
-This read-only script shows all processes using the configured backend, frontend, and ComfyUI ports. It never kills any process.
+This read-only script shows all processes using the configured backend and frontend ports. It never kills any process.
 
 ---
 

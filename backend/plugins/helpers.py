@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 from typing import Any
 
 import cv2
@@ -99,7 +98,10 @@ def _fit_binary_classifier(kind: str, x: np.ndarray, y: np.ndarray, n_estimators
             try:
                 setattr(clf, '_sr_package_version', version('xgboost'))
             except PackageNotFoundError:
-                pass
+                try:
+                    setattr(clf, '_sr_package_version', version('xgboost-cpu'))
+                except PackageNotFoundError:
+                    pass
     elif kind == 'catboost':
         try:
             from catboost import CatBoostClassifier
@@ -229,92 +231,3 @@ def threshold_and_clean(mask_prob: np.ndarray, thr: float = 0.5, closing_radius:
     # Se conservan los parametros para compatibilidad de firma entre experimentos.
     p = np.asarray(mask_prob, dtype=np.float32)
     return (p >= float(thr)).astype(np.uint8)
-
-
-def _torch_available() -> bool:
-    try:
-        import torch  # noqa: F401
-        import torchvision  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
-def _unet_infer_from_checkpoint(image_rgb: np.ndarray, checkpoint_path: str) -> np.ndarray:
-    import torch
-    import torch.nn as nn
-
-    class SmallUNet(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.enc1 = nn.Sequential(nn.Conv2d(1, 16, 3, padding=1), nn.ReLU(), nn.Conv2d(16, 16, 3, padding=1), nn.ReLU())
-            self.pool1 = nn.MaxPool2d(2)
-            self.enc2 = nn.Sequential(nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.Conv2d(32, 32, 3, padding=1), nn.ReLU())
-            self.pool2 = nn.MaxPool2d(2)
-            self.bottleneck = nn.Sequential(nn.Conv2d(32, 64, 3, padding=1), nn.ReLU())
-            self.up1 = nn.ConvTranspose2d(64, 32, 2, stride=2)
-            self.dec1 = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.ReLU())
-            self.up2 = nn.ConvTranspose2d(32, 16, 2, stride=2)
-            self.dec2 = nn.Sequential(nn.Conv2d(32, 16, 3, padding=1), nn.ReLU())
-            self.head = nn.Conv2d(16, 1, 1)
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            e1 = self.enc1(x)
-            e2 = self.enc2(self.pool1(e1))
-            b = self.bottleneck(self.pool2(e2))
-            d1 = self.up1(b)
-            d1 = self.dec1(torch.cat([d1, e2], dim=1))
-            d2 = self.up2(d1)
-            d2 = self.dec2(torch.cat([d2, e1], dim=1))
-            return self.head(d2)
-
-    ckpt = Path(checkpoint_path)
-    if not ckpt.exists():
-        raise FileNotFoundError(f'Checkpoint no encontrado: {checkpoint_path}')
-
-    gray = cv2.cvtColor(np.asarray(image_rgb, dtype=np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-    x = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0)
-
-    net = SmallUNet().eval()
-    state = torch.load(str(ckpt), map_location='cpu')
-    if isinstance(state, dict) and 'state_dict' in state:
-        state = state['state_dict']
-    net.load_state_dict(state)
-
-    with torch.no_grad():
-        logits = net(x)
-        prob = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)
-    return np.clip(prob, 0.0, 1.0)
-
-
-def unet_small_patch_prior(image_rgb: np.ndarray, labels: np.ndarray, params: dict[str, Any] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
-    cfg = dict(params or {})
-    ckpt = str(cfg.get('checkpoint_path') or '').strip()
-
-    try:
-        if not _torch_available():
-            raise RuntimeError('torch/torchvision no instalados')
-        if not ckpt:
-            raise RuntimeError('checkpoint_path no provisto')
-        prior = _unet_infer_from_checkpoint(image_rgb, ckpt)
-        meta = {
-            'feature_profile': 'unet_small_patch_checkpoint',
-            'checkpoint_path': ckpt,
-            'fallback_used': False,
-        }
-        return prior, meta
-    except Exception as exc:
-        prior, meta = tree_pixel_prior(image_rgb, labels, classifier='extratrees', n_estimators=140, feature_variant='context')
-        reason = str(exc)
-        if 'checkpoint_path no provisto' in reason:
-            reason = 'checkpoint_path no provisto (este metodo requiere un checkpoint propio de SmallUNet).'
-        meta.update(
-            {
-                'feature_profile': 'fallback_context_features',
-                'fallback_used': True,
-                'blocker_reason': f'U-Net no disponible: {reason}',
-                'checkpoint_path': ckpt,
-            }
-        )
-        return prior, meta

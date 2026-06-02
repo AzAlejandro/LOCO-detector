@@ -29,6 +29,7 @@ from .library_store import (
     register_library_image,
     save_prior_cache,
 )
+from .project_transfer import router as project_transfer_router
 from .persistence import (
     append_review,
     clear_results_for_image,
@@ -40,6 +41,7 @@ from .persistence import (
     load_run,
     load_scribble_draft,
     OUTPUT_ROOT,
+    PROJECT_ROOT,
     save_run,
     save_scribble_draft,
 )
@@ -58,6 +60,7 @@ app.add_middleware(
 )
 app.include_router(diameter_research_router)
 app.include_router(assist_models_router)
+app.include_router(project_transfer_router)
 
 registry = build_registry()
 DEFAULT_MAX_RESOLUTION_PX = 900
@@ -137,6 +140,10 @@ class OpenFolderReq(BaseModel):
     kind: str = 'outputs'  # outputs | library | custom
 
 
+class LocalImageSelectFolderReq(BaseModel):
+    initial_dir: str = ''
+
+
 class ScribbleDraftSaveReq(BaseModel):
     session_id: str
     image_id: str
@@ -191,6 +198,56 @@ def _resolve_existing_dir(path_text: str) -> Path:
     if not path.is_dir():
         raise HTTPException(status_code=400, detail=f'La ruta no es una carpeta: {path}')
     return path
+
+
+def _default_tutorial_local_image_dir() -> Path:
+    return PROJECT_ROOT / 'frontend' / 'public' / 'tutorial'
+
+
+def _select_directory_with_dialog(initial_dir: str = '') -> Path:
+    if os.name != 'nt':
+        raise HTTPException(status_code=400, detail='Elegir directorio solo esta soportado automaticamente en Windows.')
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f'No se pudo abrir el selector de carpetas: {exc}') from exc
+
+    resolved_initial = ''
+    candidates = [
+        str(initial_dir or '').strip(),
+        str(_load_ui_prefs().get('start_dir') or '').strip(),
+        str(_default_tutorial_local_image_dir()),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            resolved_initial = str(_resolve_existing_dir(candidate))
+            break
+        except HTTPException:
+            continue
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    root.update()
+    try:
+        selected = filedialog.askdirectory(
+            parent=root,
+            mustexist=True,
+            title='Elegir directorio de imagenes',
+            initialdir=resolved_initial or None,
+        )
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    if not selected:
+        raise HTTPException(status_code=400, detail='Seleccion de directorio cancelada.')
+    return _resolve_existing_dir(selected)
 
 
 def _resize_percent(image: np.ndarray, p: float) -> np.ndarray:
@@ -406,7 +463,6 @@ _TRIPLET_PARAM_PROFILES: dict[str, dict[str, tuple[Any, Any, Any]]] = {
     'extratrees_balanced': {'n_estimators': (120, 180, 320), 'threshold': (0.35, 0.50, 0.65)},
     'context_features_variant': {'n_estimators': (120, 180, 320), 'threshold': (0.35, 0.50, 0.65)},
     'classifier_morph_min': {'n_estimators': (120, 160, 260), 'threshold': (0.35, 0.50, 0.65), 'closing_radius': (0, 1, 2)},
-    'unet_small_patch': {'threshold': (0.35, 0.50, 0.65)},
 }
 
 
@@ -665,6 +721,31 @@ def api_local_image_prefs_save(req: LocalImagePrefsReq) -> dict[str, Any]:
     prefs['start_dir'] = str(path)
     _save_ui_prefs(prefs)
     return _ok('Ruta inicial guardada.', level='success', payload={'start_dir': str(path)})
+
+
+@app.get('/api/local-images/tutorial-path')
+def api_local_image_tutorial_path() -> dict[str, Any]:
+    path = _default_tutorial_local_image_dir()
+    image_name = 'overview-reference.png'
+    image_path = path / image_name
+    return _ok(
+        'Ruta tutorial cargada.',
+        payload={
+            'start_dir': str(path),
+            'image_name': image_name,
+            'exists': bool(path.exists() and path.is_dir()),
+            'image_exists': bool(image_path.exists() and image_path.is_file()),
+        },
+    )
+
+
+@app.post('/api/local-images/select-folder')
+def api_local_images_select_folder(req: LocalImageSelectFolderReq) -> dict[str, Any]:
+    path = _select_directory_with_dialog(req.initial_dir)
+    prefs = _load_ui_prefs()
+    prefs['start_dir'] = str(path)
+    _save_ui_prefs(prefs)
+    return _ok('Directorio seleccionado.', level='success', payload={'start_dir': str(path)})
 
 
 @app.get('/api/local-images/list')
@@ -969,7 +1050,7 @@ def api_results_mask_thumb(run_id: str) -> dict[str, Any]:
         new_w, new_h = int(w * scale), int(h * scale)
         mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
     thumb_b64 = encode_gray_png_b64(mask)
-    return _ok('Mask thumb loaded.', payload={
+    return _ok('Miniatura de mascara cargada.', payload={
         'run_id': item.get('run_id', ''),
         'mask_thumb_b64': thumb_b64,
         'width': int(mask.shape[1]),

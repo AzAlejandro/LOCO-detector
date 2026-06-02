@@ -103,7 +103,7 @@ prob_crossing > crossing_threshold  â†’ rejected (crossing_detected)
 accepted = (valid_score >= threshold) AND (prob_crossing <= crossing_threshold)
 ```
 
-Un `crossing threshold` **bajo** (ej: 0.3) es mÃ¡s estricto (rechaza mÃ¡s candidatos con posible cruce).  
+Un `crossing threshold` **bajo** (ej: 0.3) es mÃ¡s estricto (rechaza mÃ¡s candidatos con posible cruce).
 Un `crossing threshold` **alto** (ej: 0.8) es mÃ¡s permisivo.
 
 ---
@@ -432,34 +432,34 @@ Estos presets permiten cambiar rÃ¡pidamente entre perfiles de detecciÃ³n segÃºn 
   - Fibras pequeÃ±as â†’ tile mÃ¡s pequeÃ±o (64 px) para distribuciÃ³n fina
   - Fibras medianas â†’ tile medio (128 px)
   - Fibras grandes â†’ tile mÃ¡s grande (192 px) porque hay menos cÃ­rculos por Ã¡rea
----  
-  
-## 11. Pipeline completo: LOCO Detector  Medici¢n de di metros  
-  
-A partir de la reorganizaci¢n UI v2, el LOCO Detector (Grupo 3) est  conectado autom ticamente con el panel de Diameter Research.  
-  
-### 11.1 Flujo autom tico  
-  
-1. **Detectar c¡rculos** en el panel LOCO Detector (Grupo 3  Detector)  
-2. **Medir aceptados**: Al hacer clic en "Medir aceptados", el backend ejecuta `loco_models_measure_accepted()` que:  
-   - Mide cada c¡rculo aceptado con `loco_circle_probe`  
-   - Convierte los c¡rculos aceptados a puntos de diameter research  
-   - Navega autom ticamente al panel Diameter Research (Grupo 3  Diameter)  
-3. **Revisar y medir** en el panel Diameter Research con todos los m‚todos disponibles  
-  
-### 11.2 Calibraci¢n de escala (px  nm/æm)  
-  
-El panel de Diameter Research incluye un panel de **Calibraci¢n** que permite:  
-- Activar/desactivar calibraci¢n  
-- Seleccionar unidad (nm/æm)  
-- Ingresar valor conocido (px) y distancia en p¡xeles  
-- Calcular autom ticamente el factor nm_per_px  
-- Guardar/cargar/eliminar calibraciones por imagen (persistidas en `data/calibration/{image_id}.json`)  
-  
-### 11.3 Distribuci¢n de di metros  
-  
-El panel de Diameter Research incluye un **Histograma SVG** (sin dependencias externas) que muestra:  
-- Distribuci¢n de di metros con bins configurables (5-50)  
-- Estad¡sticas: media, mediana, desviaci¢n est ndar, min, max, N  
-- Exportaci¢n a CSV  
-- Unidad configurable (px, nm, æm) seg£n calibraci¢n activa 
+---
+
+## 11. Pipeline completo: LOCO Detector â†’ MediciÃ³n de diÃ¡metros
+
+A partir de la reorganizaciÃ³n UI v2, el LOCO Detector (Grupo 3) estÃ¡ conectado automÃ¡ticamente con el panel de Diameter Research.
+
+### 11.1 Flujo automÃ¡tico
+
+1. **Detectar cÃ­rculos** en el panel LOCO Detector (Grupo 3 â†’ Detector)
+2. **Medir aceptados**: Al hacer clic en "Medir aceptados", el backend ejecuta `loco_models_measure_accepted()` que:
+   - Mide cada cÃ­rculo aceptado con `loco_circle_probe`
+   - Convierte los cÃ­rculos aceptados a puntos de diameter research
+   - Navega automÃ¡ticamente al panel Diameter Research (Grupo 3 â†’ Diameter)
+3. **Revisar y medir** en el panel Diameter Research con todos los mÃ©todos disponibles
+
+### 11.2 CalibraciÃ³n de escala (px â†’ nm/Âµm)
+
+El panel de Diameter Research incluye un panel de **CalibraciÃ³n** que permite:
+- Activar/desactivar calibraciÃ³n
+- Seleccionar unidad (nm/Âµm)
+- Ingresar valor conocido (px) y distancia en pÃ­xeles
+- Calcular automÃ¡ticamente el factor nm_per_px
+- Guardar/cargar/eliminar calibraciones por imagen (persistidas en `data/calibration/{image_id}.json`)
+
+### 11.3 DistribuciÃ³n de diÃ¡metros
+
+El panel de Diameter Research incluye un **Histograma SVG** (sin dependencias externas) que muestra:
+- DistribuciÃ³n de diÃ¡metros con bins configurables (5-50)
+- EstadÃ­sticas: media, mediana, desviaciÃ³n estÃ¡ndar, min, max, N
+- ExportaciÃ³n a CSV
+- Unidad configurable (px, nm, Âµm) segÃºn calibraciÃ³n activa

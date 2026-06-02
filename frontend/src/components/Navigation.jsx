@@ -4,10 +4,11 @@ import React, { useState } from 'react'
  * Navigation component: collapsible sidebar (level 1) + exported GROUPS for tab strip.
  *
  * Props:
- *   activeGroup: 'scribble' | 'loco' | 'detection'
+ *   activeGroup: 'scribble' | 'loco' | 'detection' | 'configuration' | 'tutorial'
  *   activeTab: string
  *   onGroupChange: (group) => void
  *   onTabChange: (tab) => void
+ *   forceExpanded?: boolean
  */
 
 const GROUPS = [
@@ -47,6 +48,29 @@ const GROUPS = [
       { key: 'diameter', label: 'Medicion de Diametros' },
     ],
   },
+  {
+    key: 'configuration',
+    label: 'Configuracion',
+    fullLabel: 'Configuracion del proyecto',
+    icon: '⚙',
+    section: 'other',
+    tabs: [
+      { key: 'projectTransfer', label: 'Exportar e importar' },
+    ],
+  },
+  {
+    key: 'tutorial',
+    label: 'Tutorial',
+    fullLabel: 'Tutoriales guiados del proyecto',
+    icon: '📘',
+    section: 'other',
+    tabs: [
+      { key: 'tutorialOverview', label: 'General' },
+      { key: 'tutorialScribble', label: 'Ruta Scribble' },
+      { key: 'tutorialLoco', label: 'Ruta LOCO' },
+      { key: 'tutorialDetection', label: 'Ruta Produccion / Deteccion' },
+    ],
+  },
 ]
 
 export function legacyToGroup(tab) {
@@ -60,6 +84,8 @@ export function legacyToGroup(tab) {
     locoTest: { group: 'loco', tab: 'locoTest' },
     locoModel: { group: 'detection', tab: 'locoModel' },
     diameter: { group: 'detection', tab: 'diameter' },
+    projectTransfer: { group: 'configuration', tab: 'projectTransfer' },
+    tutorialHub: { group: 'tutorial', tab: 'tutorialOverview' },
     loco: { group: 'detection', tab: 'locoModel' },
   }
   return mapping[tab] || { group: 'scribble', tab: 'workbench' }
@@ -76,14 +102,20 @@ export function groupToLegacy(group, tab) {
     'loco:locoTest': 'locoTest',
     'detection:locoModel': 'locoModel',
     'detection:diameter': 'diameter',
+    'configuration:projectTransfer': 'projectTransfer',
+    'tutorial:tutorialOverview': 'tutorialHub',
+    'tutorial:tutorialScribble': 'tutorialHub',
+    'tutorial:tutorialLoco': 'tutorialHub',
+    'tutorial:tutorialDetection': 'tutorialHub',
   }
   return mapping[`${group}:${tab}`] || 'workbench'
 }
 
 export { GROUPS }
 
-export default function Navigation({ activeGroup, onGroupChange, onTabChange }) {
+export default function Navigation({ activeGroup, onGroupChange, onTabChange, forceExpanded = false }) {
   const [collapsed, setCollapsed] = useState(true)
+  const isCollapsed = forceExpanded ? false : collapsed
 
   function handleGroupClick(key) {
     const group = GROUPS.find((item) => item.key === key)
@@ -94,43 +126,60 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange }) 
 
   return (
     <aside
-      className={`sidebar ${collapsed ? 'collapsed' : 'expanded'}`}
+      className={`sidebar ${isCollapsed ? 'collapsed' : 'expanded'}`}
       onMouseEnter={() => setCollapsed(false)}
-      onMouseLeave={() => setCollapsed(true)}
+      onMouseLeave={() => { if (!forceExpanded) setCollapsed(true) }}
     >
       <button
         className="sidebar-toggle"
-        onClick={() => setCollapsed((current) => !current)}
-        title={collapsed ? 'Expandir menu' : 'Colapsar menu'}
+        onClick={() => { if (!forceExpanded) setCollapsed((current) => !current) }}
+        title={isCollapsed ? 'Expandir menu' : 'Colapsar menu'}
       >
-        <span className="sidebar-toggle-icon">{collapsed ? '☰' : '✕'}</span>
-        {!collapsed && <span className="sidebar-toggle-label">Menu</span>}
+        <span className="sidebar-toggle-icon">{isCollapsed ? '☰' : '✕'}</span>
+        {!isCollapsed && <span className="sidebar-toggle-label">Menu</span>}
       </button>
 
-      <div className="sidebar-section-label">{collapsed ? '⚙' : 'Entrenamiento'}</div>
+      <div className="sidebar-section-label">{isCollapsed ? '⚙' : 'Entrenamiento'}</div>
       {GROUPS.filter((group) => group.section === 'training').map((group) => (
         <button
           key={group.key}
           className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
           onClick={() => handleGroupClick(group.key)}
-          title={collapsed ? group.fullLabel : group.label}
+          title={isCollapsed ? group.fullLabel : group.label}
+          data-tour={`sidebar-group-${group.key}`}
         >
           <span className="sidebar-icon">{group.icon}</span>
-          {!collapsed && <span className="sidebar-label">{group.label}</span>}
+          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
         </button>
       ))}
 
       <div className="sidebar-separator" />
-      <div className="sidebar-section-label">{collapsed ? '⚙' : 'Produccion'}</div>
+      <div className="sidebar-section-label">{isCollapsed ? '⚙' : 'Produccion'}</div>
       {GROUPS.filter((group) => group.section === 'production').map((group) => (
         <button
           key={group.key}
           className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
           onClick={() => handleGroupClick(group.key)}
-          title={collapsed ? group.fullLabel : group.label}
+          title={isCollapsed ? group.fullLabel : group.label}
+          data-tour={`sidebar-group-${group.key}`}
         >
           <span className="sidebar-icon">{group.icon}</span>
-          {!collapsed && <span className="sidebar-label">{group.label}</span>}
+          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
+        </button>
+      ))}
+
+      <div className="sidebar-separator" />
+      <div className="sidebar-section-label">{isCollapsed ? '⋯' : 'Otros'}</div>
+      {GROUPS.filter((group) => group.section === 'other').map((group) => (
+        <button
+          key={group.key}
+          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
+          onClick={() => handleGroupClick(group.key)}
+          title={isCollapsed ? group.fullLabel : group.label}
+          data-tour={`sidebar-group-${group.key}`}
+        >
+          <span className="sidebar-icon">{group.icon}</span>
+          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
         </button>
       ))}
     </aside>

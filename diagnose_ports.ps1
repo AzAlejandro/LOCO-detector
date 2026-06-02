@@ -3,7 +3,6 @@
 # It shows diagnostics for:
 #   - configured backend port
 #   - configured frontend port
-#   - ComfyUI port 8188 (read-only, for awareness)
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -41,7 +40,6 @@ if (Test-Path $ENV_PATH) {
     $BACKEND_PORT = '8011'
     $FRONTEND_PORT = '5173'
 }
-Write-Host "  ComfyUI port (read-only): 8188" -ForegroundColor Gray
 Write-Host ""
 
 # --- Helper: get process info by PID ---
@@ -139,8 +137,7 @@ function Show-NetstatForPort($port, $label) {
 # --- Diagnose each port ---
 $PORTS = @(
     @{ Port = $BACKEND_PORT; Label = "LOCO Backend (configured)" },
-    @{ Port = $FRONTEND_PORT; Label = "LOCO Frontend (configured)" },
-    @{ Port = "8188"; Label = "ComfyUI (read-only)" }
+    @{ Port = $FRONTEND_PORT; Label = "LOCO Frontend (configured)" }
 )
 
 foreach ($entry in $PORTS) {

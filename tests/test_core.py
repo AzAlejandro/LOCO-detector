@@ -17,11 +17,10 @@ def test_registry_has_expected_experiments() -> None:
         'extratrees_balanced',
         'context_features_variant',
         'classifier_morph_min',
-        'unet_small_patch',
         'assist_model_predict',
     }
     assert expected == ids
-    assert len(items) == 9
+    assert len(items) == 8
 
     for item in items:
         assert item['implementation_status'] in {'native', 'fallback', 'proxy'}

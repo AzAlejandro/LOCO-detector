@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import { flushSync } from 'react-dom'
+import { driver } from 'driver.js'
 import Navigation, { legacyToGroup, groupToLegacy, GROUPS } from './components/Navigation'
 import Histogram from './components/Histogram'
 import CalibrationPanel from './components/CalibrationPanel'
 import OriginToast, { showOriginToast } from './components/OriginToast'
+import { TutorialSidebar, TutorialViewer } from './components/TutorialHub'
+import { SCRIBBLE_TUTORIAL_BAD_IMAGE_NAME, SCRIBBLE_TUTORIAL_IMAGE_NAME, TUTORIAL_STORAGE_KEY, TUTORIALS, TUTORIAL_NAV_TABS, getChainedTutorialIds, getTutorialById, getTutorialsByScope } from './tutorials'
 import { apiForm, apiGet, apiPost, b64ToDataUrl, API_BASE } from './api'
 
 function errMsg(err) {
@@ -13,6 +17,37 @@ function errMsg(err) {
     return err.payload.detail.map((d) => d.msg || String(d)).join('; ')
   }
   return String(err?.message || err || 'Error inesperado')
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0)
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function localFileName(path) {
+  return String(path || '').trim().split(/[\\/]/).pop().toLowerCase()
+}
+
+function emptyScribbleTutorialExercise() {
+  return {
+    active: false,
+    phase: 'idle',
+    seed_applied: false,
+    erase_seed_done: false,
+    brush_grow_done: false,
+    brush_shrink_done: false,
+    clear_done: false,
+    fiber_done: false,
+    halo_done: false,
+    background_done: false,
+    erase_user_done: false,
+    continue_requested: false,
+    brush_base_size: 0,
+    brush_peak_size: 0,
+  }
 }
 
 function clamp(v, lo, hi) {
@@ -82,6 +117,7 @@ function emptyLoading() {
     libraryDelete: false,
     localPrefs: false,
     localImages: false,
+    localDirPick: false,
     localLoad: false,
     openFolder: false,
     run: false,
@@ -112,6 +148,10 @@ function emptyLoading() {
     modelsPredict: false,
     modelsDelete: false,
     modelsDatasetDelete: false,
+    transferCatalog: false,
+    transferExport: false,
+    transferInspect: false,
+    transferApply: false,
   }
 }
 
@@ -192,6 +232,18 @@ function TrainingDisclosure({ title, children, defaultOpen = false }) {
       </div>
     </details>
   )
+}
+
+function loadTutorialProgress() {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(TUTORIAL_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
 }
 
 function buildRunRow(item) {
@@ -623,7 +675,7 @@ function CurtainCompare({ title, subtitle, baseUrl, maskUrl, maskClassName = '',
         <button className={`icon-tool ${panMode ? 'toggle-active' : ''}`} onClick={() => setPanMode((v) => !v)} disabled={!maskUrl}>Mano</button>
         <button className="icon-tool" onClick={() => setZoom((z) => clamp(z * 0.84, 0.25, 8))} disabled={!maskUrl}>-</button>
         <button className="icon-tool" onClick={() => setZoom((z) => clamp(z * 1.2, 0.25, 8))} disabled={!maskUrl}>+</button>
-        <button className="icon-tool" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); setCurtainPos(50); setPanMode(false) }} disabled={!maskUrl}>Reset</button>
+        <button className="icon-tool" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); setCurtainPos(50); setPanMode(false) }} disabled={!maskUrl}>Reiniciar</button>
         <span className="zoom-chip">{Math.round(zoom * 100)}%</span>
       </div>
       <div
@@ -713,10 +765,10 @@ export default function App() {
   const drawingRef = useRef(false)
   const excludeDragRef = useRef({ dragging: false, start: null })
   const panStateRef = useRef({ dragging: false, x: 0, y: 0 })
-  const diamPanRef = useRef({ dragging: false, x: 0, y: 0 })
-  const diamLineDragRef = useRef({ dragging: false, start: null })
-  const diamCircleDragRef = useRef({ dragging: false, center: null })
-  const diamCalibrationDragRef = useRef({ dragging: false, start: null })
+  const diamPanRef = useRef({ dragging: false, x: 0, y: 0, pointerId: null })
+  const diamLineDragRef = useRef({ dragging: false, start: null, pointerId: null })
+  const diamCircleDragRef = useRef({ dragging: false, center: null, pointerId: null })
+  const diamCalibrationDragRef = useRef({ dragging: false, start: null, pointerId: null })
   const locoDatasetPanRef = useRef({ dragging: false, x: 0, y: 0 })
   const locoDatasetDragRef = useRef({ mode: '', id: '', start: null, circle: null })
   const locoDatasetCirclesRef = useRef([])
@@ -732,6 +784,8 @@ export default function App() {
   const scribbleAutosaveDirtyRef = useRef(false)
   const scribbleAutosaveInFlightRef = useRef(false)
   const scribbleAutosaveFailCountRef = useRef(0)
+  const scribbleTutorialExerciseRef = useRef(emptyScribbleTutorialExercise())
+  const scribbleTutorialStrokeBeforeRef = useRef(null)
 
   const [sessionId, setSessionId] = useState('')
   const [imageId, setImageId] = useState('')
@@ -868,11 +922,53 @@ export default function App() {
   const [selectedSavedImageId, setSelectedSavedImageId] = useState('')
   const [imageStartDir, setImageStartDir] = useState('')
   const [localImageFiles, setLocalImageFiles] = useState([])
+  const localImageFilesRef = useRef([])
   const [selectedLocalPath, setSelectedLocalPath] = useState('')
-  const [workspaceTab, setWorkspaceTab] = useState('workbench') // workbench | review | diameter | locoDataset | locoAugment | locoTraining | locoTest | locoModel | models
+  const [localImageSelectExpanded, setLocalImageSelectExpanded] = useState(false)
+  const [localImageTutorialHint, setLocalImageTutorialHint] = useState({ start_dir: '', image_name: 'overview-reference.png', exists: false, image_exists: false })
+  const [workspaceTab, setWorkspaceTab] = useState('workbench') // workbench | review | diameter | locoDataset | locoAugment | locoTraining | locoTest | locoModel | models | projectTransfer | tutorialHub
   // New hierarchical navigation state
   const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('workbench').group)
   const [activeTab, setActiveTab] = useState(() => legacyToGroup('workbench').tab)
+  const [tutorialSelectedId, setTutorialSelectedId] = useState('overview_project')
+  const [tutorialProgress, setTutorialProgress] = useState(() => loadTutorialProgress())
+  const [tutorialSidebarForcedOpen, setTutorialSidebarForcedOpen] = useState(false)
+  const [tutorialOverlayState, setTutorialOverlayState] = useState(null)
+  const tutorialDriverRef = useRef(null)
+  const tutorialCompleteRef = useRef(null)
+  const tutorialActiveStepsRef = useRef([])
+  const tutorialAdvancePendingRef = useRef(false)
+  const tutorialQueueRef = useRef([])
+  const tutorialChainModeRef = useRef(false)
+  const tutorialReturnStateRef = useRef(null)
+  const tutorialSignalsRef = useRef({})
+  const tutorialAllByScope = useMemo(() => ({
+    global: getTutorialsByScope('global'),
+    macro: getTutorialsByScope('macro'),
+    subtab: getTutorialsByScope('subtab'),
+    all: TUTORIALS,
+  }), [])
+  const selectedTutorial = useMemo(() => getTutorialById(tutorialSelectedId), [tutorialSelectedId])
+  const activeTutorialTab = activeGroup === 'tutorial' ? activeTab : 'tutorialOverview'
+  const activeTutorialConfig = TUTORIAL_NAV_TABS[activeTutorialTab] || TUTORIAL_NAV_TABS.tutorialOverview
+
+  const persistTutorialProgress = useCallback((updater) => {
+    setTutorialProgress((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(TUTORIAL_STORAGE_KEY, JSON.stringify(next))
+      }
+      return next
+    })
+  }, [])
+
+  const navigateToWorkspace = useCallback((group, tab) => {
+    setActiveGroup(group)
+    setActiveTab(tab)
+    const legacy = groupToLegacy(group, tab)
+    if (legacy) setWorkspaceTab(legacy)
+  }, [])
+
   // Sync workspaceTab <-> activeGroup/activeTab for backward compatibility
   const handleGroupChange = useCallback((group) => {
     setActiveGroup(group)
@@ -889,6 +985,16 @@ export default function App() {
     const legacy = groupToLegacy(activeGroup, activeTab)
     if (legacy) setWorkspaceTab(legacy)
   }, [activeGroup, activeTab])
+
+  useEffect(() => {
+    if (activeGroup !== 'tutorial') return
+    const nextFeatured = activeTutorialConfig?.featured
+    if (nextFeatured) setTutorialSelectedId(nextFeatured)
+  }, [activeGroup, activeTutorialConfig])
+
+  useEffect(() => () => {
+    destroyTutorialDriver()
+  }, [])
 
   const [workbenchPanelTab, setWorkbenchPanelTab] = useState('image') // image | editor | experiments
   const [batchProgress, setBatchProgress] = useState({ active: false, done: 0, total: 0, current: '' })
@@ -910,6 +1016,7 @@ export default function App() {
   const [annotHistory, setAnnotHistory] = useState([])
   const [annotFuture, setAnnotFuture] = useState([])
   const [excludeRect, setExcludeRect] = useState(null)
+  const [scribbleTutorialExercise, setScribbleTutorialExercise] = useState(() => emptyScribbleTutorialExercise())
 
   const [runs, setRuns] = useState([])
   const [runCache, setRunCache] = useState({})
@@ -944,7 +1051,6 @@ export default function App() {
   const [diamPoints, setDiamPoints] = useState([])
   const [diamActivePointIdx, setDiamActivePointIdx] = useState(-1)
   const [diamOverlayUrl, setDiamOverlayUrl] = useState('')
-  const [diamMaskVisible, setDiamMaskVisible] = useState(false)
   const [diamMaskOpacity, setDiamMaskOpacity] = useState(0.38)
   const [diamMaskLayerUrl, setDiamMaskLayerUrl] = useState('')
   const [diamResults, setDiamResults] = useState([])
@@ -1140,6 +1246,12 @@ export default function App() {
   const [loading, setLoading] = useState(emptyLoading())
   const [notice, setNotice] = useState({ level: 'info', title: 'Listo', text: 'Inicializando...' })
   const [draftInfo, setDraftInfo] = useState('')
+  const [transferCatalog, setTransferCatalog] = useState([])
+  const [transferSelection, setTransferSelection] = useState({})
+  const [transferExportInfo, setTransferExportInfo] = useState(null)
+  const [transferImportFile, setTransferImportFile] = useState(null)
+  const [transferImportInspection, setTransferImportInspection] = useState(null)
+  const [transferImportResult, setTransferImportResult] = useState(null)
 
   const experimentsById = useMemo(() => {
     const out = {}
@@ -1330,7 +1442,7 @@ export default function App() {
       })
     } catch (err) {
       setModelImagePreview((prev) => prev ? { ...prev, loading: false, error: errMsg(err) } : prev)
-      toast('warning', 'Preview dataset', errMsg(err))
+      toast('warning', 'Vista previa del dataset', errMsg(err))
     }
   }
 
@@ -1454,6 +1566,455 @@ export default function App() {
     setNotice({ level, title, text })
   }
 
+  function markTutorialStarted(tutorialId) {
+    persistTutorialProgress((prev) => ({
+      ...prev,
+      [tutorialId]: {
+        ...(prev[tutorialId] || {}),
+        started_at: new Date().toISOString(),
+        launches: Number(prev[tutorialId]?.launches || 0) + 1,
+      },
+    }))
+  }
+
+  function markTutorialCompleted(tutorialId) {
+    persistTutorialProgress((prev) => ({
+      ...prev,
+      [tutorialId]: {
+        ...(prev[tutorialId] || {}),
+        started_at: prev[tutorialId]?.started_at || new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+        launches: Number(prev[tutorialId]?.launches || 0),
+      },
+    }))
+  }
+
+  function resetTutorialProgressOne(tutorialId) {
+    persistTutorialProgress((prev) => {
+      const next = { ...prev }
+      delete next[tutorialId]
+      return next
+    })
+  }
+
+  function resetTutorialProgressAll() {
+    persistTutorialProgress({})
+    toast('success', 'Tutorial', 'Se limpio el progreso local de los tutoriales.')
+  }
+
+  function destroyTutorialDriver() {
+    if (tutorialDriverRef.current) {
+      tutorialDriverRef.current.destroy()
+      tutorialDriverRef.current = null
+    }
+    tutorialActiveStepsRef.current = []
+    tutorialCompleteRef.current = null
+    tutorialAdvancePendingRef.current = false
+    setTutorialSidebarForcedOpen(false)
+    setTutorialOverlayState(null)
+    setLocalImageSelectExpanded(false)
+    resetScribbleTutorialExercise()
+  }
+
+  function resetTutorialSignals() {
+    tutorialSignalsRef.current = {}
+    setLocalImageSelectExpanded(false)
+  }
+
+  function resetTutorialScrollTargets() {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    }
+    const selectors = [
+      '.left',
+      '.main',
+      '.layout',
+      '.training-workspace',
+      '.augment-panel',
+      '.augment-preview',
+      '.loco-lab-panel',
+      '.saved-image-list',
+      '.diam-point-list',
+      '.diam-run-list',
+      '.validation-case-list',
+      '.model-dataset-list',
+      '.model-list',
+      '.batch-list',
+      '.training-batch-list',
+      '.loco-candidate-list',
+      '.loco-step-list',
+    ]
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (node && 'scrollTo' in node) {
+          node.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+        } else if (node && 'scrollTop' in node) {
+          node.scrollTop = 0
+          node.scrollLeft = 0
+        }
+      })
+    })
+  }
+
+  function markTutorialSignal(key) {
+    if (!key) return
+    tutorialSignalsRef.current = {
+      ...(tutorialSignalsRef.current || {}),
+      [key]: true,
+    }
+  }
+
+  function hasTutorialSignal(key) {
+    return Boolean(key && tutorialSignalsRef.current && tutorialSignalsRef.current[key])
+  }
+
+  function restoreTutorialLaunchContext() {
+    const returnState = tutorialReturnStateRef.current
+    tutorialReturnStateRef.current = null
+    if (!returnState) return
+    setTutorialSidebarForcedOpen(false)
+    setTutorialOverlayState(null)
+    navigateToWorkspace(returnState.group, returnState.tab)
+    if (returnState.group === 'tutorial' && returnState.selectedTutorialId) {
+      window.setTimeout(() => setTutorialSelectedId(returnState.selectedTutorialId), 120)
+    }
+  }
+
+  function queueTutorialStart(tutorialId, includeChildren = false) {
+    tutorialReturnStateRef.current = {
+      group: activeGroup,
+      tab: activeTab,
+      selectedTutorialId: tutorialSelectedId,
+    }
+    destroyTutorialDriver()
+    const queue = getChainedTutorialIds(tutorialId, includeChildren)
+    if (!queue.length) {
+      toast('warning', 'Tutorial', 'No se encontro el tutorial solicitado.')
+      return
+    }
+    tutorialQueueRef.current = queue
+    tutorialChainModeRef.current = includeChildren
+    resetTutorialSignals()
+    setTutorialSelectedId(tutorialId)
+    runNextTutorialInQueue()
+  }
+
+  async function executeTutorialAction(action) {
+    if (!action || typeof action !== 'object') return
+    if (action.type === 'setLocalImageStartDir') {
+      const nextValue = String(action.value || '')
+      flushSync(() => {
+        setWorkbenchPanelTab('image')
+        setImageStartDir(nextValue)
+      })
+      await new Promise((resolve) => window.setTimeout(resolve, 120))
+      const input = document.querySelector('[data-tour="local-image-start-dir"]')
+      if (input && 'value' in input) {
+        input.value = nextValue
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 80))
+      return
+    }
+    if (action.type === 'saveLocalImagePrefs') {
+      await saveLocalImagePrefs()
+      return
+    }
+    if (action.type === 'listLocalImages') {
+      await listLocalImages()
+      return
+    }
+    if (action.type === 'selectLocalImageByName') {
+      const fileName = String(action.fileName || '').trim().toLowerCase()
+      if (!fileName) return
+      const match = localImageFilesRef.current.find((item) => {
+        const name = String(item?.name || item?.relative_path || '').trim().toLowerCase()
+        return name === fileName || name.endsWith(`\\${fileName}`) || name.endsWith(`/${fileName}`)
+      })
+      if (match?.path) {
+        setSelectedLocalPath(String(match.path))
+        setLocalImageSelectExpanded(Boolean(action.expand))
+      } else {
+        toast('warning', 'Tutorial', `No se encontro ${action.fileName} en la lista local.`)
+      }
+      return
+    }
+    if (action.type === 'expandLocalImageSelect') {
+      setLocalImageSelectExpanded(true)
+      return
+    }
+    if (action.type === 'setWorkbenchPanelTab') {
+      flushSync(() => setWorkbenchPanelTab(String(action.tab || 'image')))
+      await new Promise((resolve) => window.setTimeout(resolve, 80))
+    }
+  }
+
+  function activateTutorialStep(step, done) {
+    if (!step) {
+      if (typeof done === 'function') done()
+      return
+    }
+    resetTutorialScrollTargets()
+    const selector = typeof step.selector === 'string' ? step.selector : ''
+    const pointsToSidebar = selector.includes('[data-tour="sidebar-group-')
+    const pointsToTab = selector.includes('[data-tour="tab-')
+    if (typeof step.sidebarExpanded === 'boolean') {
+      setTutorialSidebarForcedOpen(step.sidebarExpanded)
+    } else if (pointsToSidebar) {
+      setTutorialSidebarForcedOpen(true)
+    } else if (pointsToTab || selector.includes('[data-tour="workspace-panel-')) {
+      setTutorialSidebarForcedOpen(false)
+    }
+    if (step.group && step.tab) {
+      navigateToWorkspace(step.group, step.tab)
+    }
+    const shouldClickTarget = pointsToSidebar || pointsToTab
+    const clickSelector = step.activateSelector || (shouldClickTarget ? step.selector : '')
+    window.setTimeout(async () => {
+      let overlayPayload = null
+      if (step.tutorialDialog?.type === 'pathCopy') {
+        overlayPayload = await refreshLocalImageTutorialHint(true)
+      }
+      setTutorialOverlayState(
+        step.tutorialDialog
+          ? {
+              ...step.tutorialDialog,
+              tutorialId: tutorialSelectedId,
+              path: String(overlayPayload?.start_dir || ''),
+              imageName: String(overlayPayload?.image_name || 'overview-reference.png'),
+              imageExists: Boolean(overlayPayload?.image_exists),
+              loadError: overlayPayload ? '' : 'No se pudo cargar la ruta dinamica del tutorial. Recarga la pagina e intenta nuevamente.',
+            }
+          : null,
+      )
+      resetTutorialScrollTargets()
+      if (clickSelector) {
+        const el = document.querySelector(clickSelector)
+        if (el && typeof el.click === 'function') {
+          el.click()
+        }
+      }
+      window.setTimeout(() => resetTutorialScrollTargets(), 60)
+      if (step.autoAction) {
+        try {
+          await executeTutorialAction(step.autoAction)
+        } catch (err) {
+          toast('warning', 'Tutorial', errMsg(err))
+        }
+      }
+      resetTutorialScrollTargets()
+      if (typeof done === 'function') done()
+    }, 120)
+  }
+
+  function advanceTutorialAfterSignal(signalKey) {
+    const currentDriver = tutorialDriverRef.current
+    const steps = tutorialActiveStepsRef.current
+    if (!currentDriver || !Array.isArray(steps) || tutorialAdvancePendingRef.current) return
+    const state = currentDriver.getState() || {}
+    const currentIndex = Number(state.activeIndex ?? -1)
+    const currentStep = steps[currentIndex]
+    const nextStep = steps[currentIndex + 1]
+    if (!currentStep || currentStep.waitForSignal !== signalKey) return
+    if (!nextStep) {
+      if (typeof tutorialCompleteRef.current === 'function') {
+        tutorialCompleteRef.current()
+      }
+      return
+    }
+    tutorialAdvancePendingRef.current = true
+    window.setTimeout(() => {
+      activateTutorialStep(nextStep, () => {
+        currentDriver.moveNext()
+        tutorialAdvancePendingRef.current = false
+      })
+    }, 80)
+  }
+
+  function runNextTutorialInQueue() {
+    const nextId = tutorialQueueRef.current.shift()
+    if (!nextId) {
+      tutorialChainModeRef.current = false
+      return
+    }
+    const tutorial = getTutorialById(nextId)
+    if (!tutorial) {
+      runNextTutorialInQueue()
+      return
+    }
+    const steps = Array.isArray(tutorial.steps) ? tutorial.steps : []
+    tutorialActiveStepsRef.current = steps
+    tutorialAdvancePendingRef.current = false
+    if (!steps.length) {
+      markTutorialCompleted(tutorial.id)
+      runNextTutorialInQueue()
+      return
+    }
+    let completed = false
+    setTutorialSelectedId(tutorial.id)
+    markTutorialStarted(tutorial.id)
+    const builtSteps = steps.map((step) => ({
+      element: step.selector,
+      disableActiveInteraction: step.disableActiveInteraction === true,
+      popover: {
+        title: step.title,
+        description: step.description,
+        side: step.side || 'bottom',
+        align: step.align || 'start',
+      },
+    }))
+    const tutorialDriver = driver({
+      showProgress: true,
+      progressText: 'Paso {{current}} de {{total}}',
+      animate: true,
+      smoothScroll: true,
+      allowClose: true,
+      overlayOpacity: 0.45,
+      stagePadding: 10,
+      stageRadius: 10,
+      popoverClass: 'loco-tutorial-popover',
+      steps: builtSteps,
+      onNextClick: (_element, _step, options) => {
+        const currentDriver = options.driver
+        const state = currentDriver.getState() || {}
+        const currentIndex = Number(state.activeIndex ?? 0)
+        const currentStep = steps[currentIndex]
+        if (currentStep?.waitForSignal && !hasTutorialSignal(currentStep.waitForSignal)) {
+          toast('info', 'Tutorial', currentStep.waitForMessage || 'Completa la accion indicada antes de continuar.')
+          return
+        }
+        const nextStep = steps[currentIndex + 1]
+        if (currentIndex >= steps.length - 1) {
+          completed = true
+          currentDriver.destroy()
+          return
+        }
+        activateTutorialStep(nextStep, () => currentDriver.moveNext())
+      },
+      onPrevClick: (_element, _step, options) => {
+        const currentDriver = options.driver
+        const state = currentDriver.getState() || {}
+        const prevStep = steps[Math.max(0, Number(state.activeIndex ?? 0) - 1)]
+        activateTutorialStep(prevStep, () => currentDriver.movePrevious())
+      },
+      onDestroyed: () => {
+        tutorialDriverRef.current = null
+        tutorialCompleteRef.current = null
+        tutorialActiveStepsRef.current = []
+        tutorialAdvancePendingRef.current = false
+        resetScribbleTutorialExercise()
+        if (completed) {
+          markTutorialCompleted(tutorial.id)
+          if (tutorialQueueRef.current.length) {
+            window.setTimeout(() => runNextTutorialInQueue(), 180)
+            return
+          }
+          restoreTutorialLaunchContext()
+          toast('success', 'Tutorial', tutorialChainModeRef.current ? 'Recorrido completado.' : `${tutorial.title} completado.`)
+        } else if (tutorialQueueRef.current.length) {
+          tutorialQueueRef.current = []
+          tutorialChainModeRef.current = false
+          restoreTutorialLaunchContext()
+          toast('warning', 'Tutorial', 'Recorrido cancelado por el usuario.')
+        } else {
+          restoreTutorialLaunchContext()
+        }
+      },
+    })
+    tutorialDriverRef.current = tutorialDriver
+    tutorialCompleteRef.current = () => {
+      completed = true
+      tutorialDriver.destroy()
+    }
+    activateTutorialStep(steps[0], () => tutorialDriver.drive())
+  }
+
+  async function refreshTransferCatalog() {
+    await withLoad('transferCatalog', async () => {
+      try {
+        const res = await apiGet('/api/project-transfer/catalog')
+        const categories = Array.isArray(res?.categories) ? res.categories : []
+        const selection = {}
+        categories.forEach((item) => { selection[item.key] = item.selected !== false })
+        setTransferCatalog(categories)
+        setTransferSelection(selection)
+      } catch (err) {
+        toast('error', 'Configuracion', errMsg(err))
+      }
+    })
+  }
+
+  function toggleTransferCategory(key) {
+    setTransferSelection((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  function toggleAllTransferCategories(checked) {
+    const next = {}
+    transferCatalog.forEach((item) => { next[item.key] = !!checked })
+    setTransferSelection(next)
+  }
+
+  async function prepareProjectExport() {
+    const categories = transferCatalog.filter((item) => transferSelection[item.key]).map((item) => item.key)
+    if (!categories.length) {
+      toast('warning', 'Exportar proyecto', 'Selecciona al menos una categoria.')
+      return
+    }
+    await withLoad('transferExport', async () => {
+      try {
+        const res = await apiPost('/api/project-transfer/export/prepare', { categories })
+        setTransferExportInfo(res)
+        const link = document.createElement('a')
+        link.href = `${API_BASE}/api/project-transfer/export/download?token=${encodeURIComponent(res.token)}`
+        link.download = res.file_name || 'loco_training_project.zip'
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        toast('success', 'Exportar proyecto', `${res.file_count || 0} archivos listos para descargar.`)
+      } catch (err) {
+        toast('error', 'Exportar proyecto', errMsg(err))
+      }
+    })
+  }
+
+  async function inspectProjectImport() {
+    if (!transferImportFile) {
+      toast('warning', 'Importar proyecto', 'Selecciona un ZIP primero.')
+      return
+    }
+    await withLoad('transferInspect', async () => {
+      try {
+        const form = new FormData()
+        form.append('file', transferImportFile)
+        const res = await apiForm('/api/project-transfer/import/inspect', form)
+        setTransferImportInspection(res)
+        setTransferImportResult(null)
+        const conflicts = Number(res?.summary?.conflict_count || 0)
+        toast(conflicts ? 'warning' : 'success', 'Revision de importacion', conflicts ? `${conflicts} archivos ya existen. Elige como continuar.` : 'ZIP valido. No hay conflictos.')
+      } catch (err) {
+        setTransferImportInspection(null)
+        toast('error', 'Importar proyecto', errMsg(err))
+      }
+    })
+  }
+
+  async function applyProjectImport(overwrite) {
+    const token = String(transferImportInspection?.token || '')
+    if (!token) return
+    await withLoad('transferApply', async () => {
+      try {
+        const res = await apiPost('/api/project-transfer/import/apply', { token, overwrite: !!overwrite })
+        setTransferImportResult(res?.result || null)
+        setTransferImportInspection(null)
+        toast('success', 'Importacion completada', `${res?.result?.imported_count || 0} archivos importados.`)
+        await refreshTransferCatalog()
+      } catch (err) {
+        toast('error', 'Importar proyecto', errMsg(err))
+      }
+    })
+  }
+
   function quantizeLabelsCanvas(canvas) {
     if (!canvas) return
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
@@ -1568,6 +2129,128 @@ export default function App() {
     dctx.putImageData(out, 0, 0)
   }
 
+  function updateScribbleTutorialExercise(updater) {
+    const prev = scribbleTutorialExerciseRef.current
+    const next = typeof updater === 'function' ? updater(prev) : updater
+    scribbleTutorialExerciseRef.current = next
+    setScribbleTutorialExercise(next)
+    return next
+  }
+
+  function resetScribbleTutorialExercise() {
+    scribbleTutorialStrokeBeforeRef.current = null
+    updateScribbleTutorialExercise(emptyScribbleTutorialExercise())
+  }
+
+  function getScribbleLabelCounts() {
+    const labels = labelsCanvasRef.current
+    const ctx = labels?.getContext('2d', { willReadFrequently: true })
+    if (!labels || !ctx || labels.width < 1 || labels.height < 1) {
+      return { fiber: 0, halo: 0, background: 0, total: 0 }
+    }
+    const data = ctx.getImageData(0, 0, labels.width, labels.height).data
+    let fiber = 0
+    let halo = 0
+    let background = 0
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 16) continue
+      if (data[i] === 128) fiber += 1
+      else if (data[i] === 192) halo += 1
+      else if (data[i] === 255) background += 1
+    }
+    return { fiber, halo, background, total: fiber + halo + background }
+  }
+
+  function paintTutorialSeedStroke(from, to, radius, labelVal) {
+    const labels = labelsCanvasRef.current
+    if (!labels) return
+    const steps = 20
+    for (let i = 0; i <= steps; i += 1) {
+      const t = i / steps
+      paintLabelDisk(labels, from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, radius, labelVal)
+    }
+  }
+
+  async function startScribbleDrawingTutorialSeed() {
+    if (!imageUrl || imageDims.w < 1 || imageDims.h < 1) {
+      toast('warning', 'Tutorial', 'Carga una imagen antes de iniciar el tutorial de dibujo.')
+      return
+    }
+    setTutorialOverlayState((prev) => (prev?.type === 'scribbleSeedConfirm' ? { ...prev, busy: true } : prev))
+    await clearScribbleDraftRemote()
+    clearScribbles()
+    resetAnnotHistory()
+    setScribbleOrigin('manual')
+    setViewerMode('mark')
+    setTool('fiber')
+    const w = imageDims.w
+    const h = imageDims.h
+    const radius = clamp(Math.round(Math.min(w, h) * 0.014), 4, 16)
+    const point = (x, y) => ({ x: w * x, y: h * y })
+    ;[
+      [point(0.10, 0.16), point(0.27, 0.22), 128],
+      [point(0.18, 0.34), point(0.34, 0.29), 128],
+      [point(0.54, 0.18), point(0.70, 0.27), 192],
+      [point(0.60, 0.40), point(0.77, 0.35), 192],
+      [point(0.16, 0.67), point(0.31, 0.59), 255],
+      [point(0.57, 0.68), point(0.75, 0.61), 255],
+    ].forEach(([from, to, labelVal]) => paintTutorialSeedStroke(from, to, radius, labelVal))
+    renderDrawFromLabels()
+    scribbleAutosaveDirtyRef.current = false
+    updateScribbleTutorialExercise({
+      ...emptyScribbleTutorialExercise(),
+      active: true,
+      phase: 'seed',
+      seed_applied: true,
+      brush_base_size: Number(brushSize) || 16,
+      brush_peak_size: Number(brushSize) || 16,
+    })
+    setTutorialOverlayState(null)
+    markTutorialSignal('scribbleSeedApplied')
+    advanceTutorialAfterSignal('scribbleSeedApplied')
+  }
+
+  function recordScribbleTutorialStroke() {
+    const before = scribbleTutorialStrokeBeforeRef.current
+    scribbleTutorialStrokeBeforeRef.current = null
+    const exercise = scribbleTutorialExerciseRef.current
+    if (!exercise.active || !before) return
+    const after = getScribbleLabelCounts()
+    if (exercise.phase === 'seed' && before.tool === 'erase' && after.total < before.counts.total) {
+      updateScribbleTutorialExercise((prev) => ({ ...prev, erase_seed_done: true }))
+      markTutorialSignal('scribbleSeedErased')
+      advanceTutorialAfterSignal('scribbleSeedErased')
+      return
+    }
+    if (exercise.phase !== 'draw') return
+    const patch = {}
+    if (before.tool === 'fiber' && after.fiber > before.counts.fiber) patch.fiber_done = true
+    if (before.tool === 'halo' && after.halo > before.counts.halo) patch.halo_done = true
+    if (before.tool === 'bg' && after.background > before.counts.background) patch.background_done = true
+    if (before.tool === 'erase' && after.total < before.counts.total) patch.erase_user_done = true
+    if (Object.keys(patch).length) {
+      updateScribbleTutorialExercise((prev) => ({ ...prev, ...patch }))
+    }
+  }
+
+  function scribbleTutorialCanContinue(exercise = scribbleTutorialExerciseRef.current) {
+    return Boolean(
+      exercise.active
+      && exercise.phase === 'draw'
+      && exercise.fiber_done
+      && exercise.halo_done
+      && exercise.background_done
+      && exercise.erase_user_done,
+    )
+  }
+
+  function continueScribbleDrawingTutorial() {
+    if (!scribbleTutorialCanContinue()) return
+    updateScribbleTutorialExercise((prev) => ({ ...prev, continue_requested: true }))
+    markTutorialSignal('scribbleExerciseContinue')
+    advanceTutorialAfterSignal('scribbleExerciseContinue')
+  }
+
   function clearScribbles() {
     const draw = drawCanvasRef.current
     const labels = labelsCanvasRef.current
@@ -1578,12 +2261,31 @@ export default function App() {
 
   async function onClearScribbles() {
     if (!imageUrl) return
+    const exercise = scribbleTutorialExerciseRef.current
+    if (exercise.active && exercise.phase === 'seed' && (!exercise.erase_seed_done || !exercise.brush_grow_done || !exercise.brush_shrink_done)) {
+      toast('info', 'Tutorial', 'Primero corrige la semilla con Goma y practica agrandar y achicar el pincel.')
+      return
+    }
     const snap = captureAnnotSnapshot()
     if (snap) {
       setAnnotHistory((h) => [...h, snap].slice(-40))
       setAnnotFuture([])
     }
     clearScribbles()
+    if (exercise.active && exercise.phase === 'seed' && exercise.erase_seed_done && exercise.brush_grow_done && exercise.brush_shrink_done) {
+      updateScribbleTutorialExercise((prev) => ({ ...prev, phase: 'draw', clear_done: true }))
+      markTutorialSignal('scribbleSeedCleared')
+      advanceTutorialAfterSignal('scribbleSeedCleared')
+    } else if (exercise.active && exercise.phase === 'draw') {
+      updateScribbleTutorialExercise((prev) => ({
+        ...prev,
+        fiber_done: false,
+        halo_done: false,
+        background_done: false,
+        erase_user_done: false,
+        continue_requested: false,
+      }))
+    }
     scribbleAutosaveDirtyRef.current = false
     scribbleAutosaveFailCountRef.current = 0
     setScribbleOrigin('manual')
@@ -1777,8 +2479,14 @@ export default function App() {
       return
     }
     const snap = captureAnnotSnapshot()
+    if (scribbleTutorialExerciseRef.current.active) {
+      scribbleTutorialStrokeBeforeRef.current = { tool, counts: getScribbleLabelCounts() }
+    }
     const didPaint = paintAt(e.clientX, e.clientY)
-    if (!didPaint) return
+    if (!didPaint) {
+      scribbleTutorialStrokeBeforeRef.current = null
+      return
+    }
     // Track scribble origin: if model was applied, mark as modified
     setScribbleOrigin((prev) => {
       if (prev === 'modelo') return 'modelo_modificado'
@@ -1832,6 +2540,7 @@ export default function App() {
       setIsPanning(false)
     }
     if (wasDrawing) {
+      recordScribbleTutorialStroke()
       markScribbleDirty()
       void saveScribbleDraft({ silent: true })
     }
@@ -2110,6 +2819,7 @@ export default function App() {
         }
         await refreshSavedImages(sid)
         await refreshLocalImagePrefs()
+        await refreshLocalImageTutorialHint(true)
         await refreshAssistModels()
         await refreshModelDataset(sid)
         toast('success', 'Scribble Research', 'Sesion lista. Carga una imagen y ejecuta experimentos A-E.')
@@ -2142,6 +2852,7 @@ export default function App() {
       }
       await refreshSavedImages(sid)
       await refreshLocalImagePrefs()
+      await refreshLocalImageTutorialHint(true)
       await refreshAssistModels()
       await refreshModelDataset(sid)
       return sid
@@ -2154,6 +2865,26 @@ export default function App() {
   useEffect(() => {
     bootstrap()
   }, [])
+
+  useEffect(() => {
+    const exercise = scribbleTutorialExerciseRef.current
+    if (!exercise.active || !exercise.seed_applied) return
+    const nextSize = Number(brushSize) || 1
+    const nextPeak = Math.max(Number(exercise.brush_peak_size) || nextSize, nextSize)
+    const grew = exercise.brush_grow_done || nextSize > Number(exercise.brush_base_size || 0)
+    const shrank = exercise.brush_shrink_done || (grew && nextSize < nextPeak)
+    if (nextPeak === exercise.brush_peak_size && grew === exercise.brush_grow_done && shrank === exercise.brush_shrink_done) return
+    const next = updateScribbleTutorialExercise((prev) => ({
+      ...prev,
+      brush_peak_size: nextPeak,
+      brush_grow_done: grew,
+      brush_shrink_done: shrank,
+    }))
+    if (next.brush_grow_done && next.brush_shrink_done) {
+      markTutorialSignal('scribbleBrushAdjusted')
+      advanceTutorialAfterSignal('scribbleBrushAdjusted')
+    }
+  }, [brushSize])
 
   useEffect(() => {
     if (workspaceTab !== 'models') return
@@ -2174,6 +2905,11 @@ export default function App() {
   useEffect(() => {
     if (workspaceTab !== 'locoModel') return
     fetchLocoModelCustomPresets().catch(() => {})
+  }, [workspaceTab])
+
+  useEffect(() => {
+    if (workspaceTab !== 'projectTransfer') return
+    refreshTransferCatalog()
   }, [workspaceTab])
 
   useEffect(() => {
@@ -2520,26 +3256,18 @@ export default function App() {
         }
       }
       if (typing) return
-      if (k === 'l') {
-        ev.preventDefault()
-        if (diamMethodId === 'circle_square_mask_diameter') {
-          switchDiameterViewer('circle', { forceManualCircleSeed: true })
-          toast('warning', 'Circle-square', 'Este metodo usa solo circulo manual.')
-          return
-        }
-        switchDiameterViewer('mark')
-      } else if (k === 'm') {
+      if (k === 'm') {
         ev.preventDefault()
         switchDiameterViewer('pan')
       } else if (k === 'c') {
         ev.preventDefault()
-        switchDiameterViewer('circle', { methodPanel: 'manual', methodId: 'circle_square_mask_diameter', forceManualCircleSeed: true })
+        selectDiameterDrawingTool('circle_square_mask_diameter')
       } else if (k === 'd') {
         ev.preventDefault()
-        switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_dual_side_caliper' })
+        selectDiameterDrawingTool('manual_dual_side_caliper')
       } else if (k === 'x') {
         ev.preventDefault()
-        switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_line_direct_caliper' })
+        selectDiameterDrawingTool('manual_line_direct_caliper')
       }
     }
     window.addEventListener('keydown', onKey)
@@ -2652,7 +3380,7 @@ export default function App() {
         const previewOk = await applyImageFilePreview(file)
         setImageName(String(file.name || ''))
         if (!previewOk) {
-          toast('warning', 'Preview local', 'No se pudo previsualizar localmente. Se cargara desde backend.')
+          toast('warning', 'Vista previa local', 'No se pudo previsualizar localmente. Se cargara desde backend.')
         }
 
         const form = new FormData()
@@ -2869,6 +3597,80 @@ export default function App() {
     })
   }
 
+  async function refreshLocalImageTutorialHint(silent = true) {
+    try {
+      const res = await apiGet('/api/local-images/tutorial-path')
+      const nextHint = {
+        start_dir: String(res?.payload?.start_dir || ''),
+        image_name: String(res?.payload?.image_name || 'overview-reference.png'),
+        exists: Boolean(res?.payload?.exists),
+        image_exists: Boolean(res?.payload?.image_exists),
+      }
+      setLocalImageTutorialHint(nextHint)
+      return nextHint
+    } catch (err) {
+      if (!silent) {
+        toast('warning', 'Ruta tutorial', errMsg(err))
+      }
+      return null
+    }
+  }
+
+  async function copyTextToClipboard(text, successTitle = 'Portapapeles', successText = 'Texto copiado.') {
+    const value = String(text || '').trim()
+    if (!value) {
+      toast('warning', successTitle, 'No hay texto para copiar.')
+      return false
+    }
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = value
+        ta.setAttribute('readonly', 'readonly')
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+      toast('success', successTitle, successText)
+      return true
+    } catch (err) {
+      toast('warning', successTitle, `No se pudo copiar: ${errMsg(err)}`)
+      return false
+    }
+  }
+
+  async function copyLocalImageTutorialPath(overridePath = '') {
+    const freshHint = await refreshLocalImageTutorialHint(true)
+    if (freshHint?.start_dir) {
+      setTutorialOverlayState((prev) => (
+        prev?.type === 'pathCopy'
+          ? {
+              ...prev,
+              path: String(freshHint.start_dir),
+              imageName: String(freshHint.image_name || 'overview-reference.png'),
+              imageExists: Boolean(freshHint.image_exists),
+              loadError: '',
+            }
+          : prev
+      ))
+    }
+    const copied = await copyTextToClipboard(
+      String(freshHint?.start_dir || overridePath || ''),
+      'Ruta tutorial',
+      'Ruta copiada. Pegala en el selector de directorio del sistema.',
+    )
+    if (copied) {
+      markTutorialSignal('copiedTutorialPath')
+      advanceTutorialAfterSignal('copiedTutorialPath')
+    }
+    return copied
+  }
+
   async function saveLocalImagePrefs() {
     const path = String(imageStartDir || '').trim()
     if (!path) {
@@ -2886,6 +3688,48 @@ export default function App() {
     })
   }
 
+  function applyLocalImageStartDir(path) {
+    const nextPath = String(path || '').trim()
+    if (!nextPath) return
+    flushSync(() => {
+      setImageStartDir(nextPath)
+      setLocalImageFiles([])
+      localImageFilesRef.current = []
+      setSelectedLocalPath('')
+    })
+    const input = document.querySelector('[data-tour="local-image-start-dir"]')
+    if (input && 'value' in input) {
+      input.value = nextPath
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+  }
+
+  async function chooseLocalImageDir() {
+    const tutorialDir = String(tutorialOverlayState?.path || localImageTutorialHint.start_dir || '').trim()
+    const initialDir = String(hasTutorialSignal('copiedTutorialPath') ? tutorialDir : (imageStartDir || tutorialDir)).trim()
+    await withLoad('localDirPick', async () => {
+      try {
+        const res = await apiPost('/api/local-images/select-folder', { initial_dir: initialDir })
+        const nextPath = String(res?.payload?.start_dir || '').trim()
+        if (nextPath) {
+          applyLocalImageStartDir(nextPath)
+        }
+        if (nextPath) {
+          markTutorialSignal('localDirectoryChosen')
+        }
+        toast('success', 'Ruta inicial', nextPath || 'Directorio seleccionado.')
+      } catch (err) {
+        const message = errMsg(err)
+        if (/cancelad/i.test(message)) {
+          toast('info', 'Ruta inicial', 'Seleccion de directorio cancelada.')
+          return
+        }
+        toast('warning', 'Ruta inicial', message)
+      }
+    })
+  }
+
   async function listLocalImages() {
     const path = String(imageStartDir || '').trim()
     if (!path) {
@@ -2896,9 +3740,12 @@ export default function App() {
       try {
         const res = await apiGet(`/api/local-images/list?start_dir=${encodeURIComponent(path)}&recursive=true&limit=600`)
         const items = Array.isArray(res?.payload?.items) ? res.payload.items : []
+        localImageFilesRef.current = items
         setLocalImageFiles(items)
         setSelectedLocalPath((prev) => (items.some((it) => it.path === prev) ? prev : String(items[0]?.path || '')))
         toast('success', 'Imagenes locales', `${items.length} imagenes encontradas.`)
+        markTutorialSignal('localImagesListed')
+        advanceTutorialAfterSignal('localImagesListed')
       } catch (err) {
         toast('warning', 'Imagenes locales', errMsg(err))
       }
@@ -2955,6 +3802,15 @@ export default function App() {
         await refreshDiameterRuns(loadedImageId, { silent: true })
         await refreshValidationCases(loadedImageId, { silent: true })
         toast('success', 'Imagen local', `Activa: ${loadedImageId}`)
+        const loadedFileName = localFileName(target)
+        if (loadedFileName === SCRIBBLE_TUTORIAL_BAD_IMAGE_NAME) {
+          markTutorialSignal('badTutorialImageLoaded')
+          advanceTutorialAfterSignal('badTutorialImageLoaded')
+        } else if (loadedFileName === SCRIBBLE_TUTORIAL_IMAGE_NAME) {
+          setLocalImageSelectExpanded(false)
+          markTutorialSignal('correctTutorialImageLoaded')
+          advanceTutorialAfterSignal('correctTutorialImageLoaded')
+        }
       } catch (err) {
         toast('error', 'Imagen local', errMsg(err))
       }
@@ -3341,7 +4197,7 @@ export default function App() {
     setDiamRunCache({})
     setDiamReportInfo(null)
     setDiamPriorRunId('latest')
-    setDiamViewerMode('mark')
+    setDiamViewerMode(diamMethodId === 'circle_square_mask_diameter' ? 'circle' : 'manual')
     setDiamViewerZoom(1)
     setDiamViewerOffset({ x: 0, y: 0 })
     setManualMaskLineDraft({ start: null, end: null })
@@ -3788,25 +4644,48 @@ export default function App() {
   function resetDiameterView() {
     if (diamMethodId === 'circle_square_mask_diameter') setDiamViewerMode('circle')
     else if (['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(diamMethodId)) setDiamViewerMode('manual')
-    else setDiamViewerMode('mark')
+    else setDiamViewerMode('circle')
     setDiamViewerZoom(1)
     setDiamViewerOffset({ x: 0, y: 0 })
   }
 
   function clearDiameterInteractionRefs() {
-    diamPanRef.current = { dragging: false, x: 0, y: 0 }
-    diamLineDragRef.current = { dragging: false, mode: '', kind: '', lineIndex: -1, start: null, geometry_id: '' }
-    diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '' }
-    diamCalibrationDragRef.current = { dragging: false, start: null }
+    const pointerIds = [
+      diamPanRef.current.pointerId,
+      diamLineDragRef.current.pointerId,
+      diamCircleDragRef.current.pointerId,
+      diamCalibrationDragRef.current.pointerId,
+    ].filter((pointerId) => Number.isInteger(pointerId))
+    const stage = diameterStageRef.current
+    pointerIds.forEach((pointerId) => {
+      try {
+        if (stage?.hasPointerCapture?.(pointerId)) stage.releasePointerCapture(pointerId)
+      } catch {
+        // Pointer capture may already have been released by the browser.
+      }
+    })
+    diamPanRef.current = { dragging: false, x: 0, y: 0, pointerId: null }
+    diamLineDragRef.current = { dragging: false, mode: '', kind: '', lineIndex: -1, start: null, geometry_id: '', pointerId: null }
+    diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '', pointerId: null }
+    diamCalibrationDragRef.current = { dragging: false, start: null, pointerId: null }
     setDiamIsPanning(false)
   }
 
-  function switchDiameterViewer(nextMode, { methodId = '', methodPanel = '', forceManualCircleSeed = false } = {}) {
+  function switchDiameterViewer(nextMode, { methodId = '', forceManualCircleSeed = false } = {}) {
     clearDiameterInteractionRefs()
-    if (methodPanel) setDiamMethodPanel(methodPanel)
     if (methodId) setDiamMethodId(methodId)
     setDiamViewerMode(nextMode)
     if (forceManualCircleSeed) updateDiamRawParam('circle_square_seed_mode', 'manual_circle')
+  }
+
+  function selectDiameterDrawingTool(methodId) {
+    if (methodId === 'circle_square_mask_diameter') {
+      switchDiameterViewer('circle', { methodId, forceManualCircleSeed: true })
+      return
+    }
+    if (['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(methodId)) {
+      switchDiameterViewer('manual', { methodId })
+    }
   }
 
   function resetLocoDatasetView() {
@@ -3943,7 +4822,7 @@ export default function App() {
   }
 
   function consumeDiameterManualCircle() {
-    diamCircleDragRef.current = { dragging: false, center: null }
+    diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '', pointerId: null }
     setManualCircleDraft(null)
     setManualCircles((prev) => prev.map((circle) => ({ ...circle, consumed: true })))
     setManualCircleActiveIdx(-1)
@@ -4076,7 +4955,7 @@ export default function App() {
     e.stopPropagation()
     e.preventDefault()
     rememberDiameterManualState()
-    diamLineDragRef.current = { dragging: true, mode: which, kind, lineIndex, start: draft.start, geometry_id: draft.geometry_id || lineGeometryId(kind, draft, lineIndex) }
+    diamLineDragRef.current = { dragging: true, mode: which, kind, lineIndex, start: draft.start, geometry_id: draft.geometry_id || lineGeometryId(kind, draft, lineIndex), pointerId: e.pointerId }
     setLineDraftForKind(kind, draft)
     setLineActiveIndexForKind(kind, lineIndex)
     setDiamViewerMode('manual')
@@ -4092,7 +4971,7 @@ export default function App() {
     if (diamViewerMode === 'calibration') {
       const p = diameterPointFromClient(e.clientX, e.clientY)
       if (!p) return
-      diamCalibrationDragRef.current = { dragging: true, start: p }
+      diamCalibrationDragRef.current = { dragging: true, start: p, pointerId: e.pointerId }
       updateDiamCalibration((prev) => ({
         ...prev,
         line_x1: p.x,
@@ -4110,7 +4989,7 @@ export default function App() {
       rememberDiameterManualState()
       const kind = currentManualLineKind()
       const geometryId = makeManualGeometryId(kind, p, p)
-      diamLineDragRef.current = { dragging: true, mode: 'new', kind, lineIndex: -1, start: p, geometry_id: geometryId }
+      diamLineDragRef.current = { dragging: true, mode: 'new', kind, lineIndex: -1, start: p, geometry_id: geometryId, pointerId: e.pointerId }
       setLineActiveIndexForKind(kind, -1)
       setLineDraftForKind(kind, { start: p, end: p, geometry_id: geometryId })
       e.currentTarget.setPointerCapture?.(e.pointerId)
@@ -4122,7 +5001,7 @@ export default function App() {
       if (!p) return
       rememberDiameterManualState()
       const geometryId = makeManualGeometryId('circle', p, p)
-      diamCircleDragRef.current = { dragging: true, center: p, geometry_id: geometryId }
+      diamCircleDragRef.current = { dragging: true, center: p, geometry_id: geometryId, pointerId: e.pointerId }
       setManualCircleDraft({ center: p, radius: 1, geometry_id: geometryId })
       setManualCircleSelected(false)
       setManualCircleConsumed(false)
@@ -4131,7 +5010,7 @@ export default function App() {
       return
     }
     if (diamViewerMode !== 'pan') return
-    diamPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
+    diamPanRef.current = { dragging: true, x: e.clientX, y: e.clientY, pointerId: e.pointerId }
     setDiamIsPanning(true)
     e.currentTarget.setPointerCapture?.(e.pointerId)
     e.preventDefault()
@@ -4193,7 +5072,7 @@ export default function App() {
     if (!diamPanRef.current.dragging) return
     const dx = e.clientX - diamPanRef.current.x
     const dy = e.clientY - diamPanRef.current.y
-    diamPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
+    diamPanRef.current = { ...diamPanRef.current, dragging: true, x: e.clientX, y: e.clientY }
     setDiamViewerOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
     e.preventDefault()
   }
@@ -4202,7 +5081,7 @@ export default function App() {
     if (diamCalibrationDragRef.current.dragging) {
       const start = diamCalibrationDragRef.current.start
       const p = diameterPointFromClient(e.clientX, e.clientY)
-      diamCalibrationDragRef.current = { dragging: false, start: null }
+      diamCalibrationDragRef.current = { dragging: false, start: null, pointerId: null }
       try {
         e.currentTarget.releasePointerCapture?.(e.pointerId)
       } catch {}
@@ -4232,7 +5111,7 @@ export default function App() {
         end = p
       }
       const geometryId = drag.geometry_id
-      diamLineDragRef.current = { dragging: false, mode: '', kind: '', lineIndex: -1, start: null, geometry_id: '' }
+      diamLineDragRef.current = { dragging: false, mode: '', kind: '', lineIndex: -1, start: null, geometry_id: '', pointerId: null }
       try {
         e.currentTarget.releasePointerCapture?.(e.pointerId)
       } catch {
@@ -4250,7 +5129,7 @@ export default function App() {
       const center = diamCircleDragRef.current.center
       const geometryId = diamCircleDragRef.current.geometry_id
       const draft = manualCircleDraft
-      diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '' }
+      diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '', pointerId: null }
       e.currentTarget.releasePointerCapture?.(e.pointerId)
       if (center && draft?.center && Number.isFinite(Number(draft.radius)) && Number(draft.radius) >= 1) {
         const circle = {
@@ -4282,7 +5161,7 @@ export default function App() {
       return
     }
     if (!diamPanRef.current.dragging) return
-    diamPanRef.current = { dragging: false, x: 0, y: 0 }
+    diamPanRef.current = { dragging: false, x: 0, y: 0, pointerId: null }
     setDiamIsPanning(false)
     e.currentTarget.releasePointerCapture?.(e.pointerId)
   }
@@ -4370,7 +5249,6 @@ export default function App() {
     setManualCircleConsumed(false)
     setDiamPoints(points)
     setDiamActivePointIdx(0)
-    setDiamMethodPanel('manual')
     setDiamMethodId('circle_square_mask_diameter')
     setDiamViewerMode('circle')
     setDiamParams((prev) => ({
@@ -4449,7 +5327,7 @@ export default function App() {
           action: 'clear',
         })
         syncDiameterPointPayload(res)
-        toast('success', 'Diameter Research', 'Puntos y marcas visuales limpiados.')
+        toast('success', 'Medicion de Diametros', 'Puntos y marcas visuales limpiados.')
       } catch (err) {
         setDiamPoints([])
         setDiamActivePointIdx(-1)
@@ -4515,17 +5393,6 @@ export default function App() {
         toast('error', 'Diameter points', errMsg(err))
       }
     })
-  }
-
-  function onDiameterStageClick(e) {
-    if (!imageUrl || loading.diamPoints) return
-    if (diamViewerMode === 'pan') return
-    if (diamViewerMode === 'circle') return
-    if (diamViewerMode === 'manual') return
-    if (diamViewerMode === 'calibration') return
-    const p = diameterPointFromClient(e.clientX, e.clientY)
-    if (!p) return
-    void updateDiameterPoints('add', { x: p.x, y: p.y })
   }
 
   function updateDiamParam(key, value, integer = false) {
@@ -5139,7 +6006,7 @@ export default function App() {
   async function previewLocoDatasetFeatures() {
     const candidates = locoDatasetPayloadCandidates()
     if (!sessionId || !imageId || !candidates.length) {
-      toast('warning', 'Generate Dataset', 'Dibuja al menos un circulo.')
+      toast('warning', 'Generar Dataset', 'Dibuja al menos un circulo.')
       return
     }
     await flushDraftIfNeeded()
@@ -5155,9 +6022,9 @@ export default function App() {
           scribble_map_b64: '',
         })
         setLocoDatasetFeatures(Array.isArray(res?.items) ? res.items : [])
-        toast('success', 'Generate Dataset', 'Features calculadas.')
+        toast('success', 'Generar Dataset', 'Features calculadas.')
       } catch (err) {
-        toast('error', 'Generate Dataset', errMsg(err))
+        toast('error', 'Generar Dataset', errMsg(err))
       }
     })
   }
@@ -5165,7 +6032,7 @@ export default function App() {
   async function saveLocoDataset() {
     const candidates = locoDatasetPayloadCandidates()
     if (!sessionId || !imageId || !candidates.length) {
-      toast('warning', 'Generate Dataset', 'No hay circulos para guardar.')
+      toast('warning', 'Generar Dataset', 'No hay circulos para guardar.')
       return
     }
     await flushDraftIfNeeded()
@@ -5182,9 +6049,9 @@ export default function App() {
         })
         setLocoDatasetSaveInfo(res || null)
         const warn = Array.isArray(res?.warnings) && res.warnings.length ? ` (${res.warnings.join(', ')})` : ''
-        toast('success', 'Generate Dataset', `Dataset main actualizado: ${res?.candidate_count || candidates.length} ejemplos totales${warn}.`)
+        toast('success', 'Generar Dataset', `Dataset principal actualizado: ${res?.candidate_count || candidates.length} ejemplos totales${warn}.`)
       } catch (err) {
-        toast('error', 'Generate Dataset', errMsg(err))
+        toast('error', 'Generar Dataset', errMsg(err))
       }
     })
   }
@@ -5294,7 +6161,7 @@ export default function App() {
         const res = await apiPost('/api/diameter-research/loco-dataset/augment/preview', locoAugPayload())
         setLocoAugPreview(Array.isArray(res?.items) ? res.items : [])
         setLocoAugInfo(res || null)
-        toast('success', 'Augmentation', `Preview: ${res?.variant_count || 0} variantes.`)
+        toast('success', 'Aumentacion', `Vista previa: ${res?.variant_count || 0} variantes.`)
       } catch (err) {
         toast('error', 'Augmentation', errMsg(err))
       }
@@ -5868,9 +6735,9 @@ export default function App() {
         const firstOk = (res?.metrics_summary || []).find((row) => row.status === 'ok')
         if (firstOk?.model_id) setLocoTrainingSelectedModel(firstOk.model_id)
         await fetchLocoTrainingRunsList()
-        toast('success', 'Training', `Run ${res?.run_id || ''} completado.`)
+        toast('success', 'Entrenamiento', `Run ${res?.run_id || ''} completado.`)
       } catch (err) {
-        toast('error', 'Training', errMsg(err))
+        toast('error', 'Entrenamiento', errMsg(err))
       } finally {
         stopPolling()
         try {
@@ -5896,7 +6763,7 @@ export default function App() {
 
   async function runLocoTrainingBatch() {
     if (!locoTrainingBatchJobs.length) {
-      toast('warning', 'Training batch', 'Agrega al menos una configuracion al batch.')
+      toast('warning', 'Batch de entrenamiento', 'Agrega al menos una configuracion al batch.')
       return
     }
     await withLoad('locoTraining', async () => {
@@ -5937,7 +6804,7 @@ export default function App() {
       }
       const okJobs = queue.filter((job) => job.status === 'done').length
       const errJobs = queue.filter((job) => job.status === 'error').length
-      toast(errJobs ? 'warning' : 'success', 'Training batch', `${okJobs}/${queue.length} jobs completados${errJobs ? `, ${errJobs} con error` : ''}.`)
+      toast(errJobs ? 'warning' : 'success', 'Batch de entrenamiento', `${okJobs}/${queue.length} jobs completados${errJobs ? `, ${errJobs} con error` : ''}.`)
     })
   }
 
@@ -6059,7 +6926,7 @@ export default function App() {
       try {
         await Promise.all([fetchLocoTrainingRunsList(), fetchLocoSavedModelsList()])
       } catch (err) {
-        toast('error', 'Training runs', errMsg(err))
+        toast('error', 'Runs de entrenamiento', errMsg(err))
       }
     })
   }
@@ -6165,11 +7032,11 @@ export default function App() {
   async function predictLocoTestCircles() {
     const candidates = locoTestPayloadCandidates()
     if (!locoTestSelectedSavedModel?.saved_model_id) {
-      toast('warning', 'Test circle model', 'Selecciona un modelo guardado.')
+      toast('warning', 'Probar modelo de circulos', 'Selecciona un modelo guardado.')
       return
     }
     if (!sessionId || !imageId || !candidates.length) {
-      toast('warning', 'Test circle model', 'Dibuja al menos un circulo.')
+      toast('warning', 'Probar modelo de circulos', 'Dibuja al menos un circulo.')
       return
     }
     await flushDraftIfNeeded()
@@ -6188,9 +7055,9 @@ export default function App() {
           scribble_map_b64: '',
         })
         setLocoTestResult(res || null)
-        toast('success', 'Test circle model', `${res?.candidate_count || 0} circulos evaluados.`)
+        toast('success', 'Probar modelo de circulos', `${res?.candidate_count || 0} circulos evaluados.`)
       } catch (err) {
-        toast('error', 'Test circle model', errMsg(err))
+        toast('error', 'Probar modelo de circulos', errMsg(err))
       }
     })
   }
@@ -6332,7 +7199,7 @@ export default function App() {
   async function applyLocoModelThreshold() {
     const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
     if (!detectorStateId || !locoModelStageState.baseReady) {
-      toast('warning', 'LOCO Detector', 'Primero ejecuta Run base detector.')
+      toast('warning', 'LOCO Detector', 'Primero ejecuta el detector base.')
       return
     }
     await flushDraftIfNeeded()
@@ -6349,7 +7216,7 @@ export default function App() {
   async function applyLocoModelThresholdOnward() {
     const detectorStateId = String(locoModelStageState.detector_state_id || '').trim()
     if (!detectorStateId || !locoModelStageState.baseReady) {
-      toast('warning', 'LOCO Detector', 'Primero ejecuta Run base detector.')
+      toast('warning', 'LOCO Detector', 'Primero ejecuta el detector base.')
       return
     }
     await flushDraftIfNeeded()
@@ -6834,7 +7701,7 @@ export default function App() {
 
   async function runDiameterResearch(activeOnly) {
     if (!sessionId || !imageId || !imageUrl) {
-      toast('warning', 'Diameter Research', 'Carga una imagen primero.')
+      toast('warning', 'Medicion de Diametros', 'Carga una imagen primero.')
       return
     }
     await flushDraftIfNeeded()
@@ -6842,16 +7709,14 @@ export default function App() {
     const batches = buildDiameterRunBatches(Boolean(activeOnly))
     if (!batches.length) {
       if (diamMethodId === 'circle_square_mask_diameter') {
-        setDiamMethodPanel('manual')
         setDiamViewerMode('circle')
         setDiamParams((prev) => ({ ...prev, circle_square_seed_mode: 'manual_circle' }))
         toast('warning', 'Circle-square', 'Dibuja un circulo manual antes de ejecutar este metodo.')
       } else if (['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(diamMethodId)) {
-        setDiamMethodPanel('manual')
         setDiamViewerMode('manual')
         toast('warning', 'Linea manual', 'Dibuja la linea manteniendo click y soltando al final.')
       } else {
-        toast('warning', 'Diameter Research', 'Agrega al menos un punto o geometria manual.')
+        toast('warning', 'Medicion de Diametros', 'Agrega al menos un punto o geometria manual.')
       }
       return
     }
@@ -6894,9 +7759,9 @@ export default function App() {
         await refreshDiameterRuns(imageId, { silent: true })
         const okCount = nextResults.filter((r) => r.status === 'ok').length
         const methodCount = new Set(batches.map((batch) => batch.method_id)).size
-        toast(okCount ? 'success' : 'warning', 'Diameter Research', `${okCount}/${nextResults.length} puntos medidos en ${methodCount} metodo(s).`)
+        toast(okCount ? 'success' : 'warning', 'Medicion de Diametros', `${okCount}/${nextResults.length} puntos medidos en ${methodCount} metodo(s).`)
       } catch (err) {
-        toast('error', 'Diameter Research', errMsg(err))
+        toast('error', 'Medicion de Diametros', errMsg(err))
       }
     })
   }
@@ -7555,6 +8420,20 @@ export default function App() {
     if (!batchProgress.total) return 0
     return Math.round((100 * batchProgress.done) / batchProgress.total)
   }, [batchProgress])
+  const transferAllSelected = transferCatalog.length > 0 && transferCatalog.every((item) => !!transferSelection[item.key])
+  const transferSelectedSize = transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.size_bytes || 0) : 0), 0)
+  const transferSelectedFiles = transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.file_count || 0) : 0), 0)
+  const scribbleTutorialChecklist = [
+    ['Corregir semilla con Goma', scribbleTutorialExercise.erase_seed_done],
+    ['Agrandar pincel', scribbleTutorialExercise.brush_grow_done],
+    ['Achicar pincel', scribbleTutorialExercise.brush_shrink_done],
+    ['Limpiar semilla', scribbleTutorialExercise.clear_done],
+    ['Dibujar Fibra', scribbleTutorialExercise.fiber_done],
+    ['Dibujar Halo', scribbleTutorialExercise.halo_done],
+    ['Dibujar Background', scribbleTutorialExercise.background_done],
+    ['Corregir trazo final con Goma', scribbleTutorialExercise.erase_user_done],
+  ]
+  const scribbleTutorialReady = scribbleTutorialCanContinue(scribbleTutorialExercise)
 
   return (
     <div className="app">
@@ -7572,12 +8451,64 @@ export default function App() {
         <span>{notice.text}</span>
       </div>
 
+      {tutorialOverlayState?.type === 'pathCopy' ? (
+        <div className="tutorial-overlay-window" data-tour="tutorial-overlay-path-copy">
+          <div className="tutorial-overlay-card">
+            <span className="tutorial-overlay-kicker">Paso guiado</span>
+            <h2>Realiza esto</h2>
+            <p>
+              Copia esta ruta dinamica del proyecto. Luego, en el siguiente paso, usa <strong>Elegir directorio</strong>,
+              pega la ruta en la ventana del sistema y presiona aceptar.
+            </p>
+            <code>{String(tutorialOverlayState.path || tutorialOverlayState.loadError || 'Cargando ruta...')}</code>
+            <div className="tutorial-card-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => copyLocalImageTutorialPath(String(tutorialOverlayState.path || ''))}
+                disabled={!String(tutorialOverlayState.path || '').trim()}
+              >
+                Copiar ruta
+              </button>
+            </div>
+            <p className="tutorial-muted">
+              Imagen esperada para este recorrido: {String(tutorialOverlayState.imageName || 'overview-reference.png')}
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {tutorialOverlayState?.type === 'scribbleSeedConfirm' ? (
+        <div className="tutorial-overlay-window" data-tour="tutorial-overlay-scribble-seed">
+          <div className="tutorial-overlay-card">
+            <span className="tutorial-overlay-kicker">Dibujo de Scribble</span>
+            <h2>Preparar ejercicio</h2>
+            <p>
+              Este tutorial reemplazara el scribble visible y el draft guardado de la imagen actual.
+              Luego agregara trazos de ejemplo para practicar correcciones antes de dibujar tu propio scribble.
+            </p>
+            <div className="tutorial-card-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={startScribbleDrawingTutorialSeed}
+                disabled={!imageUrl || tutorialOverlayState.busy}
+              >
+                {tutorialOverlayState.busy ? 'Preparando...' : 'Empezar tutorial'}
+              </button>
+            </div>
+            {!imageUrl ? <p className="tutorial-muted">Primero completa el tutorial Carga de imagen.</p> : null}
+          </div>
+        </div>
+      ) : null}
+
       <div className="app-layout">
         <Navigation
           activeGroup={activeGroup}
           activeTab={activeTab}
           onGroupChange={handleGroupChange}
           onTabChange={handleTabChange}
+          forceExpanded={tutorialSidebarForcedOpen}
         />
         <div className="content-area">
           {/* Tab strip for Level 2 sub-tabs (compact horizontal boxes) */}
@@ -7585,12 +8516,13 @@ export default function App() {
             const group = GROUPS.find((g) => g.key === activeGroup)
             if (!group) return null
             return (
-              <div className="tab-strip">
+              <div className="tab-strip" data-tour={`tab-strip-${activeGroup}`}>
                 {group.tabs.map((t) => (
                   <button
                     key={t.key}
                     className={`tab-strip-btn ${activeTab === t.key ? 'active' : ''}`}
                     onClick={() => handleTabChange(t.key)}
+                    data-tour={`tab-${t.key}`}
                   >
                     {t.label}
                   </button>
@@ -7600,13 +8532,25 @@ export default function App() {
           })()}
 
           <div className="layout">
-        <aside className="left">
-          {workspaceTab === 'workbench' ? (
+        <aside className="left" data-tour={`workspace-sidebar-${workspaceTab}`}>
+          {workspaceTab === 'tutorialHub' ? (
+            <TutorialSidebar
+              activeTutorialTab={activeTutorialTab}
+              selectedId={tutorialSelectedId}
+              tutorialsByScope={tutorialAllByScope}
+              progress={tutorialProgress}
+              onSelect={setTutorialSelectedId}
+              onStart={(tutorialId) => queueTutorialStart(tutorialId, false)}
+              onStartFull={(tutorialId) => queueTutorialStart(tutorialId, true)}
+              onReset={resetTutorialProgressOne}
+              tabConfig={activeTutorialConfig}
+            />
+          ) : workspaceTab === 'workbench' ? (
             <>
               <div className="side-tabs">
-                <button className={workbenchPanelTab === 'image' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('image')}>Imagen</button>
-                <button className={workbenchPanelTab === 'editor' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('editor')}>Scribble</button>
-                <button className={workbenchPanelTab === 'experiments' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('experiments')}>Experimentos</button>
+                <button data-tour="workbench-panel-tab-image" className={workbenchPanelTab === 'image' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('image')}>Imagen</button>
+                <button data-tour="workbench-panel-tab-editor" className={workbenchPanelTab === 'editor' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('editor')}>Scribble</button>
+                <button data-tour="workbench-panel-tab-experiments" className={workbenchPanelTab === 'experiments' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('experiments')}>Experimentos</button>
               </div>
               {workbenchPanelTab === 'image' ? (
                 <>
@@ -7620,17 +8564,32 @@ export default function App() {
                     onChange={(e) => setImageStartDir(e.target.value)}
                     placeholder="C:\\ruta\\a\\carpeta\\de\\imagenes"
                     disabled={loading.localPrefs}
+                    data-tour="local-image-start-dir"
                   />
                 </label>
                 <div className="inline">
-                  <button onClick={saveLocalImagePrefs} disabled={loading.localPrefs || !imageStartDir.trim()}>Guardar ruta</button>
-                  <button onClick={listLocalImages} disabled={loading.localImages || !imageStartDir.trim()}>Listar imagenes</button>
+                  <button data-tour="local-image-choose-dir" onClick={chooseLocalImageDir} disabled={loading.localDirPick}>Elegir directorio</button>
+                  <button data-tour="local-image-save-dir" onClick={saveLocalImagePrefs} disabled={loading.localPrefs || !imageStartDir.trim()}>Guardar ruta</button>
+                  <button data-tour="local-image-list" onClick={listLocalImages} disabled={loading.localImages || !imageStartDir.trim()}>Listar imagenes</button>
                   <button onClick={() => openFolder('custom', imageStartDir)} disabled={loading.openFolder || !imageStartDir.trim()}>Abrir ruta</button>
                 </div>
                 {localImageFiles.length ? (
                   <label className="field">
                     <span>imagenes desde ruta guardada</span>
-                    <select value={selectedLocalPath} onChange={(e) => setSelectedLocalPath(e.target.value)} disabled={loading.localLoad}>
+                    <select
+                      data-tour="local-image-select"
+                      value={selectedLocalPath}
+                      size={localImageSelectExpanded ? Math.min(Math.max(localImageFiles.length, 2), 6) : undefined}
+                      onChange={(e) => {
+                        const nextPath = e.target.value
+                        setSelectedLocalPath(nextPath)
+                        if (localFileName(nextPath) === SCRIBBLE_TUTORIAL_IMAGE_NAME) {
+                          markTutorialSignal('correctTutorialImageSelected')
+                          advanceTutorialAfterSignal('correctTutorialImageSelected')
+                        }
+                      }}
+                      disabled={loading.localLoad}
+                    >
                       {localImageFiles.map((item) => (
                         <option key={item.path} value={item.path}>{item.relative_path || item.name}</option>
                       ))}
@@ -7638,7 +8597,7 @@ export default function App() {
                   </label>
                 ) : null}
                 {localImageFiles.length ? (
-                  <button onClick={() => loadLocalImage()} disabled={!selectedLocalPath || loading.localLoad}>Cargar seleccion local</button>
+                  <button data-tour="local-image-load" onClick={() => loadLocalImage()} disabled={!selectedLocalPath || loading.localLoad}>Cargar seleccion local</button>
                 ) : null}
               </section>
 
@@ -7677,18 +8636,32 @@ export default function App() {
               ) : workbenchPanelTab === 'editor' ? (
                 <section className="card scribble-controls-card">
                   <h2>Editor de scribbles</h2>
-                  <div className="tool-row">
+                  {scribbleTutorialExercise.active ? (
+                    <div className="scribble-tutorial-exercise" data-tour="scribble-tutorial-exercise">
+                      <strong>Ejercicio guiado</strong>
+                      <span>Completa los hitos para continuar.</span>
+                      <div className="scribble-tutorial-checklist">
+                        {scribbleTutorialChecklist.map(([label, done]) => (
+                          <span className={done ? 'done' : ''} key={label}>{done ? 'Listo' : 'Pendiente'}: {label}</span>
+                        ))}
+                      </div>
+                      <button className="primary" onClick={continueScribbleDrawingTutorial} disabled={!scribbleTutorialReady}>
+                        Continuar tutorial
+                      </button>
+                    </div>
+                  ) : null}
+                  <div className="tool-row" data-tour="scribble-mode-tools">
                     <button className={`icon-tool tool-square ${viewerMode === 'mark' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('mark')} disabled={!imageUrl} title="Lapiz (L)"><ToolIcon name="pencil" /><kbd>L</kbd></button>
                     <button className={`icon-tool tool-square ${viewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('pan')} disabled={!imageUrl} title="Mano (M)"><ToolIcon name="hand" /><kbd>M</kbd></button>
                     <button className={`icon-tool tool-square ${viewerMode === 'exclude' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('exclude')} disabled={!imageUrl} title="Rectangulo de exclusion (R)"><ToolIcon name="exclude" /><kbd>R</kbd></button>
                   </div>
-                  <div className="paint-grid compact">
+                  <div className="paint-grid compact" data-tour="scribble-paint-tools">
                     <button className={`paint-tool ${tool === 'fiber' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('fiber') }} disabled={!imageUrl}><span className="color-dot fiber" />Fibra <kbd>F</kbd></button>
                     <button className={`paint-tool ${tool === 'halo' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('halo') }} disabled={!imageUrl}><span className="color-dot halo" />Halo <kbd>H</kbd></button>
                     <button className={`paint-tool ${tool === 'bg' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('bg') }} disabled={!imageUrl}><span className="color-dot bg" />Background <kbd>B</kbd></button>
-                    <button className={`paint-tool ${tool === 'erase' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('erase') }} disabled={!imageUrl}><ToolIcon name="erase" />Goma <kbd>G</kbd></button>
+                    <button data-tour="scribble-tool-erase" className={`paint-tool ${tool === 'erase' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('erase') }} disabled={!imageUrl}><ToolIcon name="erase" />Goma <kbd>G</kbd></button>
                   </div>
-                  <div className="brush-panel">
+                  <div className="brush-panel" data-tour="scribble-brush-control">
                     <label className="brush-toolbar-control wide">
                       <span>Pincel</span>
                       <input type="range" min="1" max="120" value={brushSliderValue} onChange={(e) => setBrushSize(brushSliderToPx(e.target.value))} disabled={!imageUrl} />
@@ -7710,11 +8683,11 @@ export default function App() {
                     <button className="icon-tool" onClick={onAnnotRedo} disabled={!annotFuture.length || !imageUrl} title="Rehacer (Ctrl+Y)">Redo</button>
                     <button className="icon-tool" onClick={() => zoomEditorBy(0.84)} disabled={!imageUrl} title="Zoom menos">-</button>
                     <button className="icon-tool" onClick={() => zoomEditorBy(1.2)} disabled={!imageUrl} title="Zoom mas">+</button>
-                    <button className="icon-tool" onClick={resetEditorView} disabled={!imageUrl} title="Reset vista">Reset</button>
+                    <button className="icon-tool" onClick={resetEditorView} disabled={!imageUrl} title="Reiniciar vista">Reiniciar</button>
                     <span className="zoom-chip">{Math.round(viewerZoom * 100)}%</span>
                   </div>
                   <div className="inline">
-                    <button onClick={onClearScribbles} disabled={!imageUrl}>Limpiar</button>
+                    <button data-tour="scribble-clear" onClick={onClearScribbles} disabled={!imageUrl}>Limpiar</button>
                     <button onClick={clearExcludeRect} disabled={!imageUrl || !excludeRect}>Limpiar exclusion</button>
                   </div>
                   <div className="model-assist-panel compact-model-panel">
@@ -7778,8 +8751,8 @@ export default function App() {
                   </select>
                 </label>
                 <div className="inline">
-                  <button className="primary" onClick={runOne} disabled={!selectedExperiment || loading.run}>Run selected</button>
-                  <button className="primary" onClick={runBatch} disabled={loading.runBatch}>Run batch</button>
+                  <button className="primary" onClick={runOne} disabled={!selectedExperiment || loading.run}>Ejecutar seleccionado</button>
+                  <button className="primary" onClick={runBatch} disabled={loading.runBatch}>Ejecutar batch</button>
                 </div>
                 {loading.runBatch ? (
                   <div className="batch-progress-box">
@@ -7798,8 +8771,8 @@ export default function App() {
                 ) : null}
                 <p className="small">Batch usa solo perfil <strong>high</strong>.</p>
                 <div className="inline">
-                  <button onClick={selectAllBatch} disabled={!experiments.length}>Select all</button>
-                  <button onClick={clearBatchSelection} disabled={!Object.values(selectedBatch).some(Boolean)}>Select none</button>
+                  <button onClick={selectAllBatch} disabled={!experiments.length}>Seleccionar todo</button>
+                  <button onClick={clearBatchSelection} disabled={!Object.values(selectedBatch).some(Boolean)}>Limpiar seleccion</button>
                 </div>
                 <div className="batch-list">
                   {experiments.map((x) => (
@@ -7832,28 +8805,28 @@ export default function App() {
               <section className="card">
                 <h2>Visor secuencial</h2>
                 <div className="inline">
-                  <button onClick={goPrev} disabled={!filteredRuns.length}>{'<-'} Prev</button>
-                  <button onClick={goNext} disabled={!filteredRuns.length}>Next {'->'}</button>
+                  <button onClick={goPrev} disabled={!filteredRuns.length}>{'<-'} Anterior</button>
+                  <button onClick={goNext} disabled={!filteredRuns.length}>Siguiente {'->'}</button>
                 </div>
 
                 <label className="field">
                   <span>Filtro grupo</span>
                   <select ref={filterFocusRef} value={filterGroup} onChange={(e) => setFilterGroup(e.target.value)}>
-                    <option value="all">all</option>
+                    <option value="all">todos</option>
                     {groups.map((g) => <option key={g} value={g}>{g}</option>)}
                   </select>
                 </label>
                 <label className="field">
                   <span>Filtro experimento</span>
                   <select value={filterExperiment} onChange={(e) => setFilterExperiment(e.target.value)}>
-                    <option value="all">all</option>
+                    <option value="all">todos</option>
                     {experiments.map((x) => <option key={x.experiment_id} value={x.experiment_id}>{x.experiment_id}</option>)}
                   </select>
                 </label>
                 <label className="field">
                   <span>Filtro decision</span>
                   <select value={filterDecision} onChange={(e) => setFilterDecision(e.target.value)}>
-                    <option value="all">all</option>
+                    <option value="all">todos</option>
                     {REVIEW_TIERS.map((tier) => <option key={tier.value} value={tier.value}>{tier.label}</option>)}
                     <option value="unreviewed">unreviewed</option>
                   </select>
@@ -7905,7 +8878,7 @@ export default function App() {
           ) : workspaceTab === 'diameter' ? (
             <>
               <section className="card">
-                <h2>Diameter Research</h2>
+                <h2>Medicion de Diametros</h2>
                 <div className="kpi">ID imagen: <strong>{imageId || '-'}</strong></div>
                 <div className="kpi">Modo: <strong>Manual geometrico</strong></div>
                 <label className="field">
@@ -7913,35 +8886,24 @@ export default function App() {
                   <select
                     value={diamMethodId}
                     onChange={(e) => {
-                      const nextMethod = e.target.value
-                      setDiamMethodId(nextMethod)
-                      if (nextMethod === 'circle_square_mask_diameter') {
-                        switchDiameterViewer('circle', { forceManualCircleSeed: true })
-                      } else if (['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(nextMethod)) {
-                        switchDiameterViewer('manual')
-                      }
+                      selectDiameterDrawingTool(e.target.value)
                     }}
                     disabled={!imageId}
                   >
-                    <option value="circle_square_mask_diameter">Circle-square mask</option>
-                    <option value="manual_dual_side_caliper">Linea mask</option>
+                    <option value="circle_square_mask_diameter">Mascara circle-square</option>
+                    <option value="manual_dual_side_caliper">Linea mascara</option>
                     <option value="manual_line_direct_caliper">Linea manual</option>
-                    <option value="ellipse_oriented_fit">Ellipse oriented fit</option>
                   </select>
                 </label>
                 <p className="small">
                   {diamMethodId === 'circle_square_mask_diameter'
                     ? 'Circle-square usa un circulo manual como semilla y mide sobre la mascara del run de soporte.'
                     : diamMethodId === 'manual_dual_side_caliper'
-                      ? 'Linea mask corta tu trazo con la mascara y mide solo el tramo respaldado por ella.'
+                      ? 'Linea mascara corta tu trazo con la mascara y mide solo el tramo respaldado por ella.'
                       : diamMethodId === 'manual_line_direct_caliper'
                         ? 'Linea manual usa exactamente la longitud del trazo que dibujas.'
-                        : 'Ellipse oriented fit ajusta una elipse sobre la mascara local y usa el eje menor como diametro.'}
+                        : ''}
                 </p>
-                <label className="field">
-                  <span>Fuente de soporte</span>
-                  <input value="prior_mask" disabled readOnly />
-                </label>
                 <p className="small">
                   Diameter usa siempre la mascara binaria del run de soporte seleccionado. La mascara verde mostrada en el visor corresponde a esa fuente.
                 </p>
@@ -8028,23 +8990,12 @@ export default function App() {
                 ) : null}
                 {['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(diamMethodId) ? (
                   <>
-                    <h3>{diamMethodId === 'manual_dual_side_caliper' ? 'Linea mask' : 'Linea manual'}</h3>
+                    <h3>{diamMethodId === 'manual_dual_side_caliper' ? 'Linea mascara' : 'Linea manual'}</h3>
                     <p className="small">
                       {diamMethodId === 'manual_dual_side_caliper'
-                        ? 'MantÃ©n click, arrastra y suelta. El diÃ¡metro se calcula donde esa direcciÃ³n corta la mÃ¡scara.'
-                        : 'MantÃ©n click, arrastra y suelta. El diÃ¡metro serÃ¡ exactamente la longitud de la lÃ­nea.'}
+                        ? 'Mantén click, arrastra y suelta. El diámetro se calcula donde esa dirección corta la máscara.'
+                        : 'Mantén click, arrastra y suelta. El diámetro será exactamente la longitud de la línea.'}
                     </p>
-                  </>
-                ) : null}
-                {diamMethodId === 'ellipse_oriented_fit' ? (
-                  <>
-                    <h3>Ellipse fit</h3>
-                    <div className="diam-param-grid">
-                      <label className="field">
-                        <span>ellipse ROI</span>
-                        <input type="number" step="2" min="5" value={diamParams.ellipse_roi_radius_px} onChange={(e) => updateDiamParam('ellipse_roi_radius_px', e.target.value)} />
-                      </label>
-                    </div>
                   </>
                 ) : null}
               </section>
@@ -8130,7 +9081,7 @@ export default function App() {
           ) : workspaceTab === 'locoDataset' ? (
             <>
               <section className="card">
-                <h2>Generate Dataset</h2>
+                <h2>Generar Dataset</h2>
                 <label className="field">
                   <span>Run de soporte</span>
                   <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
@@ -8144,14 +9095,14 @@ export default function App() {
                 </label>
                 <div className="inline">
                   <button onClick={previewLocoDatasetFeatures} disabled={!locoDatasetCircles.length || loading.locoDataset}>Calcular features</button>
-                  <button className="primary" onClick={saveLocoDataset} disabled={!locoDatasetCircles.length || loading.locoDataset}>Generate Dataset</button>
+                  <button className="primary" onClick={saveLocoDataset} disabled={!locoDatasetCircles.length || loading.locoDataset}>Generar Dataset</button>
                   <button onClick={clearLocoDatasetCanvas} disabled={!locoDatasetCircles.length && !locoDatasetDraftCircle}>Limpiar imagen</button>
                 </div>
                 <p className="small">Dataset: main</p>
               </section>
 
               <section className="card">
-                <h2>Preview</h2>
+                <h2>Vista previa</h2>
                 {locoDatasetSelectedCircle ? (
                   <>
                     <div className={`loco-dataset-preview ${locoDatasetSelectedCircle.label || 'invalid_other'}`}>
@@ -8301,7 +9252,7 @@ export default function App() {
                 <div className="inline">
                   <button onClick={refreshLocoAugItems} disabled={loading.locoAugment}>Refrescar</button>
                   <button onClick={selectMixedLocoAugSample} disabled={!locoAugItems.length}>Seleccionar muestra mixta</button>
-                  <button onClick={() => setLocoAugSelected({})} disabled={!locoAugSelectedCount}>Limpiar selecciÃ³n</button>
+                  <button onClick={() => setLocoAugSelected({})} disabled={!locoAugSelectedCount}>Limpiar selección</button>
                 </div>
               </section>
 
@@ -8313,7 +9264,7 @@ export default function App() {
                     <option value="all">todas</option>
                     <option value="valid">valid</option>
                     <option value="invalid_crossing">crossing</option>
-                    <option value="invalid_other">other invalid</option>
+                    <option value="invalid_other">otro invalido</option>
                   </select>
                 </label>
                 <div className="kpi">Visibles: <strong>{locoAugFilteredItems.length}</strong></div>
@@ -8339,10 +9290,10 @@ export default function App() {
                 <div className="kpi">Seleccionados: <strong>{locoAugSelectedCount}</strong></div>
                 <div className="kpi">Pasadas por ejemplo: <strong>{locoAugEstimatedVariants}</strong></div>
                 <div className="inline">
-                  <button onClick={previewLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length}>Preview selected</button>
-                  <button className="primary" onClick={applyLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length || !locoAugItems.length}>Apply to all dataset</button>
-                  <button onClick={clearLocoAugmented} disabled={loading.locoAugment || !(locoAugCounts.augmented_total > 0)}>Clear augmented</button>
-                  <button onClick={openLocoAugmentedFolder} disabled={loading.openFolder || !(String(locoAugInfo?.augmented_dir || '').trim() || (locoAugCounts.augmented_total > 0 && String(locoAugDatasetDir || '').trim()))}>Abrir carpeta augmented</button>
+                  <button onClick={previewLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length}>Previsualizar seleccion</button>
+                  <button className="primary" onClick={applyLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length || !locoAugItems.length}>Aplicar a todo el dataset</button>
+                  <button onClick={clearLocoAugmented} disabled={loading.locoAugment || !(locoAugCounts.augmented_total > 0)}>Limpiar augmentados</button>
+                  <button onClick={openLocoAugmentedFolder} disabled={loading.openFolder || !(String(locoAugInfo?.augmented_dir || '').trim() || (locoAugCounts.augmented_total > 0 && String(locoAugDatasetDir || '').trim()))}>Abrir carpeta augmentada</button>
                 </div>
                 {locoAugInfo ? (
                   <p className="small">
@@ -8355,21 +9306,21 @@ export default function App() {
           ) : workspaceTab === 'locoTraining' ? (
             <>
               <section className="card">
-                <h2>Training</h2>
+                <h2>Entrenamiento</h2>
                 <label className="field">
                   <span>datos</span>
                   <select value={locoTrainingDataSelection} onChange={(e) => setLocoTrainingDataSelection(e.target.value)}>
-                    <option value="original">Original only</option>
-                    <option value="augmented">Augmented only</option>
-                    <option value="all">Original + Augmented</option>
+                    <option value="original">Solo original</option>
+                    <option value="augmented">Solo augmentado</option>
+                    <option value="all">Original + Augmentado</option>
                   </select>
                 </label>
                 <label className="field">
-                  <span>test size</span>
+                  <span>tamano de test</span>
                   <input type="number" min="0.05" max="0.5" step="0.05" value={locoTrainingTestSize} onChange={(e) => setLocoTrainingTestSize(clamp(Number(e.target.value || 0.2), 0.05, 0.5))} />
                 </label>
                 <label className="field">
-                  <span>random seed</span>
+                  <span>semilla aleatoria</span>
                   <input type="number" value={locoTrainingSeed} onChange={(e) => setLocoTrainingSeed(Number(e.target.value || 42))} />
                 </label>
                 <label className="field">
@@ -8387,7 +9338,7 @@ export default function App() {
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseCv5} onChange={(e) => setLocoTrainingUseCv5(e.target.checked)} /><span>CV5</span></label>
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingMulticlass} onChange={(e) => setLocoTrainingMulticlass(e.target.checked)} /><span>modelo multiclase (valid/crossing/other)</span></label>
                 <div className="inline">
-                  <button className="primary" onClick={trainLocoModels} disabled={loading.locoTraining}>Train Models</button>
+                  <button className="primary" onClick={trainLocoModels} disabled={loading.locoTraining}>Entrenar modelos</button>
                   <button onClick={addLocoTrainingBatchJob} disabled={loading.locoTraining}>Agregar al batch</button>
                 </div>
                 {locoTrainingProgress && (loading.locoTraining || locoTrainingProgress.status === 'done') ? (
@@ -8509,14 +9460,14 @@ export default function App() {
                   </select>
                 </label>
                 <label className="field">
-                  <span>threshold</span>
+                  <span>umbral</span>
                   <input type="number" min="0.05" max="0.95" step="0.05" value={locoTrainingThreshold} onChange={(e) => setLocoTrainingThreshold(clamp(Number(e.target.value || 0.5), 0.05, 0.95))} />
                 </label>
                 <label className="field">
                   <span>error</span>
                   <select value={locoTrainingErrorType} onChange={(e) => setLocoTrainingErrorType(e.target.value)}>
-                    <option value="False Positives">False Positives</option>
-                    <option value="False Negatives">False Negatives</option>
+                    <option value="False Positives">Falsos positivos</option>
+                    <option value="False Negatives">Falsos negativos</option>
                   </select>
                 </label>
                 {locoTrainingResult?.model_recommendations?.[locoTrainingSelectedModel] ? (
@@ -8563,7 +9514,7 @@ export default function App() {
           ) : workspaceTab === 'locoTest' ? (
             <>
               <section className="card">
-                <h2>Test circle model</h2>
+                <h2>Probar modelo de circulos</h2>
                 <label className="field">
                   <span>modelo guardado</span>
                   <select value={locoTestTrainingRunId} onChange={(e) => onLocoTestTrainingRunChange(e.target.value)}>
@@ -8574,7 +9525,7 @@ export default function App() {
                   </select>
                 </label>
                 <label className="field">
-                  <span>model</span>
+                  <span>modelo</span>
                   <select value={locoTestModelId} onChange={(e) => setLocoTestModelId(e.target.value)} disabled={!!locoTestSelectedSavedModel}>
                     {locoTestSelectedSavedModel ? (
                       <option value={locoTestSelectedSavedModel.model_id}>{locoTestSelectedSavedModel.model || locoTestSelectedSavedModel.model_id}</option>
@@ -8589,7 +9540,7 @@ export default function App() {
                   </select>
                 </label>
                 <label className="field">
-                  <span>threshold</span>
+                  <span>umbral</span>
                   <input type="number" min="0.05" max="0.95" step="0.05" value={locoTestThreshold} onChange={(e) => setLocoTestThreshold(clamp(Number(e.target.value || 0.5), 0.05, 0.95))} />
                 </label>
                 <label className="field">
@@ -8605,7 +9556,7 @@ export default function App() {
                 </label>
                 <div className="inline">
                   <button onClick={refreshLocoTrainingRuns} disabled={loading.locoTraining}>Refrescar modelos</button>
-                  <button className="primary" onClick={predictLocoTestCircles} disabled={!locoTestCircles.length || loading.locoTest || !locoTestTrainingRunId}>Predict circles</button>
+                  <button className="primary" onClick={predictLocoTestCircles} disabled={!locoTestCircles.length || loading.locoTest || !locoTestTrainingRunId}>Predecir circulos</button>
                   <button onClick={clearLocoTestCanvas} disabled={!locoTestCircles.length && !locoTestDraftCircle}>Limpiar imagen</button>
                 </div>
               </section>
@@ -8660,7 +9611,7 @@ export default function App() {
                     <div className={`inline dataset-label-actions ${locoTestSelectedCircle.label === 'invalid' ? 'invalid_other' : (locoTestSelectedCircle.label || 'invalid_other')}`}>
                       <button className={`dataset-valid ${locoTestSelectedCircle.label === 'valid' ? 'active' : ''}`} onClick={() => updateLocoTestCircle(locoTestSelectedCircle.candidate_id, { label: 'valid' })}>Valid</button>
                       <button className={`dataset-invalid-crossing ${locoTestSelectedCircle.label === 'invalid_crossing' ? 'active' : ''}`} onClick={() => updateLocoTestCircle(locoTestSelectedCircle.candidate_id, { label: 'invalid_crossing' })}>Crossing</button>
-                      <button className={`dataset-invalid-other ${locoTestSelectedCircle.label === 'invalid_other' || locoTestSelectedCircle.label === 'invalid' ? 'active' : ''}`} onClick={() => updateLocoTestCircle(locoTestSelectedCircle.candidate_id, { label: 'invalid_other' })}>Other</button>
+                      <button className={`dataset-invalid-other ${locoTestSelectedCircle.label === 'invalid_other' || locoTestSelectedCircle.label === 'invalid' ? 'active' : ''}`} onClick={() => updateLocoTestCircle(locoTestSelectedCircle.candidate_id, { label: 'invalid_other' })}>Otro</button>
                       <button className="dataset-delete" onClick={deleteSelectedLocoTestCircle}>Eliminar</button>
                     </div>
                     <label className="field">
@@ -8673,13 +9624,13 @@ export default function App() {
 
               {locoTestResult ? (
                 <section className="card">
-                  <h2>MÃ©tricas</h2>
+                  <h2>Metricas</h2>
                   <div className="kpi">Precision valid: <strong>{locoTestResult.metrics?.precision_valid == null ? '-' : Number(locoTestResult.metrics.precision_valid).toFixed(3)}</strong></div>
                   <div className="kpi">Recall valid: <strong>{locoTestResult.metrics?.recall_valid == null ? '-' : Number(locoTestResult.metrics.recall_valid).toFixed(3)}</strong></div>
                   <div className="kpi">F1 valid: <strong>{locoTestResult.metrics?.f1_valid == null ? '-' : Number(locoTestResult.metrics.f1_valid).toFixed(3)}</strong></div>
                   <div className="kpi">FP: <strong>{locoTestResult.metrics?.fp ?? '-'}</strong></div>
                   <div className="kpi">FN: <strong>{locoTestResult.metrics?.fn ?? '-'}</strong></div>
-                  {locoTestResult.has_multiclass ? <div className="kpi">Multiclase: <strong>âœ“</strong></div> : null}
+                  {locoTestResult.has_multiclass ? <div className="kpi">Multiclase: <strong>OK</strong></div> : null}
                 </section>
               ) : null}
             </>
@@ -8697,7 +9648,7 @@ export default function App() {
                   </select>
                 </label>
                 <label className="field">
-                  <span>model</span>
+                  <span>modelo</span>
                   <select value={locoModelId} onChange={(e) => setLocoModelId(e.target.value)} disabled={!!locoDetectorSelectedSavedModel}>
                     {locoDetectorSelectedSavedModel ? (
                       <option value={locoDetectorSelectedSavedModel.model_id}>{locoDetectorSelectedSavedModel.model || locoDetectorSelectedSavedModel.model_id}</option>
@@ -8722,20 +9673,20 @@ export default function App() {
                 </label>
                 <div className="inline">
                   <button onClick={refreshLocoTrainingRuns} disabled={loading.locoTraining}>Refrescar modelos</button>
-                  <button className="primary" onClick={runLocoModelBaseDetector} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Run base detector</button>
+                  <button className="primary" onClick={runLocoModelBaseDetector} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Ejecutar detector base</button>
                 </div>
                 <div className="inline detector-stage-actions">
-                  <button onClick={applyLocoModelThreshold} disabled={!locoModelCanApplyThreshold || loading.locoModel}>Apply threshold</button>
-                  <button onClick={applyLocoModelThresholdOnward} disabled={!locoModelCanApplyThreshold || loading.locoModel}>Apply threshold onward</button>
+                  <button onClick={applyLocoModelThreshold} disabled={!locoModelCanApplyThreshold || loading.locoModel}>Aplicar umbral</button>
+                  <button onClick={applyLocoModelThresholdOnward} disabled={!locoModelCanApplyThreshold || loading.locoModel}>Aplicar umbral en adelante</button>
                 </div>
                 <div className="inline detector-stage-actions">
-                  <button onClick={applyLocoModelNms} disabled={!locoModelCanApplyNms || loading.locoModel}>Apply NMS</button>
-                  <button onClick={applyLocoModelNmsOnward} disabled={!locoModelCanApplyNms || loading.locoModel}>Apply NMS onward</button>
+                  <button onClick={applyLocoModelNms} disabled={!locoModelCanApplyNms || loading.locoModel}>Aplicar NMS</button>
+                  <button onClick={applyLocoModelNmsOnward} disabled={!locoModelCanApplyNms || loading.locoModel}>Aplicar NMS en adelante</button>
                 </div>
                 <div className="inline detector-stage-actions">
-                  <button onClick={applyLocoModelSpatial} disabled={!locoModelCanApplySpatial || loading.locoModel}>Apply spatial</button>
-                  <button onClick={applyLocoModelSpatialOnward} disabled={!locoModelCanApplySpatial || loading.locoModel}>Apply spatial onward</button>
-                  <button className="primary" onClick={applyLocoModelPendingFilters} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Apply pending filters</button>
+                  <button onClick={applyLocoModelSpatial} disabled={!locoModelCanApplySpatial || loading.locoModel}>Aplicar filtro espacial</button>
+                  <button onClick={applyLocoModelSpatialOnward} disabled={!locoModelCanApplySpatial || loading.locoModel}>Aplicar filtro espacial en adelante</button>
+                  <button className="primary" onClick={applyLocoModelPendingFilters} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Aplicar filtros pendientes</button>
                 </div>
                 <div className="inline">
                   <button onClick={clearLocoModelDetector} disabled={!locoModelResult}>Limpiar detector</button>
@@ -8932,6 +9883,20 @@ export default function App() {
                 </section>
               ) : null}
             </>
+          ) : workspaceTab === 'projectTransfer' ? (
+            <>
+              <section className="card">
+                <h2>Configuracion</h2>
+                <p className="small">Transfiere imagenes, scribbles, datasets y modelos entre maquinas. Los resultados de deteccion y medicion no se incluyen.</p>
+              </section>
+              <section className="card">
+                <h2>Resumen seleccionado</h2>
+                <div className="kpi">Categorias: <strong>{transferCatalog.filter((item) => transferSelection[item.key]).length}</strong></div>
+                <div className="kpi">Archivos: <strong>{transferSelectedFiles}</strong></div>
+                <div className="kpi">Tamano estimado: <strong>{formatBytes(transferSelectedSize)}</strong></div>
+                <button onClick={refreshTransferCatalog} disabled={loading.transferCatalog}>Actualizar tamanos</button>
+              </section>
+            </>
           ) : (
             <>
               <section className="card">
@@ -9016,9 +9981,21 @@ export default function App() {
         </aside>
 
         <section className="main">
-          <article className={`card viewer ${workspaceTab === 'workbench' ? '' : 'hidden-panel'}`}>
+          <article className={`card viewer models-viewer ${workspaceTab === 'tutorialHub' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-tutorialHub">
+            <TutorialViewer
+              tutorial={selectedTutorial}
+              progressEntry={tutorialProgress[tutorialSelectedId]}
+              onStart={(tutorialId) => queueTutorialStart(tutorialId, false)}
+              onStartFull={(tutorialId) => queueTutorialStart(tutorialId, true)}
+              onReset={resetTutorialProgressOne}
+              onResetAll={resetTutorialProgressAll}
+            />
+          </article>
+
+          <article className={`card viewer ${workspaceTab === 'workbench' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-workbench">
               <div
                 ref={editorStageRef}
+                data-tour="scribble-drawing-area"
                 className={`stage editor-stage annot-stage mode-${viewerMode} ${isPanning ? 'is-panning' : ''}`}
                 onPointerDown={onEditorPointerDown}
                 onPointerMove={onEditorPointerMove}
@@ -9066,7 +10043,7 @@ export default function App() {
               </div>
               <canvas ref={labelsCanvasRef} className="hidden" />
           </article>
-          <article className={`card result ${workspaceTab === 'review' ? '' : 'hidden-panel'}`}>
+          <article className={`card result ${workspaceTab === 'review' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-review">
               <h2>Comparador de resultado</h2>
               {activeRun ? (
                 <>
@@ -9125,54 +10102,22 @@ export default function App() {
                 </>
               ) : <div className="placeholder">Ejecuta un experimento para ver resultados.</div>}
           </article>
-          <article className={`card viewer diameter-viewer ${workspaceTab === 'diameter' ? '' : 'hidden-panel'}`}>
-            <h2>Diameter Research</h2>
+          <article className={`card viewer diameter-viewer ${workspaceTab === 'diameter' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-diameter">
+            <h2>Medicion de Diametros</h2>
             <div className="viewer-toolbar">
-              <button
-                className={`icon-tool ${diamViewerMode === 'mark' ? 'toggle-active' : ''}`}
-                onClick={() => {
-                  if (diamMethodId === 'circle_square_mask_diameter') {
-                    switchDiameterViewer('circle', { forceManualCircleSeed: true })
-                    toast('warning', 'Circle-square', 'Este metodo usa solo circulo manual.')
-                    return
-                  }
-                  switchDiameterViewer('mark')
-                }}
-                disabled={!imageUrl || diamMethodId === 'circle_square_mask_diameter'}
-                title={diamMethodId === 'circle_square_mask_diameter' ? 'Circle-square bloquea puntos: usa Circulo' : 'Agregar o seleccionar puntos'}
-              >
-                Punto
-              </button>
               <button className={`icon-tool ${diamViewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('pan')} disabled={!imageUrl} title="Mover vista">Mano</button>
-              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_dual_side_caliper' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_dual_side_caliper' })} disabled={!imageUrl} title="Linea que se corta con la mascara (D)">Linea mask</button>
-              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_line_direct_caliper' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('manual', { methodPanel: 'manual', methodId: 'manual_line_direct_caliper' })} disabled={!imageUrl} title="Linea 100% manual (X)">Linea manual</button>
-              <button className={`icon-tool ${diamViewerMode === 'circle' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('circle', { methodPanel: 'manual', methodId: 'circle_square_mask_diameter', forceManualCircleSeed: true })} disabled={!imageUrl} title="Dibujar circulo semilla (C)">Circulo</button>
+              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_dual_side_caliper' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('manual_dual_side_caliper')} disabled={!imageUrl} title="Linea que se corta con la mascara (D)">Linea mascara</button>
+              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_line_direct_caliper' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('manual_line_direct_caliper')} disabled={!imageUrl} title="Linea 100% manual (X)">Linea manual</button>
+              <button className={`icon-tool ${diamViewerMode === 'circle' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('circle_square_mask_diameter')} disabled={!imageUrl} title="Dibujar circulo semilla (C)">Circulo</button>
               <span className="toolbar-sep" />
-              <button className="icon-tool" onClick={undoDiameterManual} disabled={!diamManualHistory.length} title="Deshacer geometria manual (Ctrl+Z)">Undo</button>
-              <button className="icon-tool" onClick={redoDiameterManual} disabled={!diamManualFuture.length} title="Rehacer geometria manual (Ctrl+Y)">Redo</button>
+              <button className="icon-tool" onClick={undoDiameterManual} disabled={!diamManualHistory.length} title="Deshacer geometria manual (Ctrl+Z)">Deshacer</button>
+              <button className="icon-tool" onClick={redoDiameterManual} disabled={!diamManualFuture.length} title="Rehacer geometria manual (Ctrl+Y)">Rehacer</button>
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={() => zoomDiameterBy(0.84)} disabled={!imageUrl} title="Zoom menos">-</button>
               <button className="icon-tool" onClick={() => zoomDiameterBy(1.2)} disabled={!imageUrl} title="Zoom mas">+</button>
-              <button className="icon-tool" onClick={resetDiameterView} disabled={!imageUrl} title="Reset vista">Reset</button>
+              <button className="icon-tool" onClick={resetDiameterView} disabled={!imageUrl} title="Reiniciar vista">Reiniciar</button>
               <span className="zoom-chip">{Math.round(diamViewerZoom * 100)}%</span>
               <span className="toolbar-sep" />
-              <label className="mask-toggle">
-                <input
-                  type="radio"
-                  checked={diamMaskVisible}
-                  onChange={() => setDiamMaskVisible(true)}
-                  disabled={!diamVisualMaskUrl}
-                />
-                mascara
-              </label>
-              <label className="mask-toggle">
-                <input
-                  type="radio"
-                  checked={!diamMaskVisible}
-                  onChange={() => setDiamMaskVisible(false)}
-                />
-                sin mascara
-              </label>
               <label className="compact-slider mask-opacity-control">
                 transparencia
                 <input
@@ -9182,7 +10127,6 @@ export default function App() {
                   step="0.05"
                   value={diamMaskOpacity}
                   onChange={(e) => setDiamMaskOpacity(Number(e.target.value || 0.38))}
-                  disabled={!diamMaskVisible || !diamVisualMaskUrl}
                 />
                 <span>{Math.round(diamMaskOpacity * 100)}%</span>
               </label>
@@ -9191,7 +10135,6 @@ export default function App() {
               <div
                 ref={diameterStageRef}
                 className={`stage diameter-stage mode-${diamViewerMode} ${diamIsPanning ? 'is-panning' : ''} ${imageUrl ? 'has-image' : ''}`}
-                onClick={onDiameterStageClick}
                 onPointerDown={onDiameterPointerDown}
                 onPointerMove={onDiameterPointerMove}
                 onPointerUp={onDiameterPointerUp}
@@ -9211,7 +10154,7 @@ export default function App() {
                   >
                     <div className="diameter-raster-layer">
                       <img src={imageUrl} alt="diameter-base" draggable={false} />
-                      {diamMaskVisible && diamMaskLayerUrl ? (
+                      {diamMaskLayerUrl ? (
                         <img
                           src={diamMaskLayerUrl}
                           alt="mascara visual"
@@ -9375,7 +10318,6 @@ export default function App() {
                   <span>Vista: <strong>{diamResultsMode === 'composite' ? 'manual compuesta' : 'run'}</strong></span>
                   <span>Run: <strong>{diamActiveRunId || '-'}</strong></span>
                   <span>Metodo: <strong>{diamRunCache[diamActiveRunId]?.method_id || diamMethodId}</strong></span>
-                  <span>Fuente: <strong>{diamSourceMode}</strong></span>
                   <span>Soporte: <strong>{diamRunCache[diamActiveRunId]?.meta?.prior_run_id || diamPriorRunId}</strong></span>
                   <span>OK: <strong>{diamResults.filter((r) => r.status === 'ok').length}/{diamResults.length}</strong></span>
                 </div>
@@ -9575,8 +10517,8 @@ export default function App() {
               ) : null}
             </div>
           </article>
-          <article className={`card viewer loco-viewer ${workspaceTab === 'locoDataset' ? '' : 'hidden-panel'}`}>
-            <h2>Generate Dataset</h2>
+          <article className={`card viewer loco-viewer ${workspaceTab === 'locoDataset' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoDataset">
+            <h2>Generar Dataset</h2>
             <div className="viewer-toolbar loco-toolbar">
               <button className={`icon-tool ${locoDatasetTool === 'circle' ? 'toggle-active' : ''}`} onClick={() => setLocoDatasetTool('circle')} disabled={!imageUrl} title="Dibujar circulo"><ToolIcon name="circle" />Circulo</button>
               <button className={`icon-tool ${locoDatasetTool === 'select' ? 'toggle-active' : ''}`} onClick={() => setLocoDatasetTool('select')} disabled={!imageUrl} title="Seleccionar circulo"><ToolIcon name="center" />Seleccionar</button>
@@ -9584,7 +10526,7 @@ export default function App() {
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={() => zoomLocoDatasetBy(0.84)} disabled={!imageUrl}>-</button>
               <button className="icon-tool" onClick={() => zoomLocoDatasetBy(1.2)} disabled={!imageUrl}>+</button>
-              <button className="icon-tool" onClick={resetLocoDatasetView} disabled={!imageUrl}>Reset</button>
+              <button className="icon-tool" onClick={resetLocoDatasetView} disabled={!imageUrl}>Reiniciar</button>
               <span className="zoom-chip">{Math.round(locoDatasetZoom * 100)}%</span>
               <span className="toolbar-sep" />
               <button className={`icon-tool ${locoModelTool === 'exclude' ? 'toggle-active' : ''}`} onClick={() => setLocoModelTool((prev) => prev === 'exclude' ? 'pan' : 'exclude')} disabled={!imageUrl}>Excluir</button>
@@ -9596,7 +10538,7 @@ export default function App() {
               </label>
               <span className="toolbar-sep" />
               <button onClick={previewLocoDatasetFeatures} disabled={!locoDatasetCircles.length || loading.locoDataset}>Features</button>
-              <button className="primary" onClick={saveLocoDataset} disabled={!locoDatasetCircles.length || loading.locoDataset}>Generate Dataset</button>
+              <button className="primary" onClick={saveLocoDataset} disabled={!locoDatasetCircles.length || loading.locoDataset}>Generar Dataset</button>
               <button onClick={clearLocoDatasetCanvas} disabled={!locoDatasetCircles.length && !locoDatasetDraftCircle}>Limpiar imagen</button>
             </div>
 
@@ -9751,7 +10693,7 @@ export default function App() {
               </aside>
             </div>
           </article>
-          <article className={`card viewer loco-viewer ${workspaceTab === 'locoAugment' ? '' : 'hidden-panel'}`}>
+          <article className={`card viewer loco-viewer ${workspaceTab === 'locoAugment' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoAugment">
             <h2>Augmentation</h2>
             <div className="viewer-toolbar loco-toolbar">
               <label className="field inline-field">
@@ -9765,9 +10707,9 @@ export default function App() {
               <button onClick={() => setLocoAugPipeline((prev) => [...prev, defaultLocoAugBlock(locoAugBlockType)])}>Agregar bloque</button>
               <button onClick={() => setLocoAugPipeline((prev) => [...prev, ...locoAugVisibleBlockTypes.map((type) => defaultLocoAugBlock(type))])}>Agregar todos</button>
               <span className="toolbar-sep" />
-              <button onClick={previewLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length}>Preview selected</button>
-              <button className="primary" onClick={applyLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length || !locoAugItems.length}>Apply to all dataset</button>
-              <button onClick={clearLocoAugmented} disabled={loading.locoAugment || !(locoAugCounts.augmented_total > 0)}>Clear augmented</button>
+              <button onClick={previewLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length}>Previsualizar seleccion</button>
+              <button className="primary" onClick={applyLocoAugmentation} disabled={loading.locoAugment || !locoAugPipeline.length || !locoAugItems.length}>Aplicar a todo el dataset</button>
+              <button onClick={clearLocoAugmented} disabled={loading.locoAugment || !(locoAugCounts.augmented_total > 0)}>Limpiar augmentados</button>
               <button onClick={openLocoAugmentedFolder} disabled={loading.openFolder || !(String(locoAugInfo?.augmented_dir || '').trim() || (locoAugCounts.augmented_total > 0 && String(locoAugDatasetDir || '').trim()))}>Abrir carpeta augmented</button>
               <span className="zoom-chip">{Math.max(1, Number(locoAugPasses) || 1)} pasadas/img</span>
             </div>
@@ -9782,8 +10724,8 @@ export default function App() {
                         <div className="augment-block-head">
                           <strong>{idx + 1}. {locoAugBlockLabel(block.type)}</strong>
                           <span>
-                            <button onClick={() => moveLocoAugBlock(block.id, -1)} disabled={idx === 0}>â†‘</button>
-                            <button onClick={() => moveLocoAugBlock(block.id, 1)} disabled={idx === locoAugPipeline.length - 1}>â†“</button>
+                            <button onClick={() => moveLocoAugBlock(block.id, -1)} disabled={idx === 0}>↑</button>
+                            <button onClick={() => moveLocoAugBlock(block.id, 1)} disabled={idx === locoAugPipeline.length - 1}>↓</button>
                             <button onClick={() => removeLocoAugBlock(block.id)}>Eliminar</button>
                           </span>
                         </div>
@@ -9799,29 +10741,29 @@ export default function App() {
                           />
                         </label>
                         {block.type === 'rotate' ? (
-                          <label className="field"><span>random angles</span><input value={block.params?.angles || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), angles: e.target.value } })} /></label>
+                          <label className="field"><span>angulos aleatorios</span><input value={block.params?.angles || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), angles: e.target.value } })} /></label>
                         ) : null}
                         {block.type === 'flip' ? (
-                          <label className="field"><span>modes</span><input value={block.params?.modes || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), modes: e.target.value } })} /></label>
+                          <label className="field"><span>modos</span><input value={block.params?.modes || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), modes: e.target.value } })} /></label>
                         ) : null}
                         {block.type === 'morphology' ? (
-                          <label className="field"><span>ops</span><input value={block.params?.ops || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), ops: e.target.value } })} /></label>
+                          <label className="field"><span>operaciones</span><input value={block.params?.ops || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), ops: e.target.value } })} /></label>
                         ) : null}
                         {block.type === 'perturb' ? (
                           <>
-                            <label className="field"><span>amount min</span><input type="number" min="0" max="0.08" step="0.005" value={block.params?.amount_min ?? 0.005} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), amount_min: Number(e.target.value || 0.005) } })} /></label>
-                            <label className="field"><span>amount max</span><input type="number" min="0" max="0.08" step="0.005" value={block.params?.amount_max ?? 0.02} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), amount_max: Number(e.target.value || 0.02) } })} /></label>
+                            <label className="field"><span>cantidad min</span><input type="number" min="0" max="0.08" step="0.005" value={block.params?.amount_min ?? 0.005} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), amount_min: Number(e.target.value || 0.005) } })} /></label>
+                            <label className="field"><span>cantidad max</span><input type="number" min="0" max="0.08" step="0.005" value={block.params?.amount_max ?? 0.02} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), amount_max: Number(e.target.value || 0.02) } })} /></label>
                           </>
                         ) : null}
                         {block.type === 'resize_method' ? (
                           <>
-                            <label className="field"><span>methods</span><input value={block.params?.methods || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), methods: e.target.value } })} /></label>
-                            <label className="field"><span>size min</span><input type="number" min="24" max="63" value={block.params?.target_size_min ?? 40} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), target_size_min: Number(e.target.value || 40) } })} /></label>
-                            <label className="field"><span>size max</span><input type="number" min="24" max="63" value={block.params?.target_size_max ?? 56} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), target_size_max: Number(e.target.value || 56) } })} /></label>
+                            <label className="field"><span>metodos</span><input value={block.params?.methods || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), methods: e.target.value } })} /></label>
+                            <label className="field"><span>tamano min</span><input type="number" min="24" max="63" value={block.params?.target_size_min ?? 40} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), target_size_min: Number(e.target.value || 40) } })} /></label>
+                            <label className="field"><span>tamano max</span><input type="number" min="24" max="63" value={block.params?.target_size_max ?? 56} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), target_size_max: Number(e.target.value || 56) } })} /></label>
                           </>
                         ) : null}
                         {block.type === 'resolution' ? (
-                          <label className="field"><span>sizes</span><input value={block.params?.sizes || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), sizes: e.target.value } })} /></label>
+                          <label className="field"><span>tamanos</span><input value={block.params?.sizes || ''} onChange={(e) => updateLocoAugBlock(block.id, { params: { ...(block.params || {}), sizes: e.target.value } })} /></label>
                         ) : null}
                       </div>
                     ))}
@@ -9830,15 +10772,15 @@ export default function App() {
                 </section>
 
                 <section className="loco-lab-section">
-                  <h3>Dataset main</h3>
+                  <h3>Dataset principal</h3>
                   <div className="kpi-row">
-                    <span>Raw <strong>{locoAugCounts.total || 0}</strong></span>
-                    <span>Valid <strong>{locoAugCounts.valid || 0}</strong></span>
-                    <span>Invalid <strong>{locoAugCounts.invalid || 0}</strong></span>
+                    <span>Base <strong>{locoAugCounts.total || 0}</strong></span>
+                    <span>Validos <strong>{locoAugCounts.valid || 0}</strong></span>
+                    <span>Invalidos <strong>{locoAugCounts.invalid || 0}</strong></span>
                     <span>Aug <strong>{locoAugCounts.augmented_total || 0}</strong></span>
                     <span>Pasadas <strong>{locoAugPasses}</strong></span>
                   </div>
-                  <p className="small">Preview usa la selecciÃ³n. Apply procesa todo `main/valid` y `main/invalid`.</p>
+                  <p className="small">La vista previa usa la seleccion. Aplicar procesa todo `main/valid` y `main/invalid`.</p>
                 </section>
                 <section className="loco-lab-section">
                   <h3>Fuente</h3>
@@ -9848,7 +10790,7 @@ export default function App() {
                       <option value="all">todas</option>
                       <option value="valid">valid</option>
                       <option value="invalid_crossing">crossing</option>
-                      <option value="invalid_other">other invalid</option>
+                      <option value="invalid_other">otro invalido</option>
                     </select>
                   </label>
                   <div className="kpi-row">
@@ -9885,19 +10827,19 @@ export default function App() {
                       {(entry.variants || []).map((variant, idx) => (
                         <figure key={`${entry.item?.item_id}-${idx}`} className="augment-card">
                           <img src={b64ToDataUrl(variant.image_b64, 'image/png')} alt="augmented" />
-                          <figcaption>{(variant.chain || []).filter((x) => x !== 'source').join(' â†’ ') || 'source'}</figcaption>
+                          <figcaption>{(variant.chain || []).filter((x) => x !== 'source').join(' → ') || 'source'}</figcaption>
                         </figure>
                       ))}
                     </div>
                   ))
                 ) : (
-                  <div className="placeholder">Selecciona una muestra y toca Preview selected.</div>
+                  <div className="placeholder">Selecciona una muestra y toca Previsualizar seleccion.</div>
                 )}
               </section>
             </div>
           </article>
-          <article className={`card viewer models-viewer ${workspaceTab === 'locoTraining' ? '' : 'hidden-panel'}`}>
-            <h2>Training</h2>
+          <article className={`card viewer models-viewer ${workspaceTab === 'locoTraining' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoTraining">
+            <h2>Entrenamiento</h2>
             <div className="training-workspace">
               <section className="training-section">
                 <h3>Batch actual</h3>
@@ -9909,7 +10851,7 @@ export default function App() {
                       <option value="1">top 1</option>
                       <option value="3">top 3</option>
                       <option value="5">top 5</option>
-                      <option value="all">all</option>
+                      <option value="all">todos</option>
                     </select>
                   </label>
                   <span className="zoom-chip">{locoTrainingVisibleBatchRows.length} filas</span>
@@ -9918,12 +10860,12 @@ export default function App() {
                   <table>
                     <thead>
                       <tr>
-                        <th>rank</th>
+                        <th>rango</th>
                         <th>trial</th>
                         <th>Macro-F1</th>
                         <th>delta</th>
                         <th>modelo</th>
-                        <th>accuracy</th>
+                        <th>exactitud</th>
                         <th>F1 valid</th>
                         <th>F1 crossing</th>
                         <th>F1 other</th>
@@ -10128,9 +11070,9 @@ export default function App() {
                     <p className="small">{locoTrainingResult.confusion_matrices[locoTrainingSelectedModel].reason}</p>
                   ) : (
                     <div className="confusion-grid">
-                      <span></span><strong>Pred invalid</strong><strong>Pred valid</strong>
-                      <strong>Real invalid</strong><span>{locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.tn ?? '-'}</span><span className="bad-cell">FP {locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.fp ?? '-'}</span>
-                      <strong>Real valid</strong><span className="bad-cell">FN {locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.fn ?? '-'}</span><span>{locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.tp ?? '-'}</span>
+                      <span></span><strong>Pred invalido</strong><strong>Pred valido</strong>
+                      <strong>Real invalido</strong><span>{locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.tn ?? '-'}</span><span className="bad-cell">FP {locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.fp ?? '-'}</span>
+                      <strong>Real valido</strong><span className="bad-cell">FN {locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.fn ?? '-'}</span><span>{locoTrainingResult.confusion_matrices?.[locoTrainingSelectedModel]?.tp ?? '-'}</span>
                     </div>
                   )}
                 </section>
@@ -10250,8 +11192,8 @@ export default function App() {
 
                 {/* â”€â”€ Section 6: Crossing rejection metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.crossing_metrics) && locoTrainingResult.crossing_metrics.length > 0 ? (
-                <TrainingDisclosure title="Crossing rejection metrics">
-                  <h3>Crossing rejection metrics</h3>
+                <TrainingDisclosure title="Metricas de rechazo de crossing">
+                  <h3>Metricas de rechazo de crossing</h3>
                   <div className="table-wrap model-table">
                     <table>
                       <thead><tr><th>model</th><th>crossing_total</th><th>crossing_rejected</th><th>accepted_as_valid</th><th>false_accept_rate</th><th>rejection_rate</th></tr></thead>
@@ -10274,8 +11216,8 @@ export default function App() {
 
                 {/* â”€â”€ Section 7: Combined decision thresholds grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.combined_decision_thresholds) && locoTrainingResult.combined_decision_thresholds.length > 0 ? (
-                <TrainingDisclosure title="Combined decision thresholds">
-                  <h3>Combined decision thresholds</h3>
+                <TrainingDisclosure title="Umbrales de decision combinada">
+                  <h3>Umbrales de decision combinada</h3>
                   <p className="small">valid_threshold (binary) &times; crossing_threshold (multiclass) &mdash; combined decision: binary_score {'>='} vt AND crossing_prob {'<='} ct</p>
                   <div className="table-wrap model-table">
                     <table>
@@ -10332,8 +11274,8 @@ export default function App() {
                 {/* â”€â”€ Section 9: Binary thresholds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {!locoTrainingIsMulticlassRun ? (<>
                 <>
-                <TrainingDisclosure title="Thresholds (binario)">
-                  <h3>Thresholds (binario)</h3>
+                <TrainingDisclosure title="Umbrales (binario)">
+                  <h3>Umbrales (binario)</h3>
                   <div className="table-wrap model-table">
                     <table>
                       <thead><tr><th>threshold</th><th>precision_valid</th><th>recall_valid</th><th>f1_valid</th><th>FP</th><th>FN</th></tr></thead>
@@ -10354,8 +11296,8 @@ export default function App() {
                 </TrainingDisclosure>
 
                 {/* â”€â”€ Section 10: Binary performance by radius â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-                <TrainingDisclosure title="Performance by radius size (binario)">
-                  <h3>Performance by radius size (binario)</h3>
+                <TrainingDisclosure title="Rendimiento por tamano de radio (binario)">
+                  <h3>Rendimiento por tamano de radio (binario)</h3>
                   <div className="table-wrap model-table">
                     <table>
                       <thead><tr><th>model</th><th>radius_group</th><th>n</th><th>precision_valid</th><th>recall_valid</th><th>f1_valid</th><th>FP</th><th>FN</th></tr></thead>
@@ -10381,8 +11323,8 @@ export default function App() {
                 </>
                 </>) : null}
                 {Array.isArray(locoTrainingResult?.multiclass_radius_group_metrics) && locoTrainingResult.multiclass_radius_group_metrics.length > 0 ? (
-                <TrainingDisclosure title="Performance by radius size (multiclase)">
-                  <h3>Performance by radius size (multiclase)</h3>
+                <TrainingDisclosure title="Rendimiento por tamano de radio (multiclase)">
+                  <h3>Rendimiento por tamano de radio (multiclase)</h3>
                   <div className="table-wrap model-table">
                     <table>
                       <thead><tr><th>model</th><th>radius_group</th><th>class</th><th>n</th><th>precision</th><th>recall</th><th>f1</th></tr></thead>
@@ -10407,7 +11349,7 @@ export default function App() {
                 {/* â”€â”€ Section 12: Binary error review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {!locoTrainingIsMulticlassRun ? (<>
                 <section className="training-section">
-                  <h3>Error Review (binario)</h3>
+                  <h3>Revision de errores (binario)</h3>
                   <div className="training-error-grid">
                     {locoTrainingErrors.slice(0, 80).map((err) => (
                       <figure key={`${err.model_id}-${err.item_id}-${err.error_type}`} className="augment-card">
@@ -10423,12 +11365,12 @@ export default function App() {
                 </>) : null}
                 {Array.isArray(locoTrainingResult?.error_review_multiclass) && locoTrainingResult.error_review_multiclass.length > 0 ? (
                 <section className="training-section">
-                  <h3>Error Review (multiclase)</h3>
+                  <h3>Revision de errores (multiclase)</h3>
                   <div className="filter-row">
                     <label className="field">
                       <span>class</span>
                       <select value={locoTrainingMcErrorClass} onChange={(e) => setLocoTrainingMcErrorClass(e.target.value)}>
-                        <option value="all">all</option>
+                        <option value="all">todos</option>
                         <option value="valid">valid</option>
                         <option value="invalid_crossing">invalid_crossing</option>
                         <option value="invalid_other">invalid_other</option>
@@ -10437,13 +11379,13 @@ export default function App() {
                     <label className="field">
                       <span>error type</span>
                       <select value={locoTrainingMcErrorType} onChange={(e) => setLocoTrainingMcErrorType(e.target.value)}>
-                        <option value="all">all</option>
+                        <option value="all">todos</option>
                         {[...new Set(locoTrainingResult.error_review_multiclass.map((r) => r.error_type))].map((t) => (
                           <option key={t} value={t}>{t}</option>
                         ))}
                       </select>
                     </label>
-                    <span className="chip">{locoTrainingMcErrors.length} errors</span>
+                    <span className="chip">{locoTrainingMcErrors.length} errores</span>
                   </div>
                   <div className="training-error-grid">
                     {locoTrainingMcErrors.slice(0, 80).map((err, i) => (
@@ -10465,12 +11407,12 @@ export default function App() {
                 {/* â”€â”€ Section 14: Combined decision error review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
                 {Array.isArray(locoTrainingResult?.error_review_combined) && locoTrainingResult.error_review_combined.length > 0 ? (
                 <section className="training-section">
-                  <h3>Error Review (decision combinada)</h3>
+                  <h3>Revision de errores (decision combinada)</h3>
                   <div className="filter-row">
                     <label className="field">
                       <span>class</span>
                       <select value={locoTrainingCombErrorClass} onChange={(e) => setLocoTrainingCombErrorClass(e.target.value)}>
-                        <option value="all">all</option>
+                        <option value="all">todos</option>
                         <option value="valid">valid</option>
                         <option value="invalid_crossing">invalid_crossing</option>
                         <option value="invalid_other">invalid_other</option>
@@ -10494,7 +11436,7 @@ export default function App() {
                         ))}
                       </select>
                     </label>
-                    <span className="chip">{locoTrainingCombErrors.length} errors</span>
+                    <span className="chip">{locoTrainingCombErrors.length} errores</span>
                   </div>
                   <div className="training-error-grid">
                     {locoTrainingCombErrors.slice(0, 80).map((err, i) => (
@@ -10515,13 +11457,13 @@ export default function App() {
               </>
               ) : (
                 <section className="training-section">
-                  <div className="placeholder">Configura Training en el panel izquierdo, ejecuta Train Models o selecciona una fila del batch actual.</div>
+                  <div className="placeholder">Configura Entrenamiento en el panel izquierdo, ejecuta Entrenar modelos o selecciona una fila del batch actual.</div>
                 </section>
               )}
             </div>
           </article>
-          <article className={`card viewer loco-viewer ${workspaceTab === 'locoTest' ? '' : 'hidden-panel'}`}>
-            <h2>Test circle model</h2>
+          <article className={`card viewer loco-viewer ${workspaceTab === 'locoTest' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoTest">
+            <h2>Probar modelo de circulos</h2>
             <div className="viewer-toolbar loco-toolbar">
               <button className={`icon-tool ${locoTestTool === 'circle' ? 'toggle-active' : ''}`} onClick={() => setLocoTestTool('circle')} disabled={!imageUrl} title="Dibujar circulo"><ToolIcon name="circle" />Circulo</button>
               <button className={`icon-tool ${locoTestTool === 'select' ? 'toggle-active' : ''}`} onClick={() => setLocoTestTool('select')} disabled={!imageUrl} title="Seleccionar circulo"><ToolIcon name="center" />Seleccionar</button>
@@ -10529,7 +11471,7 @@ export default function App() {
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={() => zoomLocoTestBy(0.84)} disabled={!imageUrl}>-</button>
               <button className="icon-tool" onClick={() => zoomLocoTestBy(1.2)} disabled={!imageUrl}>+</button>
-              <button className="icon-tool" onClick={resetLocoTestView} disabled={!imageUrl}>Reset</button>
+              <button className="icon-tool" onClick={resetLocoTestView} disabled={!imageUrl}>Reiniciar</button>
               <span className="zoom-chip">{Math.round(locoTestZoom * 100)}%</span>
               <span className="toolbar-sep" />
               <label className="compact-slider mask-opacity-control">
@@ -10537,7 +11479,7 @@ export default function App() {
                 <input type="range" min="0.05" max="0.9" step="0.05" value={diamMaskOpacity} onChange={(e) => setDiamMaskOpacity(Number(e.target.value || 0.38))} disabled={!diamVisualMaskUrl} />
                 <span>{Math.round(diamMaskOpacity * 100)}%</span>
               </label>
-              <button className="primary" onClick={predictLocoTestCircles} disabled={!locoTestCircles.length || loading.locoTest}>Predict circles</button>
+              <button className="primary" onClick={predictLocoTestCircles} disabled={!locoTestCircles.length || loading.locoTest}>Predecir circulos</button>
             </div>
 
             <div className="loco-workspace loco-lab-workspace">
@@ -10603,19 +11545,19 @@ export default function App() {
                       </svg>
                     </div>
                   </div>
-                ) : <div className="placeholder">Carga una imagen para testear cÃ­rculos.</div>}
+                ) : <div className="placeholder">Carga una imagen para testear circulos.</div>}
               </div>
 
               <aside className="loco-debug-panel loco-lab-panel">
                 <div className="loco-step-head">
-                  <strong>Resultado por cÃ­rculo</strong>
+                  <strong>Resultado por circulo</strong>
                   <span>{loading.locoTest ? 'prediciendo' : 'listo'}</span>
                 </div>
                 {locoTestResult ? (
                   <div className="loco-result-card">
                     <strong>{locoTestResult.model_id}</strong>
                     <span>{locoTestResult.training_run_id}</span>
-                    <p className="small">threshold {locoTestResult.threshold} | errores {locoTestErrors.length}{locoTestResult.has_multiclass ? ' | multiclase âœ“' : ''}</p>
+                    <p className="small">umbral {locoTestResult.threshold} | errores {locoTestErrors.length}{locoTestResult.has_multiclass ? ' | multiclase OK' : ''}</p>
                   </div>
                 ) : null}
                 <div className="loco-candidate-list">
@@ -10637,14 +11579,14 @@ export default function App() {
               </aside>
             </div>
           </article>
-          <article className={`card viewer loco-viewer ${workspaceTab === 'locoModel' ? '' : 'hidden-panel'}`}>
+          <article className={`card viewer loco-viewer ${workspaceTab === 'locoModel' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoModel">
             <h2>LOCO Detector</h2>
             <div className="viewer-toolbar loco-toolbar">
               <button className="icon-tool toggle-active" disabled={!imageUrl} title="Mover vista"><ToolIcon name="hand" />Mano</button>
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={() => zoomLocoModelBy(0.84)} disabled={!imageUrl}>-</button>
               <button className="icon-tool" onClick={() => zoomLocoModelBy(1.2)} disabled={!imageUrl}>+</button>
-              <button className="icon-tool" onClick={resetLocoModelView} disabled={!imageUrl}>Reset</button>
+              <button className="icon-tool" onClick={resetLocoModelView} disabled={!imageUrl}>Reiniciar</button>
               <span className="zoom-chip">{Math.round(locoModelZoom * 100)}%</span>
               <span className="toolbar-sep" />
               <label className="compact-slider mask-opacity-control">
@@ -10652,9 +11594,9 @@ export default function App() {
                 <input type="range" min="0.05" max="0.9" step="0.05" value={diamMaskOpacity} onChange={(e) => setDiamMaskOpacity(Number(e.target.value || 0.38))} disabled={!diamVisualMaskUrl} />
                 <span>{Math.round(diamMaskOpacity * 100)}%</span>
               </label>
-              <button className="primary" onClick={runLocoModelBaseDetector} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Run base</button>
-              <button onClick={applyLocoModelPendingFilters} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Apply pending</button>
-              <button onClick={measureLocoModelAccepted} disabled={!locoModelCanMeasure || loading.locoModel}>Run Diameter on Accepted</button>
+              <button className="primary" onClick={runLocoModelBaseDetector} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Ejecutar base</button>
+              <button onClick={applyLocoModelPendingFilters} disabled={!imageUrl || loading.locoModel || !locoModelRunId}>Aplicar pendientes</button>
+              <button onClick={measureLocoModelAccepted} disabled={!locoModelCanMeasure || loading.locoModel}>Ejecutar diametro en aceptados</button>
             </div>
 
             <div className="loco-workspace loco-lab-workspace">
@@ -10800,11 +11742,11 @@ export default function App() {
                   <span>Muestra <strong>{locoModelStageSummary?.sampled_candidates ?? locoModelStageSummary?.total_candidates ?? 0}</strong></span>
                   <span>Excluidos <strong>{locoModelStageSummary?.excluded_by_zone ?? 0}</strong></span>
                   <span>Base <strong>{locoModelStageSummary?.evaluated_candidates ?? 0}</strong></span>
-                  <span>Threshold <strong>{locoModelStageFlags.thresholdReady ? (locoModelStageSummary?.accepted_before_nms ?? 0) : '-'}</strong></span>
+                  <span>Umbral <strong>{locoModelStageFlags.thresholdReady ? (locoModelStageSummary?.accepted_before_nms ?? 0) : '-'}</strong></span>
                   <span>NMS <strong>{locoModelStageFlags.nmsReady ? (locoModelStageSummary?.accepted_after_nms ?? 0) : '-'}</strong></span>
                   <span>Spatial <strong>{locoModelStageFlags.spatialReady ? (locoModelStageSummary?.accepted_after_spatial ?? 0) : '-'}</strong></span>
                   <span>Rechazados <strong>{locoModelStageFlags.thresholdReady ? (locoModelStageSummary?.rejected_by_threshold ?? 0) : '-'}</strong></span>
-                  <span>Multiclase <strong>{locoModelResult?.has_multiclass ? 'âœ“' : 'âœ—'}</strong></span>
+                  <span>Multiclase <strong>{locoModelResult?.has_multiclass ? '✓' : '✗'}</strong></span>
                   {locoModelResult?.has_multiclass ? <span>cross th <strong>{Number(locoModelResult?.crossing_threshold || 0.5).toFixed(2)}</strong></span> : null}
                   <span>Etapa <strong>{locoModelStageFlags.resultStage || '-'}</strong></span>
                   <span>Estado <strong>{locoModelStageFlags.resultStale ? 'desactualizada' : 'vigente'}</strong></span>
@@ -10875,7 +11817,135 @@ export default function App() {
               </aside>
             </div>
           </article>
-          <article className={`card viewer models-viewer ${workspaceTab === 'models' ? '' : 'hidden-panel'}`}>
+          <article className={`card viewer models-viewer ${workspaceTab === 'projectTransfer' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-projectTransfer">
+            <div className="transfer-workspace">
+              <section className="transfer-section">
+                <div className="transfer-section-head">
+                  <div>
+                    <h2>Exportar proyecto</h2>
+                    <p>Genera un ZIP portátil con el trabajo de entrenamiento seleccionado.</p>
+                  </div>
+                  <button className="small-action" onClick={refreshTransferCatalog} disabled={loading.transferCatalog}>Refrescar</button>
+                </div>
+                <label className="transfer-master-check">
+                  <input type="checkbox" checked={transferAllSelected} onChange={(e) => toggleAllTransferCategories(e.target.checked)} />
+                  <strong>Todo</strong>
+                  <span>{transferSelectedFiles} archivos | {formatBytes(transferSelectedSize)}</span>
+                </label>
+                <div className="transfer-category-list">
+                  {transferCatalog.map((item) => (
+                    <label className="transfer-category-row" key={`transfer-export-${item.key}`}>
+                      <input type="checkbox" checked={!!transferSelection[item.key]} onChange={() => toggleTransferCategory(item.key)} />
+                      <span>
+                        <strong>{item.label}</strong>
+                        <em>{item.file_count || 0} archivos</em>
+                      </span>
+                      <b>{formatBytes(item.size_bytes)}</b>
+                    </label>
+                  ))}
+                </div>
+                {!transferCatalog.length ? <div className="placeholder small">Refresca para calcular el contenido disponible.</div> : null}
+                <div className="transfer-actions">
+                  <button className="primary" onClick={prepareProjectExport} disabled={loading.transferExport || !transferCatalog.some((item) => transferSelection[item.key])}>
+                    {loading.transferExport ? 'Generando ZIP...' : 'Generar ZIP'}
+                  </button>
+                </div>
+                {transferExportInfo ? (
+                  <div className="transfer-result">
+                    <strong>ZIP generado</strong>
+                    <span>{transferExportInfo.file_name}</span>
+                    <span>{transferExportInfo.file_count || 0} archivos | {formatBytes(transferExportInfo.size_bytes)}</span>
+                    <span>La descarga comenzó automáticamente.</span>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="transfer-section">
+                <div className="transfer-section-head">
+                  <div>
+                    <h2>Importar proyecto</h2>
+                    <p>Revisa el ZIP antes de agregar o reemplazar archivos locales.</p>
+                  </div>
+                </div>
+                <label className="field">
+                  <span>archivo ZIP</span>
+                  <input
+                    type="file"
+                    accept=".zip,application/zip"
+                    onChange={(e) => {
+                      setTransferImportFile(e.target.files?.[0] || null)
+                      setTransferImportInspection(null)
+                      setTransferImportResult(null)
+                    }}
+                  />
+                </label>
+                <button onClick={inspectProjectImport} disabled={!transferImportFile || loading.transferInspect || loading.transferApply}>
+                  {loading.transferInspect ? 'Revisando ZIP...' : 'Revisar contenido'}
+                </button>
+                {transferImportInspection?.summary ? (
+                  <div className="transfer-inspection">
+                    <div className="transfer-summary">
+                      <span>Nuevos <strong>{transferImportInspection.summary.new_count || 0}</strong></span>
+                      <span>Conflictos <strong>{transferImportInspection.summary.conflict_count || 0}</strong></span>
+                      <span>Total <strong>{transferImportInspection.summary.file_count || 0}</strong></span>
+                      <span>Tamano <strong>{formatBytes(transferImportInspection.summary.size_bytes)}</strong></span>
+                    </div>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>categoria</th>
+                            <th>archivos</th>
+                            <th>nuevos</th>
+                            <th>conflictos</th>
+                            <th>tamano</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(transferImportInspection.summary.categories || []).map((item) => (
+                            <tr key={`transfer-import-${item.key}`}>
+                              <td>
+                                <strong>{item.label}</strong>
+                                {item.conflicts?.length ? (
+                                  <details className="transfer-conflicts">
+                                    <summary>ver archivos existentes</summary>
+                                    <div>{item.conflicts.map((path) => <span key={path}>{path}</span>)}</div>
+                                  </details>
+                                ) : null}
+                              </td>
+                              <td>{item.file_count || 0}</td>
+                              <td>{item.new_count || 0}</td>
+                              <td>{item.conflict_count || 0}</td>
+                              <td>{formatBytes(item.size_bytes)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="small">La importación solo agrega archivos del ZIP. Los archivos locales que no aparecen en el paquete se mantienen intactos.</p>
+                    {Number(transferImportInspection.summary.conflict_count || 0) > 0 ? (
+                      <div className="transfer-actions split">
+                        <button onClick={() => applyProjectImport(false)} disabled={loading.transferApply}>Importar conservando existentes</button>
+                        <button className="primary" onClick={() => applyProjectImport(true)} disabled={loading.transferApply}>Importar y sobrescribir conflictos</button>
+                      </div>
+                    ) : (
+                      <button className="primary" onClick={() => applyProjectImport(false)} disabled={loading.transferApply}>Importar archivos</button>
+                    )}
+                  </div>
+                ) : null}
+                {transferImportResult ? (
+                  <div className="transfer-result">
+                    <strong>Importacion completada</strong>
+                    <span>Importados: {transferImportResult.imported_count || 0}</span>
+                    <span>Reemplazados: {transferImportResult.replaced_count || 0}</span>
+                    <span>Conservados: {transferImportResult.skipped_count || 0}</span>
+                    <button onClick={() => window.location.reload()}>Recargar interfaz</button>
+                  </div>
+                ) : null}
+              </section>
+            </div>
+          </article>
+          <article className={`card viewer models-viewer ${workspaceTab === 'models' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-models">
             <div className="model-workspace">
               <section>
                 <h2>Dataset y modelos de asistencia</h2>

@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8011
+      DEV_RELOAD: "false"
+    ports:
+      - "${DOCKER_BACKEND_PORT:-8011}:8011"
+    volumes:
+      - loco_outputs:/app/outputs
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8011/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE: "${DOCKER_VITE_API_BASE:-http://localhost:8011}"
+    ports:
+      - "${DOCKER_FRONTEND_PORT:-5178}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  loco_outputs:

@@ -60,7 +60,7 @@ def test_api_flow_run_review_export(tmp_path, monkeypatch) -> None:
 
     cat = c.get('/api/experiments/catalog')
     assert cat.status_code == 200
-    assert len(cat.json()['payload']['experiments']) == 9
+    assert len(cat.json()['payload']['experiments']) == 8
 
     img = _img(96)
     ok, buf = cv2.imencode('.png', img)

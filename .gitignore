@@ -36,8 +36,7 @@ data/reports/
 catboost_info/
 
 # Environment
-.env
-.env.local
+.env*
 
 # CodeGraph index
 .codegraph/
@@ -45,6 +44,9 @@ catboost_info/
 # Test cache
 .pytest_cache/
 .mypy_cache/
+
+# Internal plans
+plans/
 
 # Images (sample/test images — not part of source)
 img/
@@ -55,7 +57,6 @@ img/
 # Roo / agent config
 .roo/
 .kilo/
-AGENT.md
 
 # Generated outputs (user data — images, runs, models, scribbles)
 outputs/

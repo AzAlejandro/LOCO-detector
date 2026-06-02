@@ -6,7 +6,6 @@ from .base import ExperimentInfo, ExperimentOutput, RunContext
 from .helpers import (
     threshold_and_clean,
     tree_pixel_prior,
-    unet_small_patch_prior,
 )
 
 
@@ -169,25 +168,6 @@ class ClassifierMorphMinExperiment:
         return ExperimentOutput(prior_map=prior, mask=mask, meta=meta, status_level='success', prob_maps=prob_maps)
 
 
-class UnetSmallPatchExperiment:
-    info = ExperimentInfo(
-        experiment_id='unet_small_patch',
-        group='E',
-        display_name='U-Net pequena por parches',
-        description='Inferencia con checkpoint local; fallback a clasico si no hay checkpoint.',
-        default_params={'checkpoint_path': '', 'threshold': 0.5},
-        implementation_status='fallback',
-        requirements_hint='torch + checkpoint_path valido',
-    )
-
-    def run(self, ctx: RunContext) -> ExperimentOutput:
-        t0 = perf_counter()
-        prior, meta = unet_small_patch_prior(ctx.image_rgb, ctx.labels, params=ctx.params)
-        mask = threshold_and_clean(prior, thr=float(ctx.params.get('threshold', 0.5)), closing_radius=1, min_hole_area=40)
-        meta.update({'runtime_ms': (perf_counter() - t0) * 1000.0})
-        return ExperimentOutput(prior_map=prior, mask=mask, meta=meta, status_level=_status_from_meta(meta))
-
-
 class AssistModelPredictExperiment:
     """Placeholder experiment for predictions made via the 'Predecir mascara' button.
     The actual prediction is handled by assist_models.predict_mask(); this entry
@@ -214,6 +194,5 @@ def build_default_experiments() -> list:
         ExtraTreesBalancedExperiment(),
         ContextFeaturesExperiment(),
         ClassifierMorphMinExperiment(),
-        UnetSmallPatchExperiment(),
         AssistModelPredictExperiment(),
     ]

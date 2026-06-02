@@ -4,8 +4,6 @@
 # - Never kill the current PowerShell process
 # - Never kill by process name alone (python.exe, node.exe, etc.)
 # - Only kill if the process command line contains the LOCO-detector project path
-# - Never touch ComfyUI port 8188
-
 $ErrorActionPreference = 'Stop'
 
 # --- Resolve project directory ---
@@ -42,7 +40,6 @@ if (Test-Path $ENV_PATH) {
 
 Write-Host "  Backend port : $BACKEND_PORT" -ForegroundColor Cyan
 Write-Host "  Frontend port: $FRONTEND_PORT" -ForegroundColor Cyan
-Write-Host "  ComfyUI port : 8188 (NOT TOUCHED)" -ForegroundColor Green
 Write-Host ""
 
 # --- Helper: get process info by PID ---

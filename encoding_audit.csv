@@ -59,6 +59,12 @@ frontend/index.html,text,utf-8,false,false,ok,Matches repository standard UTF-8 
 frontend/nginx.conf,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 frontend/package-lock.json,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 frontend/package.json,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
+frontend/public/fonts/HankenGrotesk-Variable.ttf,binary,binary-or-unknown,false,true,skip_binary,Excluded from text normalization.
+frontend/public/fonts/JetBrainsMono-Variable.ttf,binary,binary-or-unknown,false,true,skip_binary,Excluded from text normalization.
+frontend/public/icons/MaterialSymbolsOutlined.woff2,binary,binary-or-unknown,false,true,skip_binary,Excluded from text normalization.
+frontend/public/licenses/HankenGrotesk-OFL.txt,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
+frontend/public/licenses/JetBrainsMono-OFL.txt,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
+frontend/public/licenses/MaterialSymbols-Apache-2.0.txt,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 frontend/public/tutorial/bad-example.jpg,binary,binary-or-unknown,false,true,skip_binary,Excluded from text normalization.
 frontend/public/tutorial/overview-reference.png,binary,binary-or-unknown,false,true,skip_binary,Excluded from text normalization.
 frontend/src/api.js,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
@@ -84,6 +90,7 @@ plans/gui-navigation-redesign.md,text,utf-8,false,false,ok,Matches repository st
 plans/model-prediction-and-curtain-improvements.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 plans/multi-origin-scribble-drafts.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 plans/origin-selection-in-dataset-grid.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
+plans/rediseño-interfaz-bitacora.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 plans/robust-server-startup-shutdown.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 plans/scribble-grid-debugging-plan.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.
 plans/scribble-grid-preview-redesign.md,text,utf-8,false,false,ok,Matches repository standard UTF-8 without BOM.

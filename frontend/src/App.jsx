@@ -270,7 +270,7 @@ const REVIEW_TIERS = [
   { value: 'unusable', label: 'Inutilizable', short: 'X' },
 ]
 
-const REVIEW_RANK = { s: 5, a: 4, ok: 4, b: 3, c: 2, bad: 1, unusable: 0 }
+const NEXT_STEP_REVIEW_DECISIONS = new Set(['s', 'a'])
 
 const LOCO_STEPS = [
   { key: 'image', label: 'Imagen' },
@@ -563,6 +563,29 @@ function reviewLabel(value) {
   return ''
 }
 
+function isNextStepReviewDecision(value) {
+  return NEXT_STEP_REVIEW_DECISIONS.has(String(value || '').toLowerCase())
+}
+
+function latestReviewMap(items = []) {
+  const out = {}
+  ;(Array.isArray(items) ? items : []).forEach((item) => {
+    const runId = String(item?.run_id || '')
+    if (runId && !out[runId]) out[runId] = item
+  })
+  return out
+}
+
+function runsApprovedForNextSteps(runItems = [], reviewItems = []) {
+  const reviewMap = latestReviewMap(reviewItems)
+  return (Array.isArray(runItems) ? runItems : []).reduce((out, run) => {
+    const review = reviewMap[String(run?.run_id || '')] || null
+    if (!isNextStepReviewDecision(review?.decision)) return out
+    out.push({ ...run, review_decision: review.decision, review_note: review.note || '' })
+    return out
+  }, [])
+}
+
 function CurtainCompare({ title, subtitle, baseUrl, maskUrl, maskClassName = '', persistOnSourceChange = false }) {
   const stageRef = useRef(null)
   const panRef = useRef({ dragging: false, x: 0, y: 0 })
@@ -778,7 +801,6 @@ export default function App() {
   const locoModelExcludeDragRef = useRef({ dragging: false, start: null, index: -1 })
   const locoModelExcludeRectsRef = useRef([])
   const pointReviewPanRef = useRef({ dragging: false, x: 0, y: 0 })
-  const filterFocusRef = useRef(null)
   const localObjectUrlRef = useRef('')
   const loadReqIdRef = useRef(0)
   const scribbleAutosaveDirtyRef = useRef(false)
@@ -821,6 +843,7 @@ export default function App() {
   const [selectedGridOrigin, setSelectedGridOrigin] = useState({})
   const [contextMenu, setContextMenu] = useState(null)
   const [maskRunListByImage, setMaskRunListByImage] = useState({})
+  const [approvedMaskRunListByImage, setApprovedMaskRunListByImage] = useState({})
   const [maskIndexByImage, setMaskIndexByImage] = useState({})
   const [maskThumbByRun, setMaskThumbByRun] = useState({})
   const [circleTypeCounts, setCircleTypeCounts] = useState({})
@@ -892,6 +915,56 @@ export default function App() {
         }))
       }
     } catch {}
+  }
+
+  async function refreshMaskRunsForImages(items = []) {
+    const imageItems = (Array.isArray(items) ? items : [])
+      .filter((img) => img?.image_id)
+    if (!imageItems.length) return
+    const entries = await Promise.allSettled(imageItems.map(async (img) => {
+      const imageKey = String(img.image_id)
+      const res = await apiGet(`/api/results/list?image_id=${encodeURIComponent(imageKey)}`)
+      const runs = Array.isArray(res?.payload?.items) ? res.payload.items : []
+      return [imageKey, runs]
+    }))
+    const next = {}
+    const firstThumbs = []
+    entries.forEach((entry) => {
+      if (entry.status !== 'fulfilled') return
+      const [imageKey, runs] = entry.value
+      next[imageKey] = runs
+      const firstRunId = runs[0]?.run_id
+      if (firstRunId) firstThumbs.push(fetchMaskThumbForRun(firstRunId))
+    })
+    setMaskRunListByImage((prev) => ({ ...prev, ...next }))
+    if (firstThumbs.length) await Promise.allSettled(firstThumbs)
+  }
+
+  async function refreshApprovedMaskRunsForImages(items = []) {
+    const imageItems = (Array.isArray(items) ? items : [])
+      .filter((img) => img?.image_id && img.mask_thumbnail_b64)
+    if (!imageItems.length) return
+    const entries = await Promise.allSettled(imageItems.map(async (img) => {
+      const imageKey = String(img.image_id)
+      const [runRes, reviewRes] = await Promise.all([
+        apiGet(`/api/results/list?image_id=${encodeURIComponent(imageKey)}`),
+        apiGet(`/api/review/list?image_id=${encodeURIComponent(imageKey)}`),
+      ])
+      const runItems = Array.isArray(runRes?.payload?.items) ? runRes.payload.items : []
+      const reviewItems = Array.isArray(reviewRes?.payload?.items) ? reviewRes.payload.items : []
+      return [imageKey, runsApprovedForNextSteps(runItems, reviewItems)]
+    }))
+    const next = {}
+    const firstThumbs = []
+    entries.forEach((entry) => {
+      if (entry.status !== 'fulfilled') return
+      const [imageKey, approvedRuns] = entry.value
+      next[imageKey] = approvedRuns
+      const firstRunId = approvedRuns[0]?.run_id
+      if (firstRunId) firstThumbs.push(fetchMaskThumbForRun(firstRunId))
+    })
+    setApprovedMaskRunListByImage((prev) => ({ ...prev, ...next }))
+    if (firstThumbs.length) await Promise.allSettled(firstThumbs)
   }
 
   function maskPrev(imageId) {
@@ -999,10 +1072,6 @@ export default function App() {
   const [workbenchPanelTab, setWorkbenchPanelTab] = useState('image') // image | editor | experiments
   const [batchProgress, setBatchProgress] = useState({ active: false, done: 0, total: 0, current: '' })
 
-  const [filterGroup, setFilterGroup] = useState('all')
-  const [filterExperiment, setFilterExperiment] = useState('all')
-  const [filterDecision, setFilterDecision] = useState('all')
-  const [reviewSort, setReviewSort] = useState('latest')
 
   const [tool, setTool] = useState('fiber')
   const [brushSize, setBrushSize] = useState(16)
@@ -1024,7 +1093,6 @@ export default function App() {
 
   const [reviewNote, setReviewNote] = useState('')
   const [reviews, setReviews] = useState([])
-  const [reportInfo, setReportInfo] = useState(null)
 
   const [diamMethodId, setDiamMethodId] = useState('circle_square_mask_diameter')
   const diamSourceMode = 'prior_mask'
@@ -1268,32 +1336,16 @@ export default function App() {
   }, [reviews])
 
   const filteredRuns = useMemo(() => {
-    const out = runs.filter((r) => {
+    return runs.filter((r) => {
       const exp = experimentsById[r.experiment_id] || {}
-      if (!exp.experiment_id) return false
-      const group = r.group || exp.group || ''
-      if (filterGroup !== 'all' && group !== filterGroup) return false
-      if (filterExperiment !== 'all' && r.experiment_id !== filterExperiment) return false
-
-      if (filterDecision !== 'all') {
-        const d = String((reviewByRun[r.run_id] || {}).decision || '').toLowerCase()
-        if (filterDecision === 'unreviewed' && d) return false
-        if (filterDecision !== 'unreviewed' && d !== filterDecision) return false
-      }
-      return true
+      return !!exp.experiment_id
     })
-    if (reviewSort === 'tier') {
-      out.sort((a, b) => {
-        const da = String((reviewByRun[a.run_id] || {}).decision || '').toLowerCase()
-        const db = String((reviewByRun[b.run_id] || {}).decision || '').toLowerCase()
-        const ra = REVIEW_RANK[da] ?? -1
-        const rb = REVIEW_RANK[db] ?? -1
-        if (rb !== ra) return rb - ra
-        return String(b.created_at || '').localeCompare(String(a.created_at || ''))
-      })
-    }
-    return out
-  }, [runs, experimentsById, filterGroup, filterExperiment, filterDecision, reviewByRun, reviewSort])
+  }, [runs, experimentsById])
+
+  const nextStepRuns = useMemo(
+    () => runs.filter((r) => isNextStepReviewDecision(reviewByRun[String(r.run_id || '')]?.decision)),
+    [runs, reviewByRun],
+  )
 
   useEffect(() => {
     if (!filteredRuns.length) {
@@ -1303,6 +1355,13 @@ export default function App() {
     const hasActive = filteredRuns.some((r) => r.run_id === activeRunId)
     if (!hasActive) setActiveRunId(filteredRuns[0].run_id)
   }, [filteredRuns, activeRunId])
+
+  useEffect(() => {
+    if (diamPriorRunId === 'latest') return
+    if (!nextStepRuns.some((r) => r.run_id === diamPriorRunId)) {
+      setDiamPriorRunId('latest')
+    }
+  }, [diamPriorRunId, nextStepRuns])
 
   const activeRun = runCache[activeRunId] || null
   const activeIndex = useMemo(() => filteredRuns.findIndex((r) => r.run_id === activeRunId), [filteredRuns, activeRunId])
@@ -1314,11 +1373,11 @@ export default function App() {
     return !rectRoughEqual(activeRunExclude, excludeRect)
   }, [activeRun, activeRunExclude, excludeRect])
   const diamVisualMaskUrl = useMemo(() => {
-    const priorRunId = diamPriorRunId === 'latest' ? (runs[0]?.run_id || '') : diamPriorRunId
+    const priorRunId = diamPriorRunId === 'latest' ? (nextStepRuns[0]?.run_id || '') : diamPriorRunId
     const priorRun = priorRunId ? runCache[priorRunId] : null
     if (priorRun?.mask_b64) return b64ToDataUrl(priorRun.mask_b64)
     return ''
-  }, [diamPriorRunId, runs, runCache])
+  }, [diamPriorRunId, nextStepRuns, runCache])
   const trainImageIds = useMemo(
     () => Object.keys(selectedTrainImages).filter((k) => selectedTrainImages[k]),
     [selectedTrainImages],
@@ -3165,14 +3224,6 @@ export default function App() {
       } else if (k === 'u' || k === 'U') {
         ev.preventDefault()
         mark('unusable')
-      } else if (k === 'r' || k === 'R') {
-        ev.preventDefault()
-        setFilterGroup('all')
-        setFilterExperiment('all')
-        setFilterDecision('all')
-      } else if (k === 'f' || k === 'F') {
-        ev.preventDefault()
-        filterFocusRef.current?.focus()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -3568,6 +3619,8 @@ export default function App() {
             } catch {}
           })
         void Promise.allSettled(ctFetches)
+        void refreshMaskRunsForImages(items)
+        void refreshApprovedMaskRunsForImages(items)
         const locoFetches = items
           .filter((img) => img.mask_thumbnail_b64)
           .map(async (img) => {
@@ -3872,19 +3925,11 @@ export default function App() {
           await Promise.allSettled(fetches)
         }
         console.log(`[DBG-FETCH] refreshModelDataset: all pre-fetches completed`)
-        // Pre-fetch mask run lists and first thumb for each image
-        const maskFetches = items.map(async (item) => {
-          try {
-            const runRes = await apiGet(`/api/results/list?image_id=${encodeURIComponent(item.image_id)}`)
-            const runItems = Array.isArray(runRes?.payload?.items) ? runRes.payload.items : []
-            if (runItems.length > 0) {
-              setMaskRunListByImage(prev => ({ ...prev, [item.image_id]: runItems }))
-              const firstRunId = runItems[0].run_id
-              await fetchMaskThumbForRun(firstRunId)
-            }
-          } catch {}
-        })
-        await Promise.allSettled(maskFetches)
+        // Pre-fetch all masks for the assist-model dataset, and approved masks for downstream flows.
+        await Promise.allSettled([
+          refreshMaskRunsForImages(items),
+          refreshApprovedMaskRunsForImages(items),
+        ])
         // Pre-fetch circle type counts per image
         const countFetches = items.map(async (item) => {
           try {
@@ -4185,7 +4230,6 @@ export default function App() {
     setRunCache({})
     setActiveRunId('')
     setReviews([])
-    setReportInfo(null)
     setDiamPoints([])
     setDiamActivePointIdx(-1)
     setDiamOverlayUrl('')
@@ -4226,10 +4270,6 @@ export default function App() {
       notes: '',
       result_comment: '',
     })
-    setFilterGroup('all')
-    setFilterExperiment('all')
-    setFilterDecision('all')
-    setReviewSort('latest')
     setModelPrediction(null)
     setLocoModelResult(null)
     setLocoModelMeasurement(null)
@@ -4329,9 +4369,9 @@ export default function App() {
   }, [activeRunId])
 
   useEffect(() => {
-    const priorRunId = diamPriorRunId === 'latest' ? (runs[0]?.run_id || '') : diamPriorRunId
+    const priorRunId = diamPriorRunId === 'latest' ? (nextStepRuns[0]?.run_id || '') : diamPriorRunId
     if (priorRunId) loadRunIfNeeded(priorRunId)
-  }, [diamPriorRunId, runs])
+  }, [diamPriorRunId, nextStepRuns])
 
   useEffect(() => {
     if (diamActiveRunId && diamResultsMode === 'run') loadDiameterRun(diamActiveRunId)
@@ -4378,19 +4418,6 @@ export default function App() {
     })
   }
 
-  async function exportReport() {
-    if (!imageId) return
-    await withLoad('export', async () => {
-      try {
-        const res = await apiGet(`/api/reports/export?image_id=${encodeURIComponent(imageId)}`)
-        setReportInfo(res?.payload || null)
-        toast('success', 'Reporte', 'CSV + JSON + galeria generados.')
-      } catch (err) {
-        toast('error', 'Reporte', errMsg(err))
-      }
-    })
-  }
-
   async function clearReviewResults() {
     if (!sessionId || !imageId) return
     const ok = window.confirm('Borrar todos los resultados de segmentacion y revisiones de esta imagen? No borra la imagen ni los scribbles.')
@@ -4405,7 +4432,6 @@ export default function App() {
         setRunCache({})
         setActiveRunId('')
         setReviews([])
-        setReportInfo(null)
         setDiamPriorRunId('latest')
         await refreshSavedImages()
         toast('success', 'Resultados', `${res?.payload?.deleted_count || 0} runs borrados.`)
@@ -8019,16 +8045,10 @@ export default function App() {
     return row ? (reviewLabel(row.decision) || String(row.decision || '').toUpperCase()) : ''
   }, [reviewByRun, activeRunId])
 
-  const groups = useMemo(() => {
-    const s = new Set()
-    experiments.forEach((e) => s.add(e.group))
-    return Array.from(s).sort()
-  }, [experiments])
-
   const selectedPriorRun = useMemo(() => {
-    if (diamPriorRunId === 'latest') return runs[0] || null
-    return runs.find((r) => r.run_id === diamPriorRunId) || null
-  }, [runs, diamPriorRunId])
+    if (diamPriorRunId === 'latest') return nextStepRuns[0] || null
+    return nextStepRuns.find((r) => r.run_id === diamPriorRunId) || null
+  }, [nextStepRuns, diamPriorRunId])
 
   const annotBrushPx = useMemo(() => {
     const base = Math.max(1, Number(brushSize) || 1)
@@ -8250,9 +8270,15 @@ export default function App() {
     [locoTrainingResult],
   )
   const locoMaskedSavedImages = useMemo(
-    () => savedImages.filter((img) => img.mask_thumbnail_b64),
-    [savedImages],
+    () => savedImages.filter((img) => img.mask_thumbnail_b64 && (approvedMaskRunListByImage[String(img.image_id || '')] || []).length > 0),
+    [savedImages, approvedMaskRunListByImage],
   )
+  function approvedMaskReviewLabel(imageIdValue) {
+    const imageKey = String(imageIdValue || '')
+    const approvedRuns = approvedMaskRunListByImage[imageKey] || []
+    const idx = clamp(Number(maskIndexByImage[imageKey] || 0), 0, Math.max(0, approvedRuns.length - 1))
+    return reviewLabel(approvedRuns[idx]?.review_decision)
+  }
   const locoTestSelectedSavedModel = useMemo(
     () => locoSavedModels.find((m) => m.saved_model_id === locoTestTrainingRunId) || null,
     [locoSavedModels, locoTestTrainingRunId],
@@ -8439,11 +8465,14 @@ export default function App() {
     <div className="app">
       <OriginToast />
       <header className="top">
-        <div>
-          <h1>Scribble Research</h1>
-          <p>Comparacion secuencial rapida A-E con descarte OK/BAD</p>
+        <div className="top-copy">
+          <h1>LOCO Scribble Research</h1>
+          <p className="top-subtitle"><strong>LO</strong>cal <strong>C</strong>ircle <strong>O</strong>perator</p>
         </div>
-        <div className="session">Sesion: <strong>{sessionId || '-'}</strong></div>
+        <div className="session">
+          <span>Sesion</span>
+          <strong>{sessionId || '-'}</strong>
+        </div>
       </header>
 
       <div className={`notice ${notice.level}`}>
@@ -8634,63 +8663,67 @@ export default function App() {
               </section>
                 </>
               ) : workbenchPanelTab === 'editor' ? (
-                <section className="card scribble-controls-card">
-                  <h2>Editor de scribbles</h2>
-                  {scribbleTutorialExercise.active ? (
-                    <div className="scribble-tutorial-exercise" data-tour="scribble-tutorial-exercise">
-                      <strong>Ejercicio guiado</strong>
-                      <span>Completa los hitos para continuar.</span>
-                      <div className="scribble-tutorial-checklist">
-                        {scribbleTutorialChecklist.map(([label, done]) => (
-                          <span className={done ? 'done' : ''} key={label}>{done ? 'Listo' : 'Pendiente'}: {label}</span>
-                        ))}
+                <>
+                  <section className="card scribble-controls-card">
+                    <h2>Editor de scribbles</h2>
+                    {scribbleTutorialExercise.active ? (
+                      <div className="scribble-tutorial-exercise" data-tour="scribble-tutorial-exercise">
+                        <strong>Ejercicio guiado</strong>
+                        <span>Completa los hitos para continuar.</span>
+                        <div className="scribble-tutorial-checklist">
+                          {scribbleTutorialChecklist.map(([label, done]) => (
+                            <span className={done ? 'done' : ''} key={label}>{done ? 'Listo' : 'Pendiente'}: {label}</span>
+                          ))}
+                        </div>
+                        <button className="primary" onClick={continueScribbleDrawingTutorial} disabled={!scribbleTutorialReady}>
+                          Continuar tutorial
+                        </button>
                       </div>
-                      <button className="primary" onClick={continueScribbleDrawingTutorial} disabled={!scribbleTutorialReady}>
-                        Continuar tutorial
-                      </button>
+                    ) : null}
+                    <div className="tool-row" data-tour="scribble-mode-tools">
+                      <button className={`icon-tool tool-square ${viewerMode === 'mark' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('mark')} disabled={!imageUrl} title="Lapiz (L)"><ToolIcon name="pencil" /><kbd>L</kbd></button>
+                      <button className={`icon-tool tool-square ${viewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('pan')} disabled={!imageUrl} title="Mano (M)"><ToolIcon name="hand" /><kbd>M</kbd></button>
+                      <button className={`icon-tool tool-square ${viewerMode === 'exclude' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('exclude')} disabled={!imageUrl} title="Rectangulo de exclusion (R)"><ToolIcon name="exclude" /><kbd>R</kbd></button>
                     </div>
-                  ) : null}
-                  <div className="tool-row" data-tour="scribble-mode-tools">
-                    <button className={`icon-tool tool-square ${viewerMode === 'mark' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('mark')} disabled={!imageUrl} title="Lapiz (L)"><ToolIcon name="pencil" /><kbd>L</kbd></button>
-                    <button className={`icon-tool tool-square ${viewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('pan')} disabled={!imageUrl} title="Mano (M)"><ToolIcon name="hand" /><kbd>M</kbd></button>
-                    <button className={`icon-tool tool-square ${viewerMode === 'exclude' ? 'toggle-active' : ''}`} onClick={() => setViewerMode('exclude')} disabled={!imageUrl} title="Rectangulo de exclusion (R)"><ToolIcon name="exclude" /><kbd>R</kbd></button>
-                  </div>
-                  <div className="paint-grid compact" data-tour="scribble-paint-tools">
-                    <button className={`paint-tool ${tool === 'fiber' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('fiber') }} disabled={!imageUrl}><span className="color-dot fiber" />Fibra <kbd>F</kbd></button>
-                    <button className={`paint-tool ${tool === 'halo' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('halo') }} disabled={!imageUrl}><span className="color-dot halo" />Halo <kbd>H</kbd></button>
-                    <button className={`paint-tool ${tool === 'bg' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('bg') }} disabled={!imageUrl}><span className="color-dot bg" />Background <kbd>B</kbd></button>
-                    <button data-tour="scribble-tool-erase" className={`paint-tool ${tool === 'erase' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('erase') }} disabled={!imageUrl}><ToolIcon name="erase" />Goma <kbd>G</kbd></button>
-                  </div>
-                  <div className="brush-panel" data-tour="scribble-brush-control">
-                    <label className="brush-toolbar-control wide">
-                      <span>Pincel</span>
-                      <input type="range" min="1" max="120" value={brushSliderValue} onChange={(e) => setBrushSize(brushSliderToPx(e.target.value))} disabled={!imageUrl} />
-                      <strong>{annotBrushPx}px</strong>
-                    </label>
-                    <button className={`icon-tool ${brushAutoScale ? 'toggle-active' : ''}`} onClick={() => setBrushAutoScale((v) => !v)} disabled={!imageUrl} title="Escalado automatico por resolucion">Auto</button>
-                    <label className="cursor-color-picker" title="Color del cursor">
-                      <input
-                        type="color"
-                        value={cursorColor}
-                        onChange={(e) => setCursorColor(e.target.value)}
-                        disabled={!imageUrl}
-                      />
-                    </label>
-                  </div>
-                  <div className="shortcut-note">Ctrl + rueda hace zoom en la imagen. Alt + rueda cambia el pincel.</div>
-                  <div className="tool-row">
-                    <button className="icon-tool" onClick={onAnnotUndo} disabled={!annotHistory.length || !imageUrl} title="Deshacer (Ctrl+Z)">Undo</button>
-                    <button className="icon-tool" onClick={onAnnotRedo} disabled={!annotFuture.length || !imageUrl} title="Rehacer (Ctrl+Y)">Redo</button>
-                    <button className="icon-tool" onClick={() => zoomEditorBy(0.84)} disabled={!imageUrl} title="Zoom menos">-</button>
-                    <button className="icon-tool" onClick={() => zoomEditorBy(1.2)} disabled={!imageUrl} title="Zoom mas">+</button>
-                    <button className="icon-tool" onClick={resetEditorView} disabled={!imageUrl} title="Reiniciar vista">Reiniciar</button>
-                    <span className="zoom-chip">{Math.round(viewerZoom * 100)}%</span>
-                  </div>
-                  <div className="inline">
-                    <button data-tour="scribble-clear" onClick={onClearScribbles} disabled={!imageUrl}>Limpiar</button>
-                    <button onClick={clearExcludeRect} disabled={!imageUrl || !excludeRect}>Limpiar exclusion</button>
-                  </div>
-                  <div className="model-assist-panel compact-model-panel">
+                    <div className="paint-grid compact" data-tour="scribble-paint-tools">
+                      <button className={`paint-tool ${tool === 'fiber' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('fiber') }} disabled={!imageUrl}><span className="color-dot fiber" />Fibra <kbd>F</kbd></button>
+                      <button className={`paint-tool ${tool === 'halo' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('halo') }} disabled={!imageUrl}><span className="color-dot halo" />Halo <kbd>H</kbd></button>
+                      <button className={`paint-tool ${tool === 'bg' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('bg') }} disabled={!imageUrl}><span className="color-dot bg" />Background <kbd>B</kbd></button>
+                      <button data-tour="scribble-tool-erase" className={`paint-tool ${tool === 'erase' ? 'toggle-active' : ''}`} onClick={() => { setViewerMode('mark'); setTool('erase') }} disabled={!imageUrl}><ToolIcon name="erase" />Goma <kbd>G</kbd></button>
+                    </div>
+                    <div className="brush-panel" data-tour="scribble-brush-control">
+                      <label className="brush-toolbar-control wide">
+                        <span>Pincel</span>
+                        <input type="range" min="1" max="120" value={brushSliderValue} onChange={(e) => setBrushSize(brushSliderToPx(e.target.value))} disabled={!imageUrl} />
+                        <strong>{annotBrushPx}px</strong>
+                      </label>
+                      <button className={`icon-tool ${brushAutoScale ? 'toggle-active' : ''}`} onClick={() => setBrushAutoScale((v) => !v)} disabled={!imageUrl} title="Escalado automatico por resolucion">Auto</button>
+                      <label className="cursor-color-picker" title="Color del cursor">
+                        <input
+                          type="color"
+                          value={cursorColor}
+                          onChange={(e) => setCursorColor(e.target.value)}
+                          disabled={!imageUrl}
+                        />
+                      </label>
+                    </div>
+                    <div className="shortcut-note">Ctrl + rueda hace zoom en la imagen. Alt + rueda cambia el pincel.</div>
+                    <div className="tool-row">
+                      <button className="icon-tool" onClick={onAnnotUndo} disabled={!annotHistory.length || !imageUrl} title="Deshacer (Ctrl+Z)" aria-label="Deshacer">&#8630;</button>
+                      <button className="icon-tool" onClick={onAnnotRedo} disabled={!annotFuture.length || !imageUrl} title="Rehacer (Ctrl+Y)" aria-label="Rehacer">&#8631;</button>
+                      <button className="icon-tool" onClick={() => zoomEditorBy(0.84)} disabled={!imageUrl} title="Zoom menos">-</button>
+                      <button className="icon-tool" onClick={() => zoomEditorBy(1.2)} disabled={!imageUrl} title="Zoom mas">+</button>
+                      <button className="icon-tool" onClick={resetEditorView} disabled={!imageUrl} title="Reiniciar vista">Reiniciar</button>
+                      <span className="zoom-chip">{Math.round(viewerZoom * 100)}%</span>
+                    </div>
+                    <div className="inline">
+                      <button data-tour="scribble-clear" onClick={onClearScribbles} disabled={!imageUrl}>Limpiar</button>
+                      <button onClick={clearExcludeRect} disabled={!imageUrl || !excludeRect}>Limpiar exclusion</button>
+                    </div>
+                  </section>
+                  <section className="card scribble-controls-card">
+                    <h2>Editor de scribbles con modelo</h2>
+                    <div className="model-assist-panel compact-model-panel">
                     <label className="field">
                       <span>modelo</span>
                       <select value={selectedAssistModelId} onChange={(e) => setSelectedAssistModelId(e.target.value)} disabled={!assistModels.length}>
@@ -8726,8 +8759,9 @@ export default function App() {
                         <span>F{modelPrediction.counts?.fiber || 0} H{modelPrediction.counts?.halo || 0} B{modelPrediction.counts?.background || 0}</span>
                       </div>
                     ) : null}
-                  </div>
-                </section>
+                    </div>
+                  </section>
+                </>
               ) : (
 
               <section className="card">
@@ -8803,60 +8837,13 @@ export default function App() {
               </section>
 
               <section className="card">
-                <h2>Visor secuencial</h2>
+                <h2>Revision rapida</h2>
                 <div className="inline">
                   <button onClick={goPrev} disabled={!filteredRuns.length}>{'<-'} Anterior</button>
                   <button onClick={goNext} disabled={!filteredRuns.length}>Siguiente {'->'}</button>
                 </div>
-
-                <label className="field">
-                  <span>Filtro grupo</span>
-                  <select ref={filterFocusRef} value={filterGroup} onChange={(e) => setFilterGroup(e.target.value)}>
-                    <option value="all">todos</option>
-                    {groups.map((g) => <option key={g} value={g}>{g}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Filtro experimento</span>
-                  <select value={filterExperiment} onChange={(e) => setFilterExperiment(e.target.value)}>
-                    <option value="all">todos</option>
-                    {experiments.map((x) => <option key={x.experiment_id} value={x.experiment_id}>{x.experiment_id}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Filtro decision</span>
-                  <select value={filterDecision} onChange={(e) => setFilterDecision(e.target.value)}>
-                    <option value="all">todos</option>
-                    {REVIEW_TIERS.map((tier) => <option key={tier.value} value={tier.value}>{tier.label}</option>)}
-                    <option value="unreviewed">unreviewed</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Orden</span>
-                  <select value={reviewSort} onChange={(e) => setReviewSort(e.target.value)}>
-                    <option value="latest">recientes</option>
-                    <option value="tier">tier mejor a peor</option>
-                  </select>
-                </label>
-
-                <div className="kpi">Run activo: <strong>{activeRunId || '-'}</strong></div>
-                <div className="kpi">Indice filtrado: <strong>{filteredRuns.length ? `${Math.max(1, activeIndex + 1)} / ${filteredRuns.length}` : '-'}</strong></div>
-                <div className="kpi">Total runs: <strong>{runs.length}</strong></div>
+                <div className="kpi">Run: <strong>{filteredRuns.length ? `${Math.max(1, activeIndex + 1)} / ${filteredRuns.length}` : '-'}</strong></div>
                 <div className="kpi">Decision actual: <strong>{latestDecision || '-'}</strong></div>
-
-                <label className="field">
-                  <span>Salto rapido</span>
-                  <select value={activeRunId} onChange={(e) => setActiveRunId(e.target.value)}>
-                    <option value="">-- seleccionar --</option>
-                    {filteredRuns.map((r, idx) => (
-                      <option key={r.run_id} value={r.run_id}>
-                        {idx + 1}. {r.experiment_id}{r.profile_name ? `(${r.profile_name})` : ''} | {r.run_status_level}
-                        {reviewByRun[r.run_id]?.decision ? ` | ${reviewLabel(reviewByRun[r.run_id].decision)}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
                 <textarea value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="Nota opcional" rows={3} />
                 <div className="tier-buttons">
                   {REVIEW_TIERS.map((tier) => (
@@ -8870,9 +8857,6 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <button onClick={exportReport} disabled={!imageId || loading.export}>Exportar CSV+JSON+Galeria</button>
-                {reportInfo ? <p className="small">Reporte: {reportInfo.report_dir}</p> : null}
-                <p className="small">Atajos: &larr;/&rarr; navegar, S/A/B/C/U=tier, R=reset filtros, F=focus filtro grupo.</p>
               </section>
             </>
           ) : workspaceTab === 'diameter' ? (
@@ -8910,16 +8894,16 @@ export default function App() {
                 <label className="field">
                   <span>Run de soporte</span>
                   <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
-                    <option value="latest">ultimo run disponible</option>
-                    {runs.map((r, idx) => (
+                    <option value="latest">ultimo run S/A disponible</option>
+                    {nextStepRuns.map((r, idx) => (
                       <option key={r.run_id} value={r.run_id}>
-                        {idx + 1}. {r.experiment_id}{r.profile_name ? ` (${r.profile_name})` : ''} | {r.run_status_level} | {r.created_at || r.run_id}
+                        {idx + 1}. {r.experiment_id}{r.profile_name ? ` (${r.profile_name})` : ''} | {reviewLabel(reviewByRun[r.run_id]?.decision)} | {r.created_at || r.run_id}
                       </option>
                     ))}
                   </select>
                 </label>
                 <div className="kpi">
-                  Soporte elegido: <strong>{selectedPriorRun ? `${selectedPriorRun.experiment_id}${selectedPriorRun.profile_name ? ` (${selectedPriorRun.profile_name})` : ''}` : 'sin runs'}</strong>
+                  Soporte elegido: <strong>{selectedPriorRun ? `${selectedPriorRun.experiment_id}${selectedPriorRun.profile_name ? ` (${selectedPriorRun.profile_name})` : ''}` : 'sin runs S/A'}</strong>
                 </div>
                 <div className="inline">
                   <button onClick={() => refreshResults()} disabled={!imageId || loading.listResults}>Refrescar soporte</button>
@@ -9085,10 +9069,10 @@ export default function App() {
                 <label className="field">
                   <span>Run de soporte</span>
                   <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
-                    <option value="latest">ultimo run disponible</option>
-                    {runs.map((r, idx) => (
+                    <option value="latest">ultimo run S/A disponible</option>
+                    {nextStepRuns.map((r, idx) => (
                       <option key={r.run_id} value={r.run_id}>
-                        {idx + 1}. {r.experiment_id}{r.profile_name ? ` (${r.profile_name})` : ''} | {r.run_status_level} | {r.created_at || r.run_id}
+                        {idx + 1}. {r.experiment_id}{r.profile_name ? ` (${r.profile_name})` : ''} | {reviewLabel(reviewByRun[r.run_id]?.decision)} | {r.created_at || r.run_id}
                       </option>
                     ))}
                   </select>
@@ -9190,8 +9174,9 @@ export default function App() {
                   <div className="placeholder small">Sin imagenes guardadas.</div>
                 ) : (
                   <div className="saved-image-list">
-                    {savedImages.filter((img) => img.mask_thumbnail_b64).map((img) => {
+                    {locoMaskedSavedImages.map((img) => {
                       const isActive = img.image_id === imageId || img.image_id === selectedSavedImageId
+                      const maskReview = approvedMaskReviewLabel(img.image_id)
                       return (
                         <button
                           key={`masked-${img.image_id}`}
@@ -9223,7 +9208,8 @@ export default function App() {
                                   if (src.invalid_other || src.other_valid) parts.push(`${src.invalid_other || src.other_valid || 0}O`)
                                 }
                               }
-                              return parts.length ? parts.join(' ') : 'sin circulos'
+                              const base = parts.length ? parts.join(' ') : 'sin circulos'
+                              return maskReview ? `${base} | mascara ${maskReview}` : base
                               })()}</em>
                           </span>
                         </button>
@@ -9231,8 +9217,8 @@ export default function App() {
                     })}
                   </div>
                 )}
-                {!savedImages.filter((img) => img.mask_thumbnail_b64).length ? (
-                  <p className="small">Ninguna imagen tiene mascara predicha. Ejecuta un experimento primero.</p>
+                {!locoMaskedSavedImages.length ? (
+                  <p className="small">Ninguna imagen tiene una mascara con nota S o A. Marca una corrida como S o A en Revision de Resultados.</p>
                 ) : null}
               </section>
             </>
@@ -9546,10 +9532,10 @@ export default function App() {
                 <label className="field">
                   <span>Run de soporte</span>
                   <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
-                    <option value="latest">ultimo run disponible</option>
-                    {runs.map((r, idx) => (
+                    <option value="latest">ultimo run S/A disponible</option>
+                    {nextStepRuns.map((r, idx) => (
                       <option key={r.run_id} value={r.run_id}>
-                        {idx + 1}. {r.experiment_id} | {r.run_status_level}
+                        {idx + 1}. {r.experiment_id} | {reviewLabel(reviewByRun[r.run_id]?.decision)}
                       </option>
                     ))}
                   </select>
@@ -9572,6 +9558,7 @@ export default function App() {
                   <div className="saved-image-list">
                     {locoMaskedSavedImages.map((img) => {
                       const isActive = img.image_id === imageId || img.image_id === selectedSavedImageId
+                      const maskReview = approvedMaskReviewLabel(img.image_id)
                       return (
                         <button
                           key={`test-masked-${img.image_id}`}
@@ -9588,14 +9575,17 @@ export default function App() {
                               <img src={b64ToDataUrl(img.mask_thumbnail_b64, img.mask_thumbnail_mime || 'image/png')} alt="mask" style={{ width: '58px', height: '44px' }} />
                             ) : <span className="saved-image-empty" />}
                           </div>
-                          <span><strong>{img.image_name || img.image_id}</strong></span>
+                          <span>
+                            <strong>{img.image_name || img.image_id}</strong>
+                            <em>{maskReview ? `mascara ${maskReview}` : 'mascara aprobada'}</em>
+                          </span>
                         </button>
                       )
                     })}
                   </div>
                 )}
                 {!locoMaskedSavedImages.length ? (
-                  <p className="small">Ninguna imagen tiene mascara predicha. Ejecuta un experimento primero.</p>
+                  <p className="small">Ninguna imagen tiene una mascara con nota S o A. Marca una corrida como S o A en Revision de Resultados.</p>
                 ) : null}
               </section>
 
@@ -9665,9 +9655,9 @@ export default function App() {
                 <label className="field">
                   <span>Run de soporte</span>
                   <select value={diamPriorRunId} onChange={(e) => onLocoDetectorSupportRunChange(e.target.value)} disabled={!imageId}>
-                    <option value="latest">ultimo run disponible</option>
-                    {runs.map((r, idx) => (
-                      <option key={r.run_id} value={r.run_id}>{idx + 1}. {r.experiment_id} | {r.run_status_level}</option>
+                    <option value="latest">ultimo run S/A disponible</option>
+                    {nextStepRuns.map((r, idx) => (
+                      <option key={r.run_id} value={r.run_id}>{idx + 1}. {r.experiment_id} | {reviewLabel(reviewByRun[r.run_id]?.decision)}</option>
                     ))}
                   </select>
                 </label>
@@ -9724,6 +9714,7 @@ export default function App() {
                   <div className="saved-image-list">
                     {locoMaskedSavedImages.map((img) => {
                       const isActive = img.image_id === imageId || img.image_id === selectedSavedImageId
+                      const maskReview = approvedMaskReviewLabel(img.image_id)
                       return (
                         <button
                           key={`detector-masked-${img.image_id}`}
@@ -9740,14 +9731,17 @@ export default function App() {
                               <img src={b64ToDataUrl(img.mask_thumbnail_b64, img.mask_thumbnail_mime || 'image/png')} alt="mask" style={{ width: '58px', height: '44px' }} />
                             ) : <span className="saved-image-empty" />}
                           </div>
-                          <span><strong>{img.image_name || img.image_id}</strong></span>
+                          <span>
+                            <strong>{img.image_name || img.image_id}</strong>
+                            <em>{maskReview ? `mascara ${maskReview}` : 'mascara aprobada'}</em>
+                          </span>
                         </button>
                       )
                     })}
                   </div>
                 )}
                 {!locoMaskedSavedImages.length ? (
-                  <p className="small">Ninguna imagen tiene mascara predicha. Ejecuta un experimento primero.</p>
+                  <p className="small">Ninguna imagen tiene una mascara con nota S o A. Marca una corrida como S o A en Revision de Resultados.</p>
                 ) : null}
               </section>
 

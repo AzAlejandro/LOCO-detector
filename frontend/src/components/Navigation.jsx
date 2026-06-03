@@ -16,7 +16,7 @@ const GROUPS = [
     key: 'scribble',
     label: 'Scribble',
     fullLabel: 'Grupo 1: Entrenamiento Scribble',
-    icon: '✏️',
+    icon: 'edit_note',
     section: 'training',
     tabs: [
       { key: 'workbench', label: 'Scribbles y Experimentos' },
@@ -28,7 +28,7 @@ const GROUPS = [
     key: 'loco',
     label: 'LOCO',
     fullLabel: 'Grupo 2: Entrenamiento LOCO',
-    icon: '🔵',
+    icon: 'adjust',
     section: 'training',
     tabs: [
       { key: 'locoDataset', label: 'Generar Dataset' },
@@ -41,7 +41,7 @@ const GROUPS = [
     key: 'detection',
     label: 'Deteccion',
     fullLabel: 'Grupo 3: Deteccion y Medicion',
-    icon: '📏',
+    icon: 'straighten',
     section: 'production',
     tabs: [
       { key: 'locoModel', label: 'Detector LOCO' },
@@ -52,7 +52,7 @@ const GROUPS = [
     key: 'configuration',
     label: 'Configuracion',
     fullLabel: 'Configuracion del proyecto',
-    icon: '⚙',
+    icon: 'settings',
     section: 'other',
     tabs: [
       { key: 'projectTransfer', label: 'Exportar e importar' },
@@ -62,7 +62,7 @@ const GROUPS = [
     key: 'tutorial',
     label: 'Tutorial',
     fullLabel: 'Tutoriales guiados del proyecto',
-    icon: '📘',
+    icon: 'menu_book',
     section: 'other',
     tabs: [
       { key: 'tutorialOverview', label: 'General' },
@@ -72,6 +72,14 @@ const GROUPS = [
     ],
   },
 ]
+
+function MaterialIcon({ name, className = '' }) {
+  return (
+    <span aria-hidden="true" className={`material-symbols-outlined ${className}`}>
+      {name}
+    </span>
+  )
+}
 
 export function legacyToGroup(tab) {
   const mapping = {
@@ -135,11 +143,13 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange, fo
         onClick={() => { if (!forceExpanded) setCollapsed((current) => !current) }}
         title={isCollapsed ? 'Expandir menu' : 'Colapsar menu'}
       >
-        <span className="sidebar-toggle-icon">{isCollapsed ? '☰' : '✕'}</span>
+        <MaterialIcon className="sidebar-toggle-icon" name={isCollapsed ? 'menu' : 'close'} />
         {!isCollapsed && <span className="sidebar-toggle-label">Menu</span>}
       </button>
 
-      <div className="sidebar-section-label">{isCollapsed ? '⚙' : 'Entrenamiento'}</div>
+      <div className="sidebar-section-label">
+        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="model_training" /> : 'Entrenamiento'}
+      </div>
       {GROUPS.filter((group) => group.section === 'training').map((group) => (
         <button
           key={group.key}
@@ -148,13 +158,15 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange, fo
           title={isCollapsed ? group.fullLabel : group.label}
           data-tour={`sidebar-group-${group.key}`}
         >
-          <span className="sidebar-icon">{group.icon}</span>
+          <MaterialIcon className="sidebar-icon" name={group.icon} />
           {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
         </button>
       ))}
 
       <div className="sidebar-separator" />
-      <div className="sidebar-section-label">{isCollapsed ? '⚙' : 'Produccion'}</div>
+      <div className="sidebar-section-label">
+        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="precision_manufacturing" /> : 'Produccion'}
+      </div>
       {GROUPS.filter((group) => group.section === 'production').map((group) => (
         <button
           key={group.key}
@@ -163,13 +175,15 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange, fo
           title={isCollapsed ? group.fullLabel : group.label}
           data-tour={`sidebar-group-${group.key}`}
         >
-          <span className="sidebar-icon">{group.icon}</span>
+          <MaterialIcon className="sidebar-icon" name={group.icon} />
           {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
         </button>
       ))}
 
       <div className="sidebar-separator" />
-      <div className="sidebar-section-label">{isCollapsed ? '⋯' : 'Otros'}</div>
+      <div className="sidebar-section-label">
+        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="more_horiz" /> : 'Otros'}
+      </div>
       {GROUPS.filter((group) => group.section === 'other').map((group) => (
         <button
           key={group.key}
@@ -178,7 +192,7 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange, fo
           title={isCollapsed ? group.fullLabel : group.label}
           data-tour={`sidebar-group-${group.key}`}
         >
-          <span className="sidebar-icon">{group.icon}</span>
+          <MaterialIcon className="sidebar-icon" name={group.icon} />
           {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
         </button>
       ))}

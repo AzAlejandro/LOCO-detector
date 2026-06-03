@@ -95,8 +95,8 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
       </div>
       <svg width={width} height={height} className="histogram-svg">
         {/* Axes */}
-        <line x1={MARGIN.left} y1={MARGIN.top + plotH} x2={MARGIN.left + plotW} y2={MARGIN.top + plotH} stroke="#888" />
-        <line x1={MARGIN.left} y1={MARGIN.top} x2={MARGIN.left} y2={MARGIN.top + plotH} stroke="#888" />
+        <line x1={MARGIN.left} y1={MARGIN.top + plotH} x2={MARGIN.left + plotW} y2={MARGIN.top + plotH} stroke="#76777d" />
+        <line x1={MARGIN.left} y1={MARGIN.top} x2={MARGIN.left} y2={MARGIN.top + plotH} stroke="#76777d" />
 
         {/* Y-axis labels */}
         {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
@@ -104,10 +104,10 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
           const val = Math.round(frac * maxCount)
           return (
             <g key={frac}>
-              <text x={MARGIN.left - 8} y={y + 4} textAnchor="end" fontSize="10" fill="#888">
+              <text x={MARGIN.left - 8} y={y + 4} textAnchor="end" fontSize="10" fill="#76777d">
                 {val}
               </text>
-              <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotW} y2={y} stroke="#eee" strokeWidth="0.5" />
+              <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotW} y2={y} stroke="#eceef0" strokeWidth="0.5" />
             </g>
           )
         })}
@@ -124,8 +124,8 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
               y={y}
               width={barW}
               height={barH}
-              fill="#4a90d9"
-              stroke="#2a6cb8"
+              fill="#45464d"
+              stroke="#191c1e"
               strokeWidth="0.5"
               rx="1"
             >
@@ -135,7 +135,7 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
         })}
 
         {/* X-axis label */}
-        <text x={MARGIN.left + plotW / 2} y={height - 5} textAnchor="middle" fontSize="11" fill="#888">
+        <text x={MARGIN.left + plotW / 2} y={height - 5} textAnchor="middle" fontSize="11" fill="#76777d">
           Diametro ({unit})
         </text>
       </svg>

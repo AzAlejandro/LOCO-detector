@@ -4,7 +4,7 @@ import React, { useState } from 'react'
  * Navigation component: collapsible sidebar (level 1) + exported GROUPS for tab strip.
  *
  * Props:
- *   activeGroup: 'scribble' | 'loco' | 'detection' | 'configuration' | 'tutorial'
+ *   activeGroup: 'project' | 'scribble' | 'loco' | 'detection' | 'configuration' | 'tutorial'
  *   activeTab: string
  *   onGroupChange: (group) => void
  *   onTabChange: (tab) => void
@@ -12,6 +12,18 @@ import React, { useState } from 'react'
  */
 
 const GROUPS = [
+  {
+    key: 'project',
+    label: 'Proyecto',
+    fullLabel: 'Gestion de proyectos y tags',
+    icon: 'folder_open',
+    section: 'project',
+    tabs: [
+      { key: 'projectSelect', label: 'Seleccion proyecto' },
+      { key: 'projectImages', label: 'Imagenes y tags' },
+      { key: 'projectTags', label: 'Manejo de tags' },
+    ],
+  },
   {
     key: 'scribble',
     label: 'Scribble',
@@ -83,6 +95,9 @@ function MaterialIcon({ name, className = '' }) {
 
 export function legacyToGroup(tab) {
   const mapping = {
+    projectSelect: { group: 'project', tab: 'projectSelect' },
+    projectImages: { group: 'project', tab: 'projectImages' },
+    projectTags: { group: 'project', tab: 'projectTags' },
     workbench: { group: 'scribble', tab: 'workbench' },
     review: { group: 'scribble', tab: 'review' },
     models: { group: 'scribble', tab: 'models' },
@@ -101,6 +116,9 @@ export function legacyToGroup(tab) {
 
 export function groupToLegacy(group, tab) {
   const mapping = {
+    'project:projectSelect': 'projectSelect',
+    'project:projectImages': 'projectImages',
+    'project:projectTags': 'projectTags',
     'scribble:workbench': 'workbench',
     'scribble:review': 'review',
     'scribble:models': 'models',
@@ -147,6 +165,23 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange, fo
         {!isCollapsed && <span className="sidebar-toggle-label">Menu</span>}
       </button>
 
+      <div className="sidebar-section-label">
+        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="folder_open" /> : 'Proyecto'}
+      </div>
+      {GROUPS.filter((group) => group.section === 'project').map((group) => (
+        <button
+          key={group.key}
+          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
+          onClick={() => handleGroupClick(group.key)}
+          title={isCollapsed ? group.fullLabel : group.label}
+          data-tour={`sidebar-group-${group.key}`}
+        >
+          <MaterialIcon className="sidebar-icon" name={group.icon} />
+          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
+        </button>
+      ))}
+
+      <div className="sidebar-separator" />
       <div className="sidebar-section-label">
         {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="model_training" /> : 'Entrenamiento'}
       </div>

@@ -30,6 +30,8 @@ from .library_store import (
     save_prior_cache,
 )
 from .project_transfer import router as project_transfer_router
+from .projects_api import router as projects_router
+from .projects_store import get_active_project, project_tags_for_image
 from .persistence import (
     append_review,
     clear_results_for_image,
@@ -61,6 +63,7 @@ app.add_middleware(
 app.include_router(diameter_research_router)
 app.include_router(assist_models_router)
 app.include_router(project_transfer_router)
+app.include_router(projects_router)
 
 registry = build_registry()
 DEFAULT_MAX_RESOLUTION_PX = 900
@@ -285,7 +288,18 @@ def _load_image_from_path_to_session(sess, path: Path, scale_percent: float = 10
         source_mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         source_mtime = ''
-    register_library_image(sess.image_id, sess.image_name, rgb, source_path=str(path), source_mtime=source_mtime)
+    active_project = get_active_project()
+    project_tags, project_ids, structured_tags = project_tags_for_image(active_project)
+    register_library_image(
+        sess.image_id,
+        sess.image_name,
+        rgb,
+        source_path=str(path),
+        source_mtime=source_mtime,
+        tags=project_tags,
+        project_ids=project_ids,
+        structured_tags=structured_tags,
+    )
 
     prefs = _load_ui_prefs()
     prefs['start_dir'] = str(path.parent)
@@ -577,7 +591,9 @@ async def api_image_load(
     sess.image_id = compute_image_id(rgb)
     sess.gt_mask = gt
     sess.touch()
-    register_library_image(sess.image_id, sess.image_name, rgb)
+    active_project = get_active_project()
+    project_tags, project_ids, structured_tags = project_tags_for_image(active_project)
+    register_library_image(sess.image_id, sess.image_name, rgb, tags=project_tags, project_ids=project_ids, structured_tags=structured_tags)
 
     image_b64, image_mime = encode_display_b64(rgb)
     payload = {

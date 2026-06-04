@@ -62,6 +62,7 @@ def _category_definitions() -> dict[str, TransferCategory]:
     diam = diameter_persistence.OUTPUT_ROOT
     return {
         'library': TransferCategory('library', 'Biblioteca de imagenes', (TransferSource('library', base / 'library'),)),
+        'projects': TransferCategory('projects', 'Proyectos y tags', (TransferSource('projects', base / 'projects'),)),
         'drafts': TransferCategory('drafts', 'Scribbles guardados', (TransferSource('drafts', base / 'drafts'),)),
         'scribble_experiments': TransferCategory(
             'scribble_experiments',

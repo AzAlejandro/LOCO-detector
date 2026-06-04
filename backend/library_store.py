@@ -91,7 +91,91 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def register_library_image(image_id: str, image_name: str, image_rgb: np.ndarray, source_path: str = '', source_mtime: str = '') -> dict[str, Any]:
+def _normalize_list(items: Any) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    raw_items = items if isinstance(items, list) else str(items or '').split(',')
+    for item in raw_items:
+        text = str(item or '').strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _tag_label(tag: Any) -> str:
+    if isinstance(tag, dict):
+        category = str(tag.get('category') or 'other').strip()
+        if category == 'size':
+            value = str(tag.get('value') or '').strip()
+            unit = str(tag.get('unit') or '').strip()
+            return f'Tamaño: {value} {unit}'.strip()
+        return str(tag.get('label') or tag.get('value') or '').strip()
+    return str(tag or '').strip()
+
+
+def normalize_structured_tags(items: Any) -> list[dict[str, Any]]:
+    raw_items = items if isinstance(items, list) else str(items or '').split(',')
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        if isinstance(raw, dict):
+            category = str(raw.get('category') or 'other').strip() or 'other'
+            if category == 'size':
+                value = str(raw.get('value') or '').strip()
+                unit = str(raw.get('unit') or '').strip()
+                if not value:
+                    continue
+                item = {'category': 'size', 'label': f'Tamaño: {value} {unit}'.strip(), 'value': value, 'unit': unit}
+            else:
+                label = str(raw.get('label') or raw.get('value') or '').strip()
+                if not label:
+                    continue
+                item = {'category': category, 'label': label}
+        else:
+            label = str(raw or '').strip()
+            if not label:
+                continue
+            item = {'category': 'other', 'label': label}
+        key = json.dumps(item, sort_keys=True, ensure_ascii=False).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _legacy_tags_from_structured(items: Any) -> list[str]:
+    return _normalize_list([_tag_label(item) for item in normalize_structured_tags(items)])
+
+
+def _merge_lists(*lists: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for items in lists:
+        for item in _normalize_list(items):
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def register_library_image(
+    image_id: str,
+    image_name: str,
+    image_rgb: np.ndarray,
+    source_path: str = '',
+    source_mtime: str = '',
+    tags: Any = None,
+    project_ids: Any = None,
+    structured_tags: Any = None,
+) -> dict[str, Any]:
     ensure_library_dirs()
     rgb = to_uint8_rgb(image_rgb)
     if rgb is None:
@@ -101,6 +185,10 @@ def register_library_image(image_id: str, image_name: str, image_rgb: np.ndarray
     _write_png(d / 'image.png', rgb)
 
     meta = _load_json(_meta_path(image_id))
+    merged_structured = normalize_structured_tags([
+        *normalize_structured_tags(meta.get('structured_tags') or meta.get('tags') or []),
+        *normalize_structured_tags(structured_tags or tags or []),
+    ])
     out = {
         'image_id': str(image_id),
         'image_name': str(image_name or meta.get('image_name', 'image')),
@@ -110,9 +198,30 @@ def register_library_image(image_id: str, image_name: str, image_rgb: np.ndarray
         'latest_prior_run_id': str(meta.get('latest_prior_run_id', '')),
         'source_path': str(source_path or meta.get('source_path') or ''),
         'source_mtime': str(source_mtime or meta.get('source_mtime') or ''),
+        'tags': _merge_lists(meta.get('tags') or [], tags or [], _legacy_tags_from_structured(merged_structured)),
+        'structured_tags': merged_structured,
+        'project_ids': _merge_lists(meta.get('project_ids') or [], project_ids or []),
     }
     _save_json(_meta_path(image_id), out)
     return out
+
+
+def update_library_image_tags(image_id: str, tags: Any = None, project_ids: Any = None, structured_tags: Any = None) -> dict[str, Any]:
+    ensure_library_dirs()
+    sid = _safe_id(image_id)
+    if not sid:
+        raise ValueError('image_id invalido')
+    meta_path = _meta_path(image_id)
+    meta = _load_json(meta_path)
+    if not meta:
+        raise FileNotFoundError(f'No existe metadata para {image_id}')
+    normalized_structured = normalize_structured_tags(structured_tags if structured_tags is not None else tags or [])
+    meta['tags'] = _normalize_list(tags or _legacy_tags_from_structured(normalized_structured))
+    meta['structured_tags'] = normalized_structured
+    meta['project_ids'] = _normalize_list(project_ids or [])
+    meta['updated_at'] = str(meta.get('updated_at') or _now())
+    _save_json(meta_path, meta)
+    return meta
 
 
 def _draft_meta_for(image_id: str, origin: str = '') -> dict[str, Any]:
@@ -188,6 +297,9 @@ def list_library_images() -> list[dict[str, Any]]:
                 'updated_at': str(meta.get('updated_at') or ''),
                 'source_path': str(meta.get('source_path') or ''),
                 'source_mtime': str(meta.get('source_mtime') or ''),
+                'tags': _normalize_list(meta.get('tags') or []),
+                'structured_tags': normalize_structured_tags(meta.get('structured_tags') or meta.get('tags') or []),
+                'project_ids': _normalize_list(meta.get('project_ids') or []),
                 'shape_hw': shape,
                 'has_scribble_draft': bool(draft),
                 'draft_updated_at': str(draft.get('updated_at') or ''),

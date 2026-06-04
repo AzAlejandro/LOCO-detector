@@ -152,6 +152,10 @@ function emptyLoading() {
     transferExport: false,
     transferInspect: false,
     transferApply: false,
+    projects: false,
+    projectSave: false,
+    projectImageSave: false,
+    projectTagSave: false,
   }
 }
 
@@ -561,6 +565,62 @@ function reviewLabel(value) {
   if (v === 'ok') return 'OK legado'
   if (v === 'bad') return 'BAD legado'
   return ''
+}
+
+function tagsToText(items = []) {
+  return (Array.isArray(items) ? items : []).join(', ')
+}
+
+function normalizeStructuredTags(items = []) {
+  const rawItems = Array.isArray(items) ? items : String(items || '').split(',')
+  const seen = new Set()
+  const out = []
+  rawItems.forEach((raw) => {
+    let item
+    if (raw && typeof raw === 'object') {
+      const category = String(raw.category || 'other').trim() || 'other'
+      if (category === 'size') {
+        const value = String(raw.value || '').trim()
+        const unit = String(raw.unit || '').trim()
+        if (!value) return
+        item = { category: 'size', label: `Tamaño: ${value}${unit ? ` ${unit}` : ''}`, value, unit }
+      } else {
+        const label = String(raw.label || raw.value || '').trim()
+        if (!label) return
+        item = { category, label }
+      }
+    } else {
+      const label = String(raw || '').trim()
+      if (!label) return
+      item = { category: 'other', label }
+    }
+    const key = JSON.stringify(item).toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(item)
+  })
+  return out
+}
+
+function legacyTagsFromStructured(items = []) {
+  return normalizeStructuredTags(items).map((tag) => String(tag.label || '').trim()).filter(Boolean)
+}
+
+function tagsFromTextAsStructured(text = '', category = 'other') {
+  return textToTags(text).map((label) => ({ category, label }))
+}
+
+function textToTags(text = '') {
+  const seen = new Set()
+  return String(text || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => {
+      const key = item.toLowerCase()
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
 }
 
 function isNextStepReviewDecision(value) {
@@ -999,10 +1059,10 @@ export default function App() {
   const [selectedLocalPath, setSelectedLocalPath] = useState('')
   const [localImageSelectExpanded, setLocalImageSelectExpanded] = useState(false)
   const [localImageTutorialHint, setLocalImageTutorialHint] = useState({ start_dir: '', image_name: 'overview-reference.png', exists: false, image_exists: false })
-  const [workspaceTab, setWorkspaceTab] = useState('workbench') // workbench | review | diameter | locoDataset | locoAugment | locoTraining | locoTest | locoModel | models | projectTransfer | tutorialHub
+  const [workspaceTab, setWorkspaceTab] = useState('projectSelect') // projectSelect | projectImages | projectTags | workbench | review | diameter | locoDataset | locoAugment | locoTraining | locoTest | locoModel | models | projectTransfer | tutorialHub
   // New hierarchical navigation state
-  const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('workbench').group)
-  const [activeTab, setActiveTab] = useState(() => legacyToGroup('workbench').tab)
+  const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('projectSelect').group)
+  const [activeTab, setActiveTab] = useState(() => legacyToGroup('projectSelect').tab)
   const [tutorialSelectedId, setTutorialSelectedId] = useState('overview_project')
   const [tutorialProgress, setTutorialProgress] = useState(() => loadTutorialProgress())
   const [tutorialSidebarForcedOpen, setTutorialSidebarForcedOpen] = useState(false)
@@ -1320,6 +1380,15 @@ export default function App() {
   const [transferImportFile, setTransferImportFile] = useState(null)
   const [transferImportInspection, setTransferImportInspection] = useState(null)
   const [transferImportResult, setTransferImportResult] = useState(null)
+  const [projects, setProjects] = useState([])
+  const [activeProjectId, setActiveProjectId] = useState('')
+  const [projectForm, setProjectForm] = useState({ project_id: '', name: '', tags_text: '', source_dir: '', active: true })
+  const [projectImageView, setProjectImageView] = useState('active')
+  const [projectImageEdits, setProjectImageEdits] = useState({})
+  const [projectTagCatalog, setProjectTagCatalog] = useState({ project: [], fiber_type: [], creator: [], unit: ['um', 'nm'], other: [] })
+  const [projectTagItems, setProjectTagItems] = useState([])
+  const [projectTagEdits, setProjectTagEdits] = useState({})
+  const [projectImageEditor, setProjectImageEditor] = useState(null)
 
   const experimentsById = useMemo(() => {
     const out = {}
@@ -1334,6 +1403,16 @@ export default function App() {
     })
     return out
   }, [reviews])
+
+  const activeProject = useMemo(
+    () => projects.find((project) => project.project_id === activeProjectId) || null,
+    [projects, activeProjectId],
+  )
+
+  const savedImagesForActiveProject = useMemo(() => {
+    if (projectImageView === 'all' || !activeProjectId) return savedImages
+    return savedImages.filter((img) => (Array.isArray(img.project_ids) ? img.project_ids : []).includes(activeProjectId))
+  }, [savedImages, projectImageView, activeProjectId])
 
   const filteredRuns = useMemo(() => {
     return runs.filter((r) => {
@@ -2878,6 +2957,7 @@ export default function App() {
         }
         await refreshSavedImages(sid)
         await refreshLocalImagePrefs()
+        await refreshProjects()
         await refreshLocalImageTutorialHint(true)
         await refreshAssistModels()
         await refreshModelDataset(sid)
@@ -2911,6 +2991,7 @@ export default function App() {
       }
       await refreshSavedImages(sid)
       await refreshLocalImagePrefs()
+      await refreshProjects()
       await refreshLocalImageTutorialHint(true)
       await refreshAssistModels()
       await refreshModelDataset(sid)
@@ -3594,6 +3675,261 @@ export default function App() {
     setSelectedBatch({})
   }
 
+  function applyProjectPayload(payload = {}, { prefillRoute = true } = {}) {
+    const nextProjects = Array.isArray(payload?.projects) ? payload.projects : []
+    const nextActiveId = String(payload?.active_project_id || '')
+    const nextActiveProject = payload?.active_project || nextProjects.find((project) => project.project_id === nextActiveId) || null
+    setProjects(nextProjects)
+    setActiveProjectId(nextActiveId)
+    if (nextActiveProject) {
+      setProjectForm({
+        project_id: String(nextActiveProject.project_id || ''),
+        name: String(nextActiveProject.name || ''),
+        tags_text: '',
+        fiber_type: String(nextActiveProject.fiber_type || ''),
+        creator: String(nextActiveProject.creator || ''),
+        source_dir: String(nextActiveProject.source_dir || ''),
+        active: true,
+      })
+      if (prefillRoute && nextActiveProject.source_dir) {
+        setImageStartDir(String(nextActiveProject.source_dir || ''))
+      }
+    }
+  }
+
+  async function refreshProjects({ prefillRoute = true } = {}) {
+    await withLoad('projects', async () => {
+      try {
+        const res = await apiGet('/api/projects/list')
+        applyProjectPayload(res?.payload || {}, { prefillRoute })
+        void refreshProjectTagCatalog()
+      } catch (err) {
+        toast('warning', 'Proyectos', `No se pudieron cargar proyectos: ${errMsg(err)}`)
+      }
+    })
+  }
+
+  async function refreshProjectTagCatalog() {
+    try {
+      const res = await apiGet('/api/projects/tag-catalog')
+      const catalog = res?.payload?.catalog || {}
+      setProjectTagCatalog({
+        project: Array.isArray(catalog.project) ? catalog.project : [],
+        fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
+        creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+        unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
+        other: Array.isArray(catalog.other) ? catalog.other : [],
+      })
+      setProjectTagItems(Array.isArray(res?.payload?.items) ? res.payload.items : [])
+    } catch {}
+  }
+
+  function tagEditKey(category, label) {
+    return `${String(category || 'other')}::${String(label || '')}`
+  }
+
+  async function updateProjectTagVisibility(tag, hidden) {
+    await withLoad('projectTagSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/tag/visibility', {
+          category: tag.category,
+          label: tag.label,
+          hidden: Boolean(hidden),
+        })
+        const catalog = res?.payload?.catalog || {}
+        setProjectTagCatalog({
+          project: Array.isArray(catalog.project) ? catalog.project : [],
+          fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
+          creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+          unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
+          other: Array.isArray(catalog.other) ? catalog.other : [],
+        })
+        setProjectTagItems(Array.isArray(res?.payload?.items) ? res.payload.items : [])
+        toast('success', 'Tags', hidden ? 'Tag oculto.' : 'Tag visible.')
+      } catch (err) {
+        toast('error', 'Tags', errMsg(err))
+      }
+    })
+  }
+
+  async function renameProjectTag(tag) {
+    const key = tagEditKey(tag.category, tag.label)
+    const nextLabel = String(projectTagEdits[key] || '').trim()
+    if (!nextLabel || nextLabel === tag.label) return
+    await withLoad('projectTagSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/tag/rename', {
+          category: tag.category,
+          old_label: tag.label,
+          new_label: nextLabel,
+        })
+        const catalog = res?.payload?.catalog || {}
+        setProjectTagCatalog({
+          project: Array.isArray(catalog.project) ? catalog.project : [],
+          fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
+          creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+          unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
+          other: Array.isArray(catalog.other) ? catalog.other : [],
+        })
+        setProjectTagItems(Array.isArray(res?.payload?.items) ? res.payload.items : [])
+        await refreshProjects({ prefillRoute: false })
+        await refreshSavedImages()
+        setProjectTagEdits((prev) => ({ ...prev, [key]: '' }))
+        toast('success', 'Tags', 'Tag editado.')
+      } catch (err) {
+        toast('error', 'Tags', errMsg(err))
+      }
+    })
+  }
+
+  async function deleteProjectTag(tag) {
+    if (!window.confirm(`Borrar u ocultar el tag "${tag.label}"?`)) return
+    await withLoad('projectTagSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/tag/delete', { category: tag.category, label: tag.label })
+        const catalog = res?.payload?.catalog || {}
+        setProjectTagCatalog({
+          project: Array.isArray(catalog.project) ? catalog.project : [],
+          fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
+          creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+          unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
+          other: Array.isArray(catalog.other) ? catalog.other : [],
+        })
+        setProjectTagItems(Array.isArray(res?.payload?.items) ? res.payload.items : [])
+        await refreshProjects({ prefillRoute: false })
+        await refreshSavedImages()
+        toast('success', 'Tags', tag.category === 'project' ? 'Tag de proyecto oculto.' : 'Tag borrado.')
+      } catch (err) {
+        toast('error', 'Tags', errMsg(err))
+      }
+    })
+  }
+
+  function resetProjectForm() {
+    setProjectForm({ project_id: '', name: '', tags_text: '', fiber_type: '', creator: '', source_dir: imageStartDir || '', active: true })
+  }
+
+  function editProject(project) {
+    setProjectForm({
+      project_id: String(project?.project_id || ''),
+      name: String(project?.name || ''),
+      tags_text: '',
+      fiber_type: String(project?.fiber_type || ''),
+      creator: String(project?.creator || ''),
+      source_dir: String(project?.source_dir || ''),
+      active: String(project?.project_id || '') === activeProjectId,
+    })
+  }
+
+  async function saveProject() {
+    const name = String(projectForm.name || '').trim()
+    if (!name) {
+      toast('warning', 'Proyecto', 'Nombre de proyecto requerido.')
+      return
+    }
+    await withLoad('projectSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/upsert', {
+          project_id: projectForm.project_id,
+          name,
+          tags: [],
+          fiber_type: projectForm.fiber_type,
+          creator: projectForm.creator,
+          auto_tags_structured: [],
+          source_dir: projectForm.source_dir,
+          active: Boolean(projectForm.active),
+        })
+        applyProjectPayload(res?.payload || {})
+        await refreshProjectTagCatalog()
+        await refreshSavedImages()
+        toast('success', 'Proyecto', 'Proyecto guardado.')
+      } catch (err) {
+        toast('error', 'Proyecto', errMsg(err))
+      }
+    })
+  }
+
+  async function activateProject(projectId) {
+    await withLoad('projectSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/activate', { project_id: projectId })
+        applyProjectPayload(res?.payload || {})
+        setProjectImageView(projectId ? 'active' : 'all')
+        toast('success', 'Proyecto', projectId ? 'Proyecto activo actualizado.' : 'Vista sin proyecto activo.')
+      } catch (err) {
+        toast('error', 'Proyecto', errMsg(err))
+      }
+    })
+  }
+
+  async function deleteProject(projectId) {
+    const target = String(projectId || '').trim()
+    if (!target) return
+    if (!window.confirm('Eliminar este proyecto? No borra imagenes ni datos asociados.')) return
+    await withLoad('projectSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/delete', { project_id: target })
+        applyProjectPayload(res?.payload || {})
+        await refreshSavedImages()
+        toast('success', 'Proyecto', 'Proyecto eliminado.')
+      } catch (err) {
+        toast('error', 'Proyecto', errMsg(err))
+      }
+    })
+  }
+
+  function projectImageDraft(image) {
+    const iid = String(image?.image_id || '')
+    return projectImageEdits[iid] || {
+      tags_text: tagsToText(image?.tags || []),
+      structured_tags: normalizeStructuredTags(image?.structured_tags || image?.tags || []),
+      project_ids: Array.isArray(image?.project_ids) ? image.project_ids : [],
+    }
+  }
+
+  function structuredTagsWithProjects(structuredTags = [], projectIds = []) {
+    const selectedProjects = new Set(Array.isArray(projectIds) ? projectIds : [])
+    const projectTags = projects
+      .filter((project) => selectedProjects.has(project.project_id))
+      .map((project) => ({ category: 'project', label: project.name, project_id: project.project_id }))
+    const nonProjectTags = normalizeStructuredTags(structuredTags).filter((tag) => tag.category !== 'project')
+    return normalizeStructuredTags([...projectTags, ...nonProjectTags])
+  }
+
+  function updateProjectImageDraft(imageId, patch) {
+    const iid = String(imageId || '')
+    if (!iid) return
+    setProjectImageEdits((prev) => ({ ...prev, [iid]: { ...(prev[iid] || projectImageDraft(savedImages.find((img) => img.image_id === iid) || {})), ...patch } }))
+  }
+
+  async function saveProjectImageMeta(image) {
+    const iid = String(image?.image_id || '')
+    if (!iid) return
+    const draft = projectImageDraft(image)
+    const structured = structuredTagsWithProjects(draft.structured_tags || draft.tags_text || [], draft.project_ids || [])
+    await withLoad('projectImageSave', async () => {
+      try {
+        const res = await apiPost('/api/projects/image/update', {
+          image_id: iid,
+          tags: legacyTagsFromStructured(structured),
+          structured_tags: structured,
+          project_ids: Array.isArray(draft.project_ids) ? draft.project_ids : [],
+        })
+        const items = Array.isArray(res?.payload?.items) ? res.payload.items : []
+        setSavedImages(items)
+        await refreshProjectTagCatalog()
+        setProjectImageEdits((prev) => {
+          const next = { ...prev }
+          delete next[iid]
+          return next
+        })
+        toast('success', 'Imagenes y tags', 'Metadata actualizada.')
+      } catch (err) {
+        toast('error', 'Imagenes y tags', errMsg(err))
+      }
+    })
+  }
+
   async function refreshSavedImages(customSessionId = '') {
     const sid = String(customSessionId || sessionId || '').trim()
     await withLoad('libraryList', async () => {
@@ -3779,6 +4115,27 @@ export default function App() {
           return
         }
         toast('warning', 'Ruta inicial', message)
+      }
+    })
+  }
+
+  async function chooseProjectSourceDir() {
+    const initialDir = String(projectForm.source_dir || imageStartDir || '').trim()
+    await withLoad('localDirPick', async () => {
+      try {
+        const res = await apiPost('/api/local-images/select-folder', { initial_dir: initialDir })
+        const nextPath = String(res?.payload?.start_dir || '').trim()
+        if (nextPath) {
+          setProjectForm((prev) => ({ ...prev, source_dir: nextPath }))
+        }
+        toast('success', 'Ruta proyecto', nextPath || 'Directorio seleccionado.')
+      } catch (err) {
+        const message = errMsg(err)
+        if (/cancelad/i.test(message)) {
+          toast('info', 'Ruta proyecto', 'Seleccion de directorio cancelada.')
+          return
+        }
+        toast('warning', 'Ruta proyecto', message)
       }
     })
   }
@@ -8270,8 +8627,8 @@ export default function App() {
     [locoTrainingResult],
   )
   const locoMaskedSavedImages = useMemo(
-    () => savedImages.filter((img) => img.mask_thumbnail_b64 && (approvedMaskRunListByImage[String(img.image_id || '')] || []).length > 0),
-    [savedImages, approvedMaskRunListByImage],
+    () => savedImagesForActiveProject.filter((img) => img.mask_thumbnail_b64 && (approvedMaskRunListByImage[String(img.image_id || '')] || []).length > 0),
+    [savedImagesForActiveProject, approvedMaskRunListByImage],
   )
   function approvedMaskReviewLabel(imageIdValue) {
     const imageKey = String(imageIdValue || '')
@@ -8461,6 +8818,280 @@ export default function App() {
   ]
   const scribbleTutorialReady = scribbleTutorialCanContinue(scribbleTutorialExercise)
 
+  function tagKey(tag) {
+    const normalized = normalizeStructuredTags([tag])[0]
+    if (!normalized) return ''
+    return JSON.stringify(normalized).toLowerCase()
+  }
+
+  function tagCategoryLabel(category) {
+    const labels = {
+      project: 'Proyecto',
+      fiber_type: 'Tipo de fibra',
+      creator: 'Creador',
+      size: 'Tamaño',
+      unit: 'Unidad',
+      other: 'Otro',
+    }
+    return labels[String(category || 'other')] || 'Otro'
+  }
+
+  function tagDisplayLabel(tag) {
+    const normalized = normalizeStructuredTags([tag])[0] || { category: 'other', label: String(tag || '') }
+    if (normalized.category === 'other' || normalized.category === 'size') return normalized.label
+    return `${tagCategoryLabel(normalized.category)}: ${normalized.label}`
+  }
+
+  function TagChip({ tag, removable = false, onRemove = null }) {
+    const normalized = normalizeStructuredTags([tag])[0] || { category: 'other', label: String(tag || '') }
+    const label = tagDisplayLabel(normalized)
+    return (
+      <span className={`tag-chip tag-${normalized.category}`}>
+        <span>{label}</span>
+        {removable ? (
+          <button
+            type="button"
+            className="remove-btn"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (onRemove) onRemove(normalized)
+            }}
+            aria-label={`Quitar ${label}`}
+          >
+            ×
+          </button>
+        ) : null}
+      </span>
+    )
+  }
+
+  function projectFormStructuredTags(form = projectForm) {
+    return normalizeStructuredTags([
+      ...(String(form.name || '').trim() ? [{ category: 'project', label: String(form.name || '').trim() }] : []),
+      ...(String(form.fiber_type || '').trim() ? [{ category: 'fiber_type', label: String(form.fiber_type || '').trim() }] : []),
+      ...(String(form.creator || '').trim() ? [{ category: 'creator', label: String(form.creator || '').trim() }] : []),
+    ])
+  }
+
+  function renderTagValuePicker({ label, category, value, values = [], placeholder, onChange }) {
+    const query = String(value || '').trim().toLowerCase()
+    const options = (Array.isArray(values) ? values : []).filter(Boolean)
+    const visible = options.filter((item) => !query || String(item).toLowerCase().includes(query)).slice(0, 8)
+    return (
+      <div className="tag-value-picker">
+        <label className="field">
+          <span>{label}</span>
+          <input value={value || ''} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+        </label>
+        <div className="tag-picker-suggestions">
+          {visible.map((item) => (
+            <button key={`${category}-${item}`} type="button" className="suggest-pill" onClick={() => onChange(item)}>
+              <TagChip tag={{ category, label: item }} />
+            </button>
+          ))}
+          {String(value || '').trim() && !options.some((item) => String(item).toLowerCase() === query) ? (
+            <span className="tag-create-hint">Se guardará como nuevo valor reutilizable</span>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+
+  function StructuredTagPreview({ tags = [], removable = false, onRemove = null }) {
+    const normalized = normalizeStructuredTags(tags)
+    if (!normalized.length) return <span className="small">sin tags</span>
+    return (
+      <div className="tag-chip-row">
+        {normalized.map((tag, idx) => (
+          <TagChip
+            key={`${tag.category}-${tag.label}-${idx}`}
+            tag={tag}
+            removable={removable}
+            onRemove={onRemove}
+          />
+        ))}
+      </div>
+    )
+  }
+
+  function openProjectImageEditor(image) {
+    const draft = projectImageDraft(image)
+    const tags = structuredTagsWithProjects(draft.structured_tags || image?.structured_tags || image?.tags || [], draft.project_ids || image?.project_ids || [])
+    const sizeTag = tags.find((tag) => tag.category === 'size') || {}
+    setProjectImageEditor({
+      image_id: String(image?.image_id || ''),
+      image_name: String(image?.image_name || image?.image_id || ''),
+      project_ids: Array.isArray(draft.project_ids) ? draft.project_ids : [],
+      size_value: String(sizeTag.value || ''),
+      size_unit: String(sizeTag.unit || ''),
+      other_text: tagsToText(tags.filter((tag) => tag.category === 'other').map((tag) => tag.label)),
+      base_tags: tags.filter((tag) => tag.category !== 'size' && tag.category !== 'other'),
+      tag_search: '',
+    })
+  }
+
+  function projectImageEditorTags(editor = projectImageEditor) {
+    if (!editor) return []
+    const selectedProjects = new Set(Array.isArray(editor.project_ids) ? editor.project_ids : [])
+    const projectTags = projects
+      .filter((project) => selectedProjects.has(project.project_id))
+      .map((project) => ({ category: 'project', label: project.name, project_id: project.project_id }))
+    return normalizeStructuredTags([
+      ...projectTags,
+      ...(Array.isArray(editor.base_tags) ? editor.base_tags : []),
+      ...(String(editor.size_value || '').trim() ? [{ category: 'size', value: String(editor.size_value || '').trim(), unit: String(editor.size_unit || '').trim() || 'nm' }] : []),
+      ...(String(editor.size_unit || '').trim() ? [{ category: 'unit', label: String(editor.size_unit || '').trim() }] : []),
+      ...tagsFromTextAsStructured(editor.other_text || '', 'other'),
+    ])
+  }
+
+  function projectTagLibraryItems(editor = projectImageEditor) {
+    const items = []
+    const push = (tag) => {
+      const normalized = normalizeStructuredTags([tag])[0]
+      if (!normalized) return
+      const key = tagKey(normalized)
+      if (!key || items.some((item) => tagKey(item) === key)) return
+      items.push({ ...tag, ...normalized })
+    }
+    projects.forEach((project) => push({ category: 'project', label: project.name, project_id: project.project_id }))
+    ;(projectTagCatalog.fiber_type || []).forEach((label) => push({ category: 'fiber_type', label }))
+    ;(projectTagCatalog.creator || []).forEach((label) => push({ category: 'creator', label }))
+    ;['1', '2', '500'].forEach((value) => push({ category: 'size', value, unit: String(editor?.size_unit || '') }))
+    ;(projectTagCatalog.unit || ['um', 'nm']).forEach((label) => push({ category: 'unit', label }))
+    savedImages.forEach((image) => {
+      normalizeStructuredTags(image.structured_tags || image.tags || []).forEach((tag) => {
+        if (tag.category === 'size' || tag.category === 'unit') push(tag)
+      })
+    })
+    ;(projectTagCatalog.other || []).forEach((label) => push({ category: 'other', label }))
+    projectImageEditorTags(editor).forEach((tag) => push(tag))
+    return items
+  }
+
+  function filteredProjectTagLibrary(editor = projectImageEditor) {
+    const query = String(editor?.tag_search || '').trim().toLowerCase()
+    const items = projectTagLibraryItems(editor)
+    if (!query) return items
+    return items.filter((tag) => String(tag.label || '').toLowerCase().includes(query) || tagCategoryLabel(tag.category).toLowerCase().includes(query))
+  }
+
+  function setEditorProjectChecked(projectId, checked) {
+    setProjectImageEditor((prev) => {
+      if (!prev) return prev
+      const current = new Set(prev.project_ids || [])
+      if (checked) current.add(projectId)
+      else current.delete(projectId)
+      return { ...prev, project_ids: Array.from(current) }
+    })
+  }
+
+  function addTagToProjectImageEditor(tag) {
+    const normalized = normalizeStructuredTags([tag])[0]
+    if (!normalized) return
+    setProjectImageEditor((prev) => {
+      if (!prev) return prev
+      if (normalized.category === 'project') {
+        const projectId = tag.project_id || projects.find((project) => project.name === normalized.label)?.project_id
+        const current = new Set(prev.project_ids || [])
+        if (projectId) current.add(projectId)
+        return { ...prev, project_ids: Array.from(current), tag_search: '' }
+      }
+      if (normalized.category === 'size') {
+        return { ...prev, size_value: normalized.value || '', size_unit: normalized.unit || prev.size_unit || '', tag_search: '' }
+      }
+      if (normalized.category === 'unit') {
+        return { ...prev, size_unit: normalized.label || prev.size_unit || 'nm', tag_search: '' }
+      }
+      if (normalized.category === 'other') {
+        const next = textToTags(`${prev.other_text || ''}, ${normalized.label}`)
+        return { ...prev, other_text: tagsToText(next), tag_search: '' }
+      }
+      const current = normalizeStructuredTags(prev.base_tags || [])
+      if (!current.some((item) => tagKey(item) === tagKey(normalized))) current.push(normalized)
+      return { ...prev, base_tags: current, tag_search: '' }
+    })
+  }
+
+  function removeTagFromProjectImageEditor(tag) {
+    const normalized = normalizeStructuredTags([tag])[0]
+    if (!normalized) return
+    setProjectImageEditor((prev) => {
+      if (!prev) return prev
+      if (normalized.category === 'project') {
+        const project = projects.find((item) => item.name === normalized.label || item.project_id === tag.project_id)
+        const projectId = project?.project_id || tag.project_id
+        return {
+          ...prev,
+          project_ids: (prev.project_ids || []).filter((item) => item !== projectId),
+          base_tags: normalizeStructuredTags(prev.base_tags || []).filter((item) => tagKey(item) !== tagKey(normalized)),
+        }
+      }
+      if (normalized.category === 'size') {
+        return { ...prev, size_value: '', size_unit: prev.size_unit || '' }
+      }
+      if (normalized.category === 'unit') {
+        return { ...prev, size_unit: '' }
+      }
+      if (normalized.category === 'other') {
+        const next = textToTags(prev.other_text || '').filter((item) => item.toLowerCase() !== normalized.label.toLowerCase())
+        return { ...prev, other_text: tagsToText(next) }
+      }
+      return { ...prev, base_tags: normalizeStructuredTags(prev.base_tags || []).filter((item) => tagKey(item) !== tagKey(normalized)) }
+    })
+  }
+
+  function createEditorOtherTagFromSearch() {
+    const label = String(projectImageEditor?.tag_search || '').trim()
+    if (!label) return
+    addTagToProjectImageEditor({ category: 'other', label })
+  }
+
+  function applyImageSizeValue(value) {
+    setProjectImageEditor((prev) => (prev ? { ...prev, size_value: String(value) } : prev))
+  }
+
+  function applyImageUnit(unit) {
+    setProjectImageEditor((prev) => (prev ? { ...prev, size_unit: String(unit || '') } : prev))
+  }
+
+  function applyProjectImageEditor() {
+    if (!projectImageEditor?.image_id) return
+    const structured = structuredTagsWithProjects(projectImageEditorTags(projectImageEditor), projectImageEditor.project_ids || [])
+    updateProjectImageDraft(projectImageEditor.image_id, {
+      project_ids: Array.isArray(projectImageEditor.project_ids) ? projectImageEditor.project_ids : [],
+      structured_tags: structured,
+      tags_text: tagsToText(legacyTagsFromStructured(structured)),
+    })
+    setProjectImageEditor(null)
+  }
+
+  function imageById(imageIdValue) {
+    const iid = String(imageIdValue || '')
+    return savedImages.find((img) => String(img.image_id || '') === iid) || null
+  }
+
+  async function saveProjectImageEditor() {
+    const iid = String(projectImageEditor?.image_id || '')
+    if (!iid) return
+    const structured = structuredTagsWithProjects(projectImageEditorTags(projectImageEditor), projectImageEditor.project_ids || [])
+    updateProjectImageDraft(iid, {
+      project_ids: Array.isArray(projectImageEditor.project_ids) ? projectImageEditor.project_ids : [],
+      structured_tags: structured,
+      tags_text: tagsToText(legacyTagsFromStructured(structured)),
+    })
+    const image = imageById(iid)
+    setProjectImageEditor(null)
+    if (image) {
+      await saveProjectImageMeta({
+        ...image,
+        structured_tags: structured,
+        tags: legacyTagsFromStructured(structured),
+        project_ids: Array.isArray(projectImageEditor.project_ids) ? projectImageEditor.project_ids : [],
+      })
+    }
+  }
+
   return (
     <div className="app">
       <OriginToast />
@@ -8531,6 +9162,148 @@ export default function App() {
         </div>
       ) : null}
 
+      {projectImageEditor ? (
+        <div className="modal-backdrop">
+          <div className="modal project-tag-modal">
+            <div className="project-tag-header">
+              <div>
+                <h2>Editar tags</h2>
+                <p className="small">{projectImageEditor.image_name}</p>
+              </div>
+              <button type="button" onClick={() => setProjectImageEditor(null)}>Cerrar</button>
+            </div>
+
+            <div className="tag-manager-layout">
+              <aside className="tag-library-panel">
+                <label className="field">
+                  <span>buscar o crear tag</span>
+                  <input
+                    value={projectImageEditor.tag_search || ''}
+                    onChange={(e) => setProjectImageEditor((prev) => ({ ...prev, tag_search: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        createEditorOtherTagFromSearch()
+                      }
+                    }}
+                    placeholder="proyecto, fibra, tamano, unidad..."
+                  />
+                </label>
+
+                {String(projectImageEditor.tag_search || '').trim() ? (
+                  <button type="button" className="suggest-pill create-tag" onClick={createEditorOtherTagFromSearch}>
+                    Crear "{String(projectImageEditor.tag_search || '').trim()}"
+                  </button>
+                ) : null}
+
+                {['project', 'fiber_type', 'creator', 'size', 'unit', 'other'].map((category) => {
+                  const items = filteredProjectTagLibrary(projectImageEditor).filter((tag) => tag.category === category)
+                  return (
+                    <div className="tag-library-section" key={`tag-lib-${category}`}>
+                      <div className="tag-library-title">{tagCategoryLabel(category)}</div>
+                      <div className="tag-library-list">
+                        {items.length ? items.map((tag) => {
+                          const selected = projectImageEditorTags(projectImageEditor).some((item) => tagKey(item) === tagKey(tag))
+                          return (
+                            <button
+                              type="button"
+                              key={`tag-lib-${category}-${tag.label}`}
+                              className={`tag-library-item ${selected ? 'selected' : ''}`}
+                              onClick={() => addTagToProjectImageEditor(tag)}
+                            >
+                              <TagChip tag={tag} />
+                              <span>{selected ? 'asignado' : 'agregar'}</span>
+                            </button>
+                          )
+                        }) : <span className="tag-empty-state">Sin opciones</span>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </aside>
+
+              <section className="tag-editor-panel">
+                <div className="tag-selected-box">
+                  <div className="tag-library-title">Tags seleccionados</div>
+                  <StructuredTagPreview
+                    tags={projectImageEditorTags(projectImageEditor)}
+                    removable
+                    onRemove={removeTagFromProjectImageEditor}
+                  />
+                </div>
+
+                <div className="tag-editor-section">
+                  <div className="tag-library-title">Proyectos asignados</div>
+                  <div className="project-checkbox-stack">
+                    {projects.length ? projects.map((project) => (
+                      <label key={`modal-${project.project_id}`}>
+                        <input
+                          type="checkbox"
+                          checked={(projectImageEditor.project_ids || []).includes(project.project_id)}
+                          onChange={(e) => setEditorProjectChecked(project.project_id, e.target.checked)}
+                        />
+                        {project.name}
+                      </label>
+                    )) : <span className="tag-empty-state">No hay proyectos creados</span>}
+                  </div>
+                </div>
+
+                <div className="tag-editor-section">
+                  <div className="tag-library-title">Tamaño</div>
+                  <div className="inline" style={{ gridTemplateColumns: '1fr 120px' }}>
+                    <label className="field">
+                      <span>agregar otro tamaño</span>
+                      <input value={projectImageEditor.size_value} onChange={(e) => setProjectImageEditor((prev) => ({ ...prev, size_value: e.target.value }))} placeholder="500" />
+                    </label>
+                    <label className="field">
+                      <span>agregar otra unidad</span>
+                      <input list="project-units" value={projectImageEditor.size_unit} onChange={(e) => setProjectImageEditor((prev) => ({ ...prev, size_unit: e.target.value }))} placeholder="nm" />
+                    </label>
+                  </div>
+                  <div className="tag-library-title">Valores rápidos</div>
+                  <div className="tag-size-presets">
+                    {['1', '2', '500'].map((value) => (
+                      <button key={`size-value-${value}`} type="button" className="suggest-pill" onClick={() => applyImageSizeValue(value)}>
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="tag-library-title">Unidades rápidas</div>
+                  <div className="tag-size-presets">
+                    {['nm', 'um'].map((unit) => (
+                      <button key={`size-unit-${unit}`} type="button" className="suggest-pill" onClick={() => applyImageUnit(unit)}>
+                        {unit}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <datalist id="project-units">
+                  {(projectTagCatalog.unit || ['um', 'nm']).map((item) => <option key={`unit-${item}`} value={item} />)}
+                </datalist>
+
+                <div className="tag-editor-section">
+                  <label className="field">
+                    <span>otros tags</span>
+                    <input
+                      value={projectImageEditor.other_text}
+                      onChange={(e) => setProjectImageEditor((prev) => ({ ...prev, other_text: e.target.value }))}
+                      placeholder="tag1, tag2"
+                    />
+                  </label>
+                </div>
+              </section>
+            </div>
+
+            <div className="project-tag-actions">
+              <button className="primary" onClick={saveProjectImageEditor} disabled={loading.projectImageSave}>Guardar</button>
+              <button onClick={applyProjectImageEditor}>Aplicar sin guardar</button>
+              <button onClick={() => setProjectImageEditor(null)}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="app-layout">
         <Navigation
           activeGroup={activeGroup}
@@ -8562,7 +9335,115 @@ export default function App() {
 
           <div className="layout">
         <aside className="left" data-tour={`workspace-sidebar-${workspaceTab}`}>
-          {workspaceTab === 'tutorialHub' ? (
+          {workspaceTab === 'projectSelect' ? (
+            <>
+              <section className="card">
+                <h2>Seleccion proyecto</h2>
+                <div className="kpi">Activo: <strong>{activeProject?.name || 'Todas las imagenes'}</strong></div>
+                <label className="field">
+                  <span>proyecto activo</span>
+                  <select value={activeProjectId} onChange={(e) => activateProject(e.target.value)} disabled={loading.projectSave}>
+                    <option value="">sin proyecto activo</option>
+                    {projects.map((project) => (
+                      <option key={project.project_id} value={project.project_id}>{project.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="inline">
+                  <button onClick={() => refreshProjects()}>Refrescar proyectos</button>
+                  <button onClick={resetProjectForm}>Resetear campos</button>
+                </div>
+              </section>
+              <section className="card">
+                <h2>{projectForm.project_id ? 'Editar proyecto' : 'Crear proyecto'}</h2>
+                <p className="small">Guardar proyecto crea o actualiza. Resetear campos solo limpia este formulario.</p>
+                <label className="field">
+                  <span>nombre del proyecto</span>
+                  <input value={projectForm.name} onChange={(e) => setProjectForm((prev) => ({ ...prev, name: e.target.value }))} placeholder="Tipo 1 / Fibra grande / ..." />
+                </label>
+                {renderTagValuePicker({
+                  label: 'tipo de fibra',
+                  category: 'fiber_type',
+                  value: projectForm.fiber_type || '',
+                  values: projectTagCatalog.fiber_type || [],
+                  placeholder: 'agregar tipo de fibra',
+                  onChange: (value) => setProjectForm((prev) => ({ ...prev, fiber_type: value })),
+                })}
+                {renderTagValuePicker({
+                  label: 'usuario creador',
+                  category: 'creator',
+                  value: projectForm.creator || '',
+                  values: projectTagCatalog.creator || [],
+                  placeholder: 'creador / operador',
+                  onChange: (value) => setProjectForm((prev) => ({ ...prev, creator: value })),
+                })}
+                <div className="project-derived-tags">
+                  <span className="tag-library-title">Tags fijos derivados</span>
+                  <StructuredTagPreview tags={projectFormStructuredTags(projectForm)} />
+                </div>
+                <label className="field">
+                  <span>ruta carpeta origen</span>
+                  <input value={projectForm.source_dir} onChange={(e) => setProjectForm((prev) => ({ ...prev, source_dir: e.target.value }))} placeholder="C:\\ruta\\a\\imagenes" />
+                </label>
+                <div className="inline">
+                  <button onClick={chooseProjectSourceDir} disabled={loading.localDirPick}>Elegir directorio</button>
+                  <button onClick={() => projectForm.source_dir && openFolder('custom', projectForm.source_dir)} disabled={loading.openFolder || !String(projectForm.source_dir || '').trim()}>Abrir ruta</button>
+                </div>
+                <label className="check-row">
+                  <input type="checkbox" checked={projectForm.active} onChange={(e) => setProjectForm((prev) => ({ ...prev, active: e.target.checked }))} />
+                  dejar como proyecto activo
+                </label>
+                <div className="inline">
+                  <button className="primary" onClick={saveProject} disabled={loading.projectSave}>Guardar proyecto</button>
+                  <button onClick={() => setProjectForm((prev) => ({ ...prev, source_dir: imageStartDir }))}>Usar ruta inicial actual</button>
+                </div>
+              </section>
+              <section className="card">
+                <h2>Proyectos</h2>
+                {!projects.length ? (
+                  <div className="placeholder small">Sin proyectos configurados.</div>
+                ) : (
+                  <div className="model-list">
+                    {projects.map((project) => (
+                      <button key={project.project_id} className={`model-row ${project.project_id === activeProjectId ? 'selected' : ''}`} onClick={() => editProject(project)}>
+                        <strong>{project.name}</strong>
+                        <span>{project.source_dir || 'sin ruta origen'}</span>
+                        <em>{[project.fiber_type, project.creator].filter(Boolean).join(' | ') || 'sin fibra/creador'}</em>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="inline">
+                  <button onClick={() => projectForm.project_id && activateProject(projectForm.project_id)} disabled={!projectForm.project_id || loading.projectSave}>Activar seleccionado</button>
+                  <button className="bad" onClick={() => deleteProject(projectForm.project_id)} disabled={!projectForm.project_id || loading.projectSave}>Eliminar seleccionado</button>
+                </div>
+              </section>
+            </>
+          ) : workspaceTab === 'projectImages' ? (
+            <>
+              <section className="card">
+                <h2>Imagenes y tags</h2>
+                <div className="kpi">Proyecto activo: <strong>{activeProject?.name || '-'}</strong></div>
+                <label className="field">
+                  <span>vista</span>
+                  <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
+                    <option value="active">Proyecto activo</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </label>
+                <button onClick={() => refreshSavedImages()} disabled={loading.libraryList}>Refrescar imagenes</button>
+              </section>
+            </>
+          ) : workspaceTab === 'projectTags' ? (
+            <>
+              <section className="card">
+                <h2>Manejo de tags</h2>
+                <div className="kpi">Tags: <strong>{projectTagItems.length}</strong></div>
+                <button onClick={refreshProjectTagCatalog} disabled={loading.projectTagSave}>Refrescar tags</button>
+                <p className="small">Ocultar quita un tag de los selectores. Editar o borrar actualiza metadata de proyectos e imagenes cuando aplica.</p>
+              </section>
+            </>
+          ) : workspaceTab === 'tutorialHub' ? (
             <TutorialSidebar
               activeTutorialTab={activeTutorialTab}
               selectedId={tutorialSelectedId}
@@ -8632,16 +9513,23 @@ export default function App() {
 
               <section className="card">
                 <h2>Imagenes guardadas</h2>
+                <label className="field">
+                  <span>vista</span>
+                  <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
+                    <option value="active">Proyecto activo</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </label>
                 <div className="inline">
                   <button onClick={() => openFolder('outputs')} disabled={loading.openFolder}>Abrir carpeta experimentos</button>
                   <button onClick={() => openFolder('library')} disabled={loading.openFolder}>Abrir biblioteca</button>
                 </div>
                 <button className="bad" onClick={deleteSelectedSavedImage} disabled={!selectedSavedImageId || loading.libraryDelete}>Eliminar seleccionada</button>
-                {!savedImages.length ? (
+                {!savedImagesForActiveProject.length ? (
                   <div className="placeholder small">Sin imagenes guardadas.</div>
                 ) : (
                   <div className="saved-image-list">
-                    {savedImages.map((img) => (
+                    {savedImagesForActiveProject.map((img) => (
                       <button
                         key={img.image_id}
                         className={`saved-image-row ${img.image_id === selectedSavedImageId || img.image_id === imageId ? 'selected' : ''}`}
@@ -9164,6 +10052,13 @@ export default function App() {
 
               <section className="card">
                 <h2>Imagenes con mascara</h2>
+                <label className="field">
+                  <span>vista</span>
+                  <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
+                    <option value="active">Proyecto activo</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </label>
                 <div className="inline">
                   <button onClick={() => {
                     console.log('[DEBUG-REFRESH] Refreshing saved images, current circleTypeCounts:', JSON.stringify(circleTypeCounts))
@@ -9549,6 +10444,13 @@ export default function App() {
 
               <section className="card">
                 <h2>Imagenes con mascara</h2>
+                <label className="field">
+                  <span>vista</span>
+                  <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
+                    <option value="active">Proyecto activo</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </label>
                 <div className="inline">
                   <button onClick={refreshSavedImages} disabled={loading.libraryList}>Refrescar</button>
                 </div>
@@ -9705,6 +10607,13 @@ export default function App() {
 
               <section className="card">
                 <h2>Imagenes con mascara</h2>
+                <label className="field">
+                  <span>vista</span>
+                  <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
+                    <option value="active">Proyecto activo</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </label>
                 <div className="inline">
                   <button onClick={refreshSavedImages} disabled={loading.libraryList}>Refrescar</button>
                 </div>
@@ -9975,6 +10884,164 @@ export default function App() {
         </aside>
 
         <section className="main">
+          <article className={`card viewer models-viewer ${workspaceTab === 'projectSelect' || workspaceTab === 'projectImages' || workspaceTab === 'projectTags' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-projects">
+            <div className="model-workspace project-workspace">
+              <section>
+                <h2>Proyecto</h2>
+                <div className="kpi-row">
+                  <span>Proyectos: <strong>{projects.length}</strong></span>
+                  <span>Activo: <strong>{activeProject?.name || '-'}</strong></span>
+                  <span>Imagenes vista: <strong>{savedImagesForActiveProject.length}</strong></span>
+                  <span>Total imagenes: <strong>{savedImages.length}</strong></span>
+                </div>
+              </section>
+              {workspaceTab === 'projectSelect' ? (
+                <section>
+                  <h2>Configuracion del proyecto activo</h2>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>proyecto</th>
+                          <th>ruta origen</th>
+                          <th>tags</th>
+                          <th>estado</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {!projects.length ? (
+                          <tr><td colSpan={4}>Sin proyectos. Crea uno desde el panel izquierdo.</td></tr>
+                        ) : projects.map((project) => (
+                          <tr key={`project-row-${project.project_id}`}>
+                            <td>{project.name}</td>
+                            <td>{shortPathTail(project.source_dir)}</td>
+                            <td>
+                              <div className="tag-chip-row">
+                                {normalizeStructuredTags(project.structured_tags || project.tags || []).map((tag, idx) => <TagChip tag={tag} key={`${project.project_id}-${idx}-${tag.label}`} />)}
+                              </div>
+                            </td>
+                            <td>{project.project_id === activeProjectId ? 'activo' : '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ) : workspaceTab === 'projectImages' ? (
+                <section>
+                  <h2>Imagenes y tags</h2>
+                  <div className="table-wrap project-image-table">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>imagen</th>
+                          <th>path</th>
+                          <th>modificacion</th>
+                          <th>proyectos</th>
+                          <th>tags</th>
+                          <th>guardar</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {!savedImagesForActiveProject.length ? (
+                          <tr><td colSpan={6}>Sin imagenes para esta vista.</td></tr>
+                        ) : savedImagesForActiveProject.map((img) => {
+                          const draft = projectImageDraft(img)
+                          return (
+                            <tr key={`project-image-${img.image_id}`}>
+                              <td>
+                                <div className="project-image-cell">
+                                  {img.thumbnail_b64 ? (
+                                    <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt={img.image_name || img.image_id} />
+                                  ) : <span className="saved-image-empty" />}
+                                  <strong>{img.image_name || img.image_id}</strong>
+                                </div>
+                              </td>
+                              <td title={img.source_path || ''}>{shortPathTail(img.source_path)}</td>
+                              <td>{img.source_mtime || img.updated_at || '-'}</td>
+                              <td>
+                                <div className="project-checkbox-stack">
+                                  {projects.map((project) => (
+                                    <label key={`${img.image_id}-${project.project_id}`}>
+                                      <input
+                                        type="checkbox"
+                                        checked={(draft.project_ids || []).includes(project.project_id)}
+                                        onChange={(e) => {
+                                          const current = new Set(draft.project_ids || [])
+                                          if (e.target.checked) current.add(project.project_id)
+                                          else current.delete(project.project_id)
+                                          updateProjectImageDraft(img.image_id, { project_ids: Array.from(current) })
+                                        }}
+                                      />
+                                      {project.name}
+                                    </label>
+                                  ))}
+                                </div>
+                              </td>
+                              <td><StructuredTagPreview tags={structuredTagsWithProjects(draft.structured_tags || img.structured_tags || img.tags || [], draft.project_ids || img.project_ids || [])} /></td>
+                              <td>
+                                <div className="inline">
+                                  <button onClick={() => openProjectImageEditor(img)}>Editar tags</button>
+                                  <button onClick={() => saveProjectImageMeta(img)} disabled={loading.projectImageSave}>Guardar</button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ) : (
+                <section>
+                  <h2>Manejo de tags</h2>
+                  <div className="table-wrap project-tag-table">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>tag</th>
+                          <th>categoria</th>
+                          <th>estado</th>
+                          <th>editar</th>
+                          <th>acciones</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {!projectTagItems.length ? (
+                          <tr><td colSpan={5}>Sin tags disponibles.</td></tr>
+                        ) : projectTagItems.map((tag) => {
+                          const key = tagEditKey(tag.category, tag.label)
+                          const editValue = projectTagEdits[key] ?? ''
+                          const canDeleteDirectly = tag.category !== 'project'
+                          return (
+                            <tr key={`tag-row-${key}-${tag.hidden ? 'hidden' : 'visible'}`}>
+                              <td><TagChip tag={tag} /></td>
+                              <td>{tagCategoryLabel(tag.category)}</td>
+                              <td>{tag.hidden ? 'oculto' : 'visible'}</td>
+                              <td>
+                                <input
+                                  value={editValue}
+                                  onChange={(e) => setProjectTagEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                                  placeholder={tag.label}
+                                />
+                              </td>
+                              <td>
+                                <div className="inline">
+                                  <button onClick={() => renameProjectTag(tag)} disabled={loading.projectTagSave || !String(editValue || '').trim()}>Guardar nombre</button>
+                                  <button onClick={() => updateProjectTagVisibility(tag, !tag.hidden)} disabled={loading.projectTagSave}>{tag.hidden ? 'Mostrar' : 'Ocultar'}</button>
+                                  <button className={canDeleteDirectly ? 'bad' : ''} onClick={() => deleteProjectTag(tag)} disabled={loading.projectTagSave}>{canDeleteDirectly ? 'Borrar' : 'Ocultar proyecto'}</button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
+            </div>
+          </article>
           <article className={`card viewer models-viewer ${workspaceTab === 'tutorialHub' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-tutorialHub">
             <TutorialViewer
               tutorial={selectedTutorial}

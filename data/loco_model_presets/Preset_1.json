@@ -1,0 +1,43 @@
+{
+  "preset_id": "Preset_1",
+  "preset_name": "Preset 1",
+  "params": {
+    "crossing_threshold": 0.9,
+    "grid_step": 8,
+    "min_radius": 2,
+    "max_radius": 6,
+    "radius_step": 2,
+    "threshold": 0.7,
+    "use_radius_thresholds": false,
+    "small_threshold": 0.85,
+    "medium_threshold": 0.9,
+    "large_threshold": 0.95,
+    "small_radius_limit": 14,
+    "large_radius_limit": 24,
+    "use_nms": true,
+    "nms_mode": "circle_iou",
+    "nms_distance_factor": 4,
+    "radius_similarity_factor": 0.4,
+    "circle_iou_threshold": 0.1,
+    "candidate_sampling_mode": "tile_balanced",
+    "candidate_random_seed": 42,
+    "tile_size_px": 20,
+    "candidate_max_per_tile": 8,
+    "return_rejected": false,
+    "max_return_rejected": 5000,
+    "max_candidates": 2000,
+    "use_spatial_final_filter": false,
+    "spatial_final_tile_px": 128,
+    "spatial_final_max_per_tile": 3,
+    "spatial_final_min_center_distance_factor": 1
+  },
+  "layers": {
+    "mask": true,
+    "accepted": true,
+    "rejected": false,
+    "scores": true,
+    "tiles": true
+  },
+  "created_at": "2026-06-05 17:26:07",
+  "updated_at": "2026-06-05 17:26:07"
+}

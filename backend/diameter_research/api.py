@@ -27,7 +27,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedGroupKFold, train_test_split
 
 from ..image_codec import encode_display_b64, encode_gray_png_b64
-from ..library_store import load_library_image
+from ..library_store import list_library_images, load_library_image, normalize_structured_tags
 from ..persistence import list_runs as list_segmentation_runs
 from ..persistence import load_run as load_segmentation_run
 from ..persistence import load_scribble_draft
@@ -35,6 +35,7 @@ from ..runner import compute_image_id
 from ..scribble import decode_scribble_b64
 from ..session_store import store
 from . import persistence as drp
+from . import analysis_store
 from .pipeline import METHOD_ID, run_hybrid_profile_diameter
 from .pipeline_v2 import METHOD_ID_V2, run_hybrid_profile_diameter_v2
 from .v3 import (
@@ -103,6 +104,7 @@ class PointsUpdateReq(BaseModel):
     y: float | None = None
     active_index: int | None = None
     points: list[PointItem] = Field(default_factory=list)
+    geometry: dict[str, Any] | None = None
     circle_type: str = ''
     image_id: str = ''
 
@@ -110,6 +112,7 @@ class PointsUpdateReq(BaseModel):
 class PointsSaveReq(BaseModel):
     session_id: str
     image_id: str
+    geometry: dict[str, Any] | None = None
 
 
 class SaveCircleReq(BaseModel):
@@ -192,6 +195,12 @@ class LocoDatasetReq(BaseModel):
     scribble_map_b64: str = ''
 
 
+class LocoDatasetCirclesReq(BaseModel):
+    image_id: str
+    circles: list[dict[str, Any]] = Field(default_factory=list)
+    active_circle_id: str = ''
+
+
 class LocoDatasetAugmentReq(BaseModel):
     items: list[str] = Field(default_factory=list)
     label_filter: Literal['all', 'valid', 'invalid', 'invalid_crossing', 'invalid_other'] = 'all'
@@ -237,10 +246,27 @@ class LocoTrainingSaveModelReq(BaseModel):
     training_run_id: str
     model_id: Literal['catboost', 'lightgbm', 'xgboost', 'extratrees']
     metrics: dict[str, Any] = Field(default_factory=dict)
+    model_name: str = ''
 
 
 class LocoTrainingDeleteSavedModelReq(BaseModel):
     saved_model_id: str
+
+
+class LocoTrainingUpdateSavedModelReq(BaseModel):
+    saved_model_id: str
+    model_name: str = ''
+    model_tags: list[dict[str, Any]] = Field(default_factory=list)
+    notes: str = ''
+
+
+class LocoTrainingUpdateRunModelReq(BaseModel):
+    training_run_id: str
+    model_id: str
+    model_name: str = ''
+    model_tags: list[dict[str, Any]] = Field(default_factory=list)
+    notes: str = ''
+    hidden: bool = False
 
 
 class LocoModelPresetSaveReq(BaseModel):
@@ -452,6 +478,8 @@ def _clamp_points(points: list[dict[str, Any]], shape_hw: tuple[int, int]) -> li
                 'x': float(np.clip(x, 0.0, max(0, w - 1))),
                 'y': float(np.clip(y, 0.0, max(0, h - 1))),
                 'point_index': int(point_index),
+                'circle_type': str(item.get('circle_type', '') or ''),
+                'radius_px': float(item.get('radius_px', 0) or 0),
             }
         )
     return out
@@ -475,6 +503,7 @@ def _points_response(sess: Any, payload: dict[str, Any]) -> dict[str, Any]:
         'ok': True,
         'points': points,
         'active_point_idx': active,
+        'geometry': drp.normalize_geometry(payload.get('geometry') or {}),
         'overlay_b64': overlay_b64,
     }
 
@@ -2106,6 +2135,213 @@ def _list_loco_training_runs() -> list[dict[str, Any]]:
     return items
 
 
+def _dedupe_loco_structured_tags(items: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tag in normalize_structured_tags(items):
+        key = json.dumps(tag, sort_keys=True, ensure_ascii=False).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+    return out
+
+
+def _loco_training_param_tags(run_meta: dict[str, Any], model_id: str = '') -> list[dict[str, Any]]:
+    meta = run_meta or {}
+    vector = meta.get('vector_config') or {}
+    model_labels = {
+        'catboost': 'CatBoost',
+        'lightgbm': 'LightGBM',
+        'xgboost': 'XGBoost',
+        'extratrees': 'ExtraTrees',
+    }
+    data_labels = {
+        'original': 'Solo original',
+        'augmented': 'Solo augmentado',
+        'all': 'Original + Augmentado',
+    }
+    tags: list[dict[str, Any]] = []
+
+    def add(label: str) -> None:
+        value = str(label or '').strip()
+        if value:
+            tags.append({'category': 'other', 'label': value})
+
+    mid = str(model_id or '').strip()
+    if mid:
+        add(f"Modelo: {model_labels.get(mid, mid)}")
+    selection = str(meta.get('data_selection') or '').strip()
+    if selection:
+        add(f"Datos: {data_labels.get(selection, selection)}")
+    if meta.get('test_size') is not None:
+        add(f"Test: {meta.get('test_size')}")
+    if meta.get('random_seed') is not None:
+        add(f"Seed: {meta.get('random_seed')}")
+    pixel_mode = str(vector.get('pixel_mode') or meta.get('pixel_mode') or '').strip()
+    if pixel_mode:
+        add(f"Pixeles: {pixel_mode}")
+    prune = vector.get('circle_prune_px', meta.get('circle_prune_px'))
+    if prune is not None:
+        add(f"Poda borde: {prune}")
+    add(f"patch_zoom_factor: {'si' if bool(vector.get('uses_patch_zoom_factor') or meta.get('uses_patch_zoom_factor')) else 'no'}")
+    add(f"radio real: {'si' if bool(vector.get('uses_source_radius_px') or meta.get('uses_source_radius_px')) else 'no'}")
+    add(f"CV5: {'si' if bool(meta.get('cv5_enabled')) else 'no'}")
+    add(f"Tuning: {'si' if bool(meta.get('is_tuning_trial')) else 'no'}")
+    return _dedupe_loco_structured_tags(tags)
+
+
+def _loco_image_tags_from_ids(image_ids: Any) -> list[dict[str, Any]]:
+    ids = {str(x or '').strip() for x in (image_ids or []) if str(x or '').strip()}
+    if not ids:
+        return []
+    tags: list[dict[str, Any]] = []
+    for image in list_library_images():
+        if str(image.get('image_id') or '') not in ids:
+            continue
+        tags.extend(normalize_structured_tags(image.get('structured_tags') or image.get('tags') or []))
+    return _dedupe_loco_structured_tags(tags)
+
+
+def _loco_image_ids_from_run_meta(saved_meta: dict[str, Any], run_meta: dict[str, Any]) -> list[str]:
+    ids = [str(x or '') for x in (saved_meta.get('image_ids') or run_meta.get('image_ids') or []) if str(x or '')]
+    if ids:
+        return sorted(set(ids))
+    selection = str(run_meta.get('data_selection') or '').strip()
+    if selection not in {'original', 'augmented', 'all'}:
+        return []
+    try:
+        return sorted({str(item.get('image_id') or '') for item in _loco_training_items(selection) if str(item.get('image_id') or '')})
+    except Exception:
+        return []
+
+
+def _loco_run_model_meta_path(run_root: Path) -> Path:
+    return run_root / 'model_manager_meta.json'
+
+
+def _read_loco_run_model_meta(run_root: Path) -> dict[str, Any]:
+    path = _loco_run_model_meta_path(run_root)
+    if not path.exists():
+        return {'models': {}}
+    try:
+        payload = dict(json.loads(path.read_text(encoding='utf-8')) or {})
+    except Exception:
+        payload = {'models': {}}
+    payload.setdefault('models', {})
+    return payload
+
+
+def _write_loco_run_model_meta(run_root: Path, payload: dict[str, Any]) -> None:
+    run_root.mkdir(parents=True, exist_ok=True)
+    payload.setdefault('models', {})
+    _loco_run_model_meta_path(run_root).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _loco_metric_rows_by_model(run_root: Path, file_name: str) -> dict[str, dict[str, Any]]:
+    rows = _read_csv_flexible(run_root / file_name)
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        mid = str(row.get('model_id') or '').strip()
+        if mid and mid not in out:
+            out[mid] = dict(row)
+    return out
+
+
+def _loco_saved_model_index() -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for item in _list_loco_saved_models():
+        source = str(item.get('source_run_id') or '').strip()
+        mid = str(item.get('model_id') or '').strip()
+        if source and mid:
+            out[f'{source}:{mid}'] = item
+    return out
+
+
+def _list_loco_training_models() -> list[dict[str, Any]]:
+    root = _training_runs_root()
+    if not root.exists():
+        return []
+    saved_index = _loco_saved_model_index()
+    items: list[dict[str, Any]] = []
+    for run_root in root.iterdir():
+        if not run_root.is_dir():
+            continue
+        meta_path = run_root / 'run_meta.json'
+        if not meta_path.exists():
+            continue
+        try:
+            run_meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        except Exception:
+            run_meta = {}
+        models_dir = run_root / 'models'
+        model_ids: set[str] = {str(x or '').strip() for x in (run_meta.get('models') or []) if str(x or '').strip()}
+        if models_dir.exists():
+            for model_file in models_dir.glob('*_model.pkl'):
+                mid = model_file.name.replace('_model.pkl', '')
+                if mid.endswith('_multiclass'):
+                    mid = mid.replace('_multiclass', '')
+                if mid:
+                    model_ids.add(mid)
+            for model_file in models_dir.glob('*_multiclass_model.pkl'):
+                mid = model_file.name.replace('_multiclass_model.pkl', '')
+                if mid:
+                    model_ids.add(mid)
+        model_meta = _read_loco_run_model_meta(run_root).get('models') or {}
+        binary_metrics = _loco_metric_rows_by_model(run_root, 'metrics_summary.csv')
+        multiclass_metrics = _loco_metric_rows_by_model(run_root, 'multiclass_metrics_summary.csv')
+        cv5_binary_metrics = _loco_metric_rows_by_model(run_root, 'cv5_binary_metrics_summary.csv')
+        cv5_multiclass_metrics = _loco_metric_rows_by_model(run_root, 'cv5_multiclass_metrics_summary.csv')
+        image_ids = _loco_image_ids_from_run_meta({}, run_meta)
+        for model_id in sorted(model_ids):
+            overrides = dict(model_meta.get(model_id) or {})
+            if bool(overrides.get('hidden')):
+                continue
+            binary_path = models_dir / f'{model_id}_model.pkl'
+            multiclass_path = models_dir / f'{model_id}_multiclass_model.pkl'
+            saved = saved_index.get(f'{run_root.name}:{model_id}') or {}
+            label = {
+                'catboost': 'CatBoost',
+                'lightgbm': 'LightGBM',
+                'xgboost': 'XGBoost',
+                'extratrees': 'ExtraTrees',
+            }.get(model_id, model_id)
+            items.append({
+                'training_run_id': run_root.name,
+                'run_id': run_root.name,
+                'model_key': f'{run_root.name}:{model_id}',
+                'model_id': model_id,
+                'model': label,
+                'model_name': str(overrides.get('model_name') or saved.get('model_name') or label),
+                'notes': str(overrides.get('notes') or ''),
+                'model_tags': _dedupe_loco_structured_tags(overrides.get('model_tags') or []),
+                'auto_model_tags': _loco_training_param_tags(run_meta, model_id),
+                'image_ids': image_ids,
+                'image_tags': _loco_image_tags_from_ids(image_ids),
+                'created_at': str(run_meta.get('created_at') or ''),
+                'data_selection': str(run_meta.get('data_selection') or ''),
+                'sample_count': int(run_meta.get('sample_count') or 0),
+                'feature_count': int(run_meta.get('feature_count') or 0),
+                'pixel_mode': str((run_meta.get('vector_config') or {}).get('pixel_mode') or run_meta.get('pixel_mode') or ''),
+                'circle_prune_px': int((run_meta.get('vector_config') or {}).get('circle_prune_px') or run_meta.get('circle_prune_px') or 0),
+                'has_binary': bool(binary_path.exists()),
+                'has_multiclass': bool(multiclass_path.exists()),
+                'metrics': dict(multiclass_metrics.get(model_id) or binary_metrics.get(model_id) or {}),
+                'binary_metrics': dict(binary_metrics.get(model_id) or {}),
+                'multiclass_metrics': dict(multiclass_metrics.get(model_id) or {}),
+                'cv5_binary_metrics': dict(cv5_binary_metrics.get(model_id) or {}),
+                'cv5_multiclass_metrics': dict(cv5_multiclass_metrics.get(model_id) or {}),
+                'saved_model_id': str(saved.get('saved_model_id') or ''),
+                'is_saved': bool(saved),
+                'run_dir': str(run_root),
+                '_mtime': run_root.stat().st_mtime,
+            })
+    items.sort(key=lambda x: float(x.get('_mtime') or 0.0), reverse=True)
+    for item in items:
+        item.pop('_mtime', None)
+    return items
+
+
 def _list_loco_saved_models() -> list[dict[str, Any]]:
     root = _saved_training_models_root()
     if not root.exists():
@@ -2127,6 +2363,7 @@ def _list_loco_saved_models() -> list[dict[str, Any]]:
         except Exception:
             run_meta = {}
         model_id = str(saved_meta.get('model_id') or run_meta.get('saved_model_id') or '')
+        image_ids = _loco_image_ids_from_run_meta(saved_meta, run_meta)
         models_dir = path / 'models'
         has_binary = bool(model_id and (models_dir / f'{model_id}_model.pkl').exists())
         has_multiclass = bool(model_id and (models_dir / f'{model_id}_multiclass_model.pkl').exists())
@@ -2136,6 +2373,7 @@ def _list_loco_saved_models() -> list[dict[str, Any]]:
             'source_run_id': str(saved_meta.get('source_run_id') or run_meta.get('source_run_id') or ''),
             'model_id': model_id,
             'model': str(saved_meta.get('model') or model_id),
+            'model_name': str(saved_meta.get('model_name') or saved_meta.get('model') or model_id),
             'created_at': str(saved_meta.get('created_at') or ''),
             'data_selection': str(run_meta.get('data_selection') or ''),
             'sample_count': int(run_meta.get('sample_count') or 0),
@@ -2145,6 +2383,11 @@ def _list_loco_saved_models() -> list[dict[str, Any]]:
             'has_binary': has_binary,
             'has_multiclass': has_multiclass,
             'metrics': dict(saved_meta.get('metrics') or {}),
+            'notes': str(saved_meta.get('notes') or ''),
+            'image_ids': image_ids,
+            'image_tags': _loco_image_tags_from_ids(image_ids),
+            'model_tags': _dedupe_loco_structured_tags(saved_meta.get('model_tags') or []),
+            'auto_model_tags': _loco_training_param_tags(run_meta, model_id),
             'run_dir': str(path),
             '_mtime': path.stat().st_mtime,
         })
@@ -3383,6 +3626,7 @@ def points_update(req: PointsUpdateReq) -> dict[str, Any]:
     state = drp.load_points(image_id)
     points = _clamp_points(list(state.get('points') or []), sess.image_rgb.shape[:2])
     active = int(state.get('active_point_idx', 0 if points else -1))
+    geometry = drp.normalize_geometry(state.get('geometry') or {})
 
     if req.action == 'add':
         if req.x is None or req.y is None:
@@ -3406,12 +3650,16 @@ def points_update(req: PointsUpdateReq) -> dict[str, Any]:
     elif req.action == 'clear':
         points = []
         active = -1
+        geometry = drp.normalize_geometry({})
     elif req.action == 'replace':
         points = _clamp_points([p.model_dump() for p in req.points], sess.image_rgb.shape[:2])
         idx = int(req.active_index if req.active_index is not None else (0 if points else -1))
         active = min(max(idx, -1), len(points) - 1) if points else -1
 
-    payload = drp.save_points(image_id, points, active)
+    if req.geometry is not None and req.action != 'clear':
+        geometry = drp.normalize_geometry(req.geometry)
+
+    payload = drp.save_points(image_id, points, active, geometry=geometry)
     return _points_response(sess, payload)
 
 
@@ -3419,7 +3667,8 @@ def points_update(req: PointsUpdateReq) -> dict[str, Any]:
 def points_save(req: PointsSaveReq) -> dict[str, Any]:
     sess = _require_active_image(req.session_id, req.image_id)
     payload = drp.load_points(req.image_id)
-    saved = drp.save_points(req.image_id, list(payload.get('points') or []), int(payload.get('active_point_idx', -1)))
+    geometry = req.geometry if req.geometry is not None else payload.get('geometry')
+    saved = drp.save_points(req.image_id, list(payload.get('points') or []), int(payload.get('active_point_idx', -1)), geometry=geometry)
     return _points_response(sess, saved)
 
 
@@ -3457,7 +3706,7 @@ def points_save_circle(req: SaveCircleReq) -> dict[str, Any]:
     print(f'[DEBUG-SAVE] Existing points: {len(pts)}, file found: {state.get("found", True)}')
     active = int(state.get('active_point_idx', len(pts) - 1 if pts else -1))
     pts.append({'x': float(req.x), 'y': float(req.y), 'circle_type': str(req.circle_type or ''), 'radius_px': float(req.radius_px or 0)})
-    saved = drp.save_points(iid, pts, active)
+    saved = drp.save_points(iid, pts, active, geometry=state.get('geometry') or {})
     print(f'[DEBUG-SAVE] Saved {len(pts)} points to {iid}')
     return {'ok': True, 'payload': saved}
 
@@ -3489,7 +3738,7 @@ def points_list(image_id: str) -> dict[str, Any]:
             'circle_type': str(p.get('circle_type', '') or ''),
             'radius_px': float(p.get('radius_px', 0) or 0),
         })
-    return {'ok': True, 'payload': {'image_id': image_id, 'points': points_list}}
+    return {'ok': True, 'payload': {'image_id': image_id, 'points': points_list, 'geometry': drp.normalize_geometry(state.get('geometry') or {})}}
 
 
 @router.post('/points/sync')
@@ -3506,9 +3755,37 @@ def points_sync(req: SyncPointsReq) -> dict[str, Any]:
             'circle_type': str(p.get('circle_type', '') or ''),
             'radius_px': float(p.get('radius_px', 0) or 0),
         })
-    saved = drp.save_points(iid, pts, 0)
+    state = drp.load_points(iid)
+    saved = drp.save_points(iid, pts, 0, geometry=state.get('geometry') or {})
     print(f'[DEBUG-SYNC] Saved {len(pts)} points for {iid}')
     return {'ok': True, 'payload': saved}
+
+
+@router.get('/loco-dataset/circles/load')
+def loco_dataset_circles_load(image_id: str) -> dict[str, Any]:
+    iid = str(image_id or '').strip()
+    if not iid:
+        raise HTTPException(status_code=400, detail='image_id requerido.')
+    payload = drp.load_loco_dataset_circles(iid)
+    return {'ok': True, 'payload': payload}
+
+
+@router.post('/loco-dataset/circles/sync')
+def loco_dataset_circles_sync(req: LocoDatasetCirclesReq) -> dict[str, Any]:
+    iid = str(req.image_id or '').strip()
+    if not iid:
+        raise HTTPException(status_code=400, detail='image_id requerido.')
+    payload = drp.save_loco_dataset_circles(iid, list(req.circles or []), str(req.active_circle_id or ''))
+    return {'ok': True, 'payload': payload}
+
+
+@router.post('/loco-dataset/circles/clear')
+def loco_dataset_circles_clear(req: LocoDatasetCirclesReq) -> dict[str, Any]:
+    iid = str(req.image_id or '').strip()
+    if not iid:
+        raise HTTPException(status_code=400, detail='image_id requerido.')
+    payload = drp.clear_loco_dataset_circles(iid)
+    return {'ok': True, 'payload': payload}
 
 
 @router.post('/run')
@@ -4376,6 +4653,16 @@ def loco_dataset_augment_clear() -> dict[str, Any]:
 def loco_dataset_circle_counts(image_id: str) -> dict[str, Any]:
     if not str(image_id or '').strip():
         raise HTTPException(status_code=400, detail='image_id requerido.')
+    circles_payload = drp.load_loco_dataset_circles(image_id, migrate_legacy=False)
+    circles = list(circles_payload.get('circles') or [])
+    if circles:
+        counts = {'valid': 0, 'invalid_crossing': 0, 'invalid_other': 0}
+        for circle in circles:
+            label = str(circle.get('label') or 'invalid_other')
+            if label not in counts:
+                label = 'invalid_other'
+            counts[label] += 1
+        return {'ok': True, 'payload': {'image_id': image_id, 'counts': counts}}
     root = _loco_dataset_root()
     safe_id = str(image_id or '').strip()
     counts = {'valid': 0, 'invalid_crossing': 0, 'invalid_other': 0}
@@ -5242,6 +5529,7 @@ def loco_training_train(req: LocoTrainingReq) -> dict[str, Any]:
             'radio_px_semantics': 'source_radius_px' if bool(vector_config.get('uses_source_radius_px')) else 'stored_radio_px',
         },
         'sample_count': len(items),
+        'image_ids': sorted({str(item.get('image_id') or '') for item in items if str(item.get('image_id') or '')}),
         'train_count': len(train_idx),
         'test_count': len(test_idx),
         'group_count': int(group_count),
@@ -5386,6 +5674,7 @@ def loco_training_tune(req: LocoTrainingTuneReq) -> dict[str, Any]:
                 'radio_px_semantics': 'source_radius_px' if bool(vector_config.get('uses_source_radius_px')) else 'stored_radio_px',
             },
             'sample_count': len(items),
+            'image_ids': sorted({str(item.get('image_id') or '') for item in items if str(item.get('image_id') or '')}),
             'train_count': len(train_idx),
             'test_count': len(test_idx),
             'group_count': len({str(item.get('group_id') or item.get('item_id') or idx) for idx, item in enumerate(items)}),
@@ -5565,6 +5854,11 @@ def loco_training_runs() -> dict[str, Any]:
     return {'ok': True, 'items': _list_loco_training_runs()}
 
 
+@router.get('/loco-training/models')
+def loco_training_models() -> dict[str, Any]:
+    return {'ok': True, 'items': _list_loco_training_models()}
+
+
 @router.get('/loco-training/progress/{progress_id}')
 def loco_training_progress(progress_id: str) -> dict[str, Any]:
     progress = dict(LOCO_TRAINING_PROGRESS.get(str(progress_id or '').strip()) or {})
@@ -5608,6 +5902,7 @@ def loco_training_save_model(req: LocoTrainingSaveModelReq) -> dict[str, Any]:
         run_meta = json.loads(run_meta_path.read_text(encoding='utf-8')) if run_meta_path.exists() else {}
     except Exception:
         run_meta = {}
+    run_model_meta = dict((_read_loco_run_model_meta(source_root).get('models') or {}).get(model_id) or {})
     saved_run_meta = {
         **run_meta,
         'run_id': saved_id,
@@ -5629,18 +5924,77 @@ def loco_training_save_model(req: LocoTrainingSaveModelReq) -> dict[str, Any]:
         'xgboost': 'XGBoost',
         'extratrees': 'ExtraTrees',
     }
+    visible_name = str(req.model_name or '').strip() or str(run_model_meta.get('model_name') or model_labels.get(model_id, model_id))
     saved_meta = {
         'saved_model_id': saved_id,
         'source_run_id': source_run_id,
         'model_id': model_id,
         'model': model_labels.get(model_id, model_id),
+        'model_name': visible_name,
         'created_at': created_at,
         'has_binary': bool(binary_path.exists()),
         'has_multiclass': bool(multiclass_path.exists()),
+        'image_ids': [str(x or '') for x in (run_meta.get('image_ids') or []) if str(x or '')],
+        'model_tags': _dedupe_loco_structured_tags(run_model_meta.get('model_tags') or []),
+        'notes': str(run_model_meta.get('notes') or ''),
         'metrics': dict(req.metrics or {}),
     }
     (saved_root / 'saved_model_meta.json').write_text(json.dumps(saved_meta, ensure_ascii=False, indent=2), encoding='utf-8')
     return {'ok': True, 'item': {**saved_meta, 'training_run_id': saved_id, 'run_dir': str(saved_root)}}
+
+
+@router.post('/loco-training/update-run-model')
+def loco_training_update_run_model(req: LocoTrainingUpdateRunModelReq) -> dict[str, Any]:
+    run_id = _resolve_training_run_id(req.training_run_id)
+    run_root = _training_artifact_root(run_id)
+    if not run_root.exists():
+        raise HTTPException(status_code=404, detail=f'Run no encontrado: {run_id}')
+    model_id = str(req.model_id or '').strip()
+    if not model_id:
+        raise HTTPException(status_code=400, detail='model_id requerido.')
+    models_dir = run_root / 'models'
+    if not ((models_dir / f'{model_id}_model.pkl').exists() or (models_dir / f'{model_id}_multiclass_model.pkl').exists()):
+        raise HTTPException(status_code=404, detail=f'Modelo no encontrado: {run_id}/{model_id}')
+    payload = _read_loco_run_model_meta(run_root)
+    models_meta = dict(payload.get('models') or {})
+    prev = dict(models_meta.get(model_id) or {})
+    prev.update({
+        'model_name': str(req.model_name or '').strip(),
+        'model_tags': _dedupe_loco_structured_tags(req.model_tags or []),
+        'notes': str(req.notes or '').strip(),
+        'hidden': bool(req.hidden),
+        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    })
+    models_meta[model_id] = prev
+    payload['models'] = models_meta
+    _write_loco_run_model_meta(run_root, payload)
+    item = next((m for m in _list_loco_training_models() if str(m.get('training_run_id') or '') == run_id and str(m.get('model_id') or '') == model_id), None)
+    return {'ok': True, 'item': item, 'items': _list_loco_training_models()}
+
+
+@router.post('/loco-training/update-saved-model')
+def loco_training_update_saved_model(req: LocoTrainingUpdateSavedModelReq) -> dict[str, Any]:
+    saved_model_id = str(req.saved_model_id or '').strip()
+    if not saved_model_id:
+        raise HTTPException(status_code=400, detail='saved_model_id requerido.')
+    root = (_saved_training_models_root() / saved_model_id).resolve()
+    allowed = _saved_training_models_root().resolve()
+    if allowed not in root.parents or not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=404, detail=f'Modelo guardado no encontrado: {saved_model_id}')
+    meta_path = root / 'saved_model_meta.json'
+    try:
+        saved_meta = json.loads(meta_path.read_text(encoding='utf-8')) if meta_path.exists() else {}
+    except Exception:
+        saved_meta = {}
+    name = str(req.model_name or '').strip()
+    if name:
+        saved_meta['model_name'] = name
+    saved_meta['model_tags'] = _dedupe_loco_structured_tags(req.model_tags or [])
+    saved_meta['notes'] = str(req.notes or '').strip()
+    saved_meta['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    meta_path.write_text(json.dumps(saved_meta, ensure_ascii=False, indent=2), encoding='utf-8')
+    item = next((m for m in _list_loco_saved_models() if str(m.get('saved_model_id') or '') == saved_model_id), None)
+    return {'ok': True, 'item': item or saved_meta, 'items': _list_loco_saved_models()}
 
 
 @router.post('/loco-training/delete-saved-model')
@@ -6143,6 +6497,29 @@ class CalibrationLoadReq(BaseModel):
     image_id: str
 
 
+class MeasurementSaveFromRunReq(BaseModel):
+    run_id: str
+
+
+class MeasurementQueryReq(BaseModel):
+    image_ids: list[str] = Field(default_factory=list)
+    project_ids: list[str] = Field(default_factory=list)
+    structured_tags: list[dict[str, Any]] = Field(default_factory=list)
+    unit: str = 'nm'
+    include_uncalibrated: bool = False
+
+
+class AnalysisSaveReq(BaseModel):
+    analysis_id: str = ''
+    name: str = ''
+    filters: dict[str, Any] = Field(default_factory=dict)
+    unit: str = 'nm'
+    include_uncalibrated: bool = False
+    project_ids: list[str] = Field(default_factory=list)
+    structured_tags: list[dict[str, Any]] = Field(default_factory=list)
+    chart_config: dict[str, Any] = Field(default_factory=dict)
+
+
 def _loco_model_preset_safe_id(text: str) -> str:
     raw = str(text or '').strip()
     out: list[str] = []
@@ -6180,6 +6557,70 @@ def _list_loco_model_presets() -> list[dict[str, Any]]:
     for item in items:
         item.pop('_mtime', None)
     return items
+
+
+def _calibration_suggestion_from_tags(image_id: str) -> dict[str, Any] | None:
+    image = next((item for item in list_library_images() if str(item.get('image_id') or '') == str(image_id or '')), None)
+    if not image:
+        return None
+    for tag in normalize_structured_tags(image.get('structured_tags') or image.get('tags') or []):
+        if str(tag.get('category') or '') != 'size':
+            continue
+        try:
+            known_value = float(str(tag.get('value') or '').replace(',', '.'))
+        except Exception:
+            continue
+        if not np.isfinite(known_value) or known_value <= 0:
+            continue
+        unit = str(tag.get('unit') or 'nm').strip()
+        unit = 'um' if unit == 'um' else 'nm'
+        return {
+            'image_id': image_id,
+            'enabled': True,
+            'unit': unit,
+            'known_value': known_value,
+            'pixel_distance': 0,
+            'unit_per_px': 0,
+            'line_x1': None,
+            'line_y1': None,
+            'line_x2': None,
+            'line_y2': None,
+            'suggested_from_tags': True,
+        }
+    return None
+
+
+def _load_calibration_data(image_id: str) -> dict[str, Any] | None:
+    path = CALIBRATION_DIR / f'{_calibration_safe_id(image_id)}.json'
+    if not path.exists():
+        return _calibration_suggestion_from_tags(image_id)
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if 'known_value' not in data and 'known_nm' in data:
+        data['known_value'] = data.get('known_nm')
+    if 'unit_per_px' not in data and 'nm_per_px' in data:
+        data['unit_per_px'] = data.get('nm_per_px')
+    data['enabled'] = True
+    line_values = [data.get('line_x1'), data.get('line_y1'), data.get('line_x2'), data.get('line_y2')]
+    has_line = all(value is not None and np.isfinite(float(value)) for value in line_values)
+    line_distance = 0.0
+    if has_line:
+        line_distance = float(np.hypot(float(data.get('line_x2')) - float(data.get('line_x1')), float(data.get('line_y2')) - float(data.get('line_y1'))))
+    if line_distance <= 0:
+        data.update({
+            'pixel_distance': 0,
+            'unit_per_px': 0,
+            'line_x1': None,
+            'line_y1': None,
+            'line_x2': None,
+            'line_y2': None,
+            'nm_per_px': 0,
+        })
+    else:
+        known_value = float(data.get('known_value') or 0.0)
+        data['pixel_distance'] = line_distance
+        data['unit_per_px'] = known_value / line_distance if known_value > 0 else 0
+        data['nm_per_px'] = data['unit_per_px'] if str(data.get('unit') or 'nm') == 'nm' else data['unit_per_px'] * 1000.0
+    return data
 
 
 @router.get('/loco-models/presets')
@@ -6276,42 +6717,46 @@ def loco_model_exclusions_delete(req: LocoModelExcludeRectsDeleteReq) -> dict[st
 
 @router.post('/calibration/save')
 def calibration_save(req: CalibrationSaveReq) -> dict[str, Any]:
+    known_value = float(req.known_value or 0.0)
+    line_values = [req.line_x1, req.line_y1, req.line_x2, req.line_y2]
+    has_line = all(value is not None and np.isfinite(float(value)) for value in line_values)
+    line_distance = 0.0
+    if has_line:
+        line_distance = float(np.hypot(float(req.line_x2) - float(req.line_x1), float(req.line_y2) - float(req.line_y1)))
+    if not has_line or line_distance <= 0 or known_value <= 0:
+        raise HTTPException(status_code=400, detail='Dibuja una linea de escala valida antes de guardar la calibracion.')
+    pixel_distance = line_distance
+    unit_per_px = known_value / pixel_distance
     CALIBRATION_DIR.mkdir(parents=True, exist_ok=True)
     path = CALIBRATION_DIR / f'{_calibration_safe_id(req.image_id)}.json'
     data = {
         'image_id': req.image_id,
-        'enabled': req.enabled,
+        'enabled': True,
         'unit': req.unit,
-        'known_value': req.known_value,
-        'pixel_distance': req.pixel_distance,
-        'unit_per_px': req.unit_per_px,
+        'known_value': known_value,
+        'pixel_distance': pixel_distance,
+        'unit_per_px': unit_per_px,
         'line_x1': req.line_x1,
         'line_y1': req.line_y1,
         'line_x2': req.line_x2,
         'line_y2': req.line_y2,
         # Legacy aliases preserved for older readers.
-        'known_nm': req.known_value,
-        'nm_per_px': req.unit_per_px if str(req.unit or 'nm') == 'nm' else req.unit_per_px * 1000.0,
+        'known_nm': known_value,
+        'nm_per_px': unit_per_px if str(req.unit or 'nm') == 'nm' else unit_per_px * 1000.0,
     }
     path.write_text(json.dumps(data, indent=2), encoding='utf-8')
-    return {'ok': True, 'image_id': req.image_id}
+    measurements = analysis_store.update_measurements_calibration_for_image(req.image_id, data)
+    return {'ok': True, 'image_id': req.image_id, 'measurements': measurements}
 
 
 @router.get('/calibration/load')
 def calibration_load(image_id: str) -> dict[str, Any]:
     if not str(image_id or '').strip():
         raise HTTPException(status_code=400, detail='image_id requerido.')
-    path = CALIBRATION_DIR / f'{_calibration_safe_id(image_id)}.json'
-    if not path.exists():
-        return {'ok': True, 'image_id': image_id, 'calibration': None}
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = _load_calibration_data(image_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f'Error al leer calibracion: {exc}') from exc
-    if 'known_value' not in data and 'known_nm' in data:
-        data['known_value'] = data.get('known_nm')
-    if 'unit_per_px' not in data and 'nm_per_px' in data:
-        data['unit_per_px'] = data.get('nm_per_px')
     return {'ok': True, 'image_id': image_id, 'calibration': data}
 
 
@@ -6354,6 +6799,108 @@ def reports_export(image_id: str) -> dict[str, Any]:
         info = export_diameter_report(image_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f'No se pudo exportar reporte Diameter Research: {exc}') from exc
+    return {'ok': True, **info}
+
+
+@router.post('/measurements/save-from-run')
+def measurements_save_from_run(req: MeasurementSaveFromRunReq) -> dict[str, Any]:
+    run_id = str(req.run_id or '').strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail='run_id requerido.')
+    try:
+        run = drp.load_diameter_run(run_id)
+        calibration = _load_calibration_data(str(run.get('image_id') or ''))
+        payload = analysis_store.save_measurements_from_run(run_id, calibration=calibration)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'No se pudieron guardar mediciones internas: {exc}') from exc
+    return {'ok': True, 'payload': payload}
+
+
+def _split_query_values(text: str = '') -> list[str]:
+    return [item.strip() for item in str(text or '').split(',') if item.strip()]
+
+
+def _measurement_query_payload(
+    image_ids: str = '',
+    project_ids: str = '',
+    structured_tags: str = '',
+    unit: str = 'nm',
+    include_uncalibrated: bool = False,
+) -> dict[str, Any]:
+    tags: list[dict[str, Any]] = []
+    if str(structured_tags or '').strip():
+        try:
+            parsed = json.loads(structured_tags)
+            tags = normalize_structured_tags(parsed)
+        except Exception:
+            tags = []
+    return {
+        'filters': {
+            'image_ids': _split_query_values(image_ids),
+            'project_ids': _split_query_values(project_ids),
+            'structured_tags': tags,
+        },
+        'unit': unit,
+        'include_uncalibrated': include_uncalibrated,
+    }
+
+
+@router.get('/measurements/query')
+def measurements_query(
+    image_ids: str = '',
+    project_ids: str = '',
+    structured_tags: str = '',
+    unit: str = 'nm',
+    include_uncalibrated: bool = False,
+) -> dict[str, Any]:
+    payload = _measurement_query_payload(image_ids, project_ids, structured_tags, unit, include_uncalibrated)
+    return {'ok': True, 'payload': analysis_store.query_measurements(**payload)}
+
+
+@router.post('/measurements/query')
+def measurements_query_post(req: MeasurementQueryReq) -> dict[str, Any]:
+    filters = {
+        'image_ids': req.image_ids,
+        'project_ids': req.project_ids,
+        'structured_tags': req.structured_tags,
+    }
+    return {'ok': True, 'payload': analysis_store.query_measurements(filters, unit=req.unit, include_uncalibrated=req.include_uncalibrated)}
+
+
+@router.get('/measurements/summary-by-image')
+def measurements_summary_by_image() -> dict[str, Any]:
+    return {'ok': True, 'items': analysis_store.summarize_measurements_by_image()}
+
+
+@router.get('/analysis/list')
+def analysis_list() -> dict[str, Any]:
+    return {'ok': True, 'items': analysis_store.list_analyses()}
+
+
+@router.post('/analysis/save')
+def analysis_save(req: AnalysisSaveReq) -> dict[str, Any]:
+    try:
+        item = analysis_store.save_analysis(req.model_dump())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'No se pudo guardar analisis: {exc}') from exc
+    return {'ok': True, 'item': item}
+
+
+@router.get('/analysis/export')
+def analysis_export(
+    image_ids: str = '',
+    project_ids: str = '',
+    structured_tags: str = '',
+    unit: str = 'nm',
+    include_uncalibrated: bool = False,
+) -> dict[str, Any]:
+    payload = _measurement_query_payload(image_ids, project_ids, structured_tags, unit, include_uncalibrated)
+    try:
+        info = analysis_store.export_analysis(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'No se pudo exportar analisis: {exc}') from exc
     return {'ok': True, **info}
 
 

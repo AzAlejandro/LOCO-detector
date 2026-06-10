@@ -34,6 +34,9 @@ For sharing the application across machines, Docker is the recommended
 distribution path. The Docker images contain source code and CPU-only
 dependencies, but never preload the heavy project work stored under `outputs/`.
 
+For a complete step-by-step publication and usage guide with GitHub Releases on
+Windows and macOS, see [docs/GITHUB_RELEASES_WINDOWS_MAC.md](docs/GITHUB_RELEASES_WINDOWS_MAC.md).
+
 Requirements:
 
 - Docker Desktop with Docker Compose

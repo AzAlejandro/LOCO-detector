@@ -60,3 +60,9 @@ img/
 
 # Generated outputs (user data — images, runs, models, scribbles)
 outputs/
+
+# Release packaging artifacts
+release-assets/
+LOCO-detector-v*-release.zip
+loco-detector-v*-docker-images.tar
+loco-detector-v*-docker-images.tar.gz

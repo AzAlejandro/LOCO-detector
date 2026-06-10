@@ -11,7 +11,7 @@ import React, { useMemo } from 'react'
  *   height: number — SVG height
  */
 
-const MARGIN = { top: 20, right: 20, bottom: 50, left: 60 }
+const MARGIN = { top: 22, right: 24, bottom: 78, left: 82 }
 
 function computeStats(values) {
   if (!values || values.length === 0) {
@@ -49,15 +49,105 @@ function computeBins(values, binCount) {
   return bins
 }
 
-export default function Histogram({ values, unit = 'px', bins: binCount = 20, width = 500, height = 250 }) {
+function formatTick(value) {
+  const abs = Math.abs(value)
+  if (abs >= 100) return value.toFixed(0)
+  if (abs >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+function buildIntegerTicks(maxCount, maxTicks = 6) {
+  if (maxCount <= 0) return [0]
+  if (maxCount <= maxTicks - 1) {
+    return Array.from({ length: maxCount + 1 }, (_, i) => i)
+  }
+  const step = Math.ceil(maxCount / (maxTicks - 1))
+  const ticks = []
+  for (let value = 0; value < maxCount; value += step) {
+    ticks.push(value)
+  }
+  if (ticks[ticks.length - 1] !== maxCount) ticks.push(maxCount)
+  return ticks
+}
+
+function buildValueTicks(binned, maxTicks = 6) {
+  if (!binned.length) return []
+  const min = binned[0].binStart
+  const max = binned[binned.length - 1].binEnd
+  if (max === min) return [min]
+  return Array.from({ length: maxTicks }, (_, i) => min + ((max - min) * i) / (maxTicks - 1))
+}
+
+function labelWithUnit(label, unit) {
+  const clean = String(label || '').trim() || 'Diametro'
+  if (clean.includes('{unit}')) return clean.replace('{unit}', unit)
+  return `${clean} (${unit})`
+}
+
+export default function Histogram({
+  values,
+  unit = 'px',
+  bins: binCount = 20,
+  width = 500,
+  height = 250,
+  xPaddingEnabled = true,
+  xPaddingPercent = 4,
+  grid = 'both',
+  gridStyle = 'solid',
+  barColor = '#45464d',
+  strokeColor = '#191c1e',
+  backgroundColor = 'transparent',
+  backgroundAltColor = '#f7f9fb',
+  backgroundMode = 'solid',
+  fontFamily = 'JetBrains Mono',
+  fontSize = 10,
+  tickFontSize = fontSize,
+  labelFontSize = fontSize + 1,
+  fontColor = '#45464d',
+  axisColor = '#76777d',
+  gridColor = '#eceef0',
+  xLabel = 'Diametro',
+  yLabel = 'Frecuencia',
+  xLabelOffset = 16,
+  yLabelOffset = 18,
+  borderTop = false,
+  borderRight = false,
+  borderBottom = true,
+  borderLeft = true,
+}) {
   const stats = useMemo(() => computeStats(values), [values])
   const binned = useMemo(() => computeBins(values, binCount), [values, binCount])
 
-  const plotW = width - MARGIN.left - MARGIN.right
-  const plotH = height - MARGIN.top - MARGIN.bottom
+  const plotW = Math.max(10, width - MARGIN.left - MARGIN.right)
+  const plotH = Math.max(10, height - MARGIN.top - MARGIN.bottom)
 
   const maxCount = Math.max(1, ...binned.map((b) => b.count))
-  const barW = binned.length > 0 ? Math.max(1, plotW / binned.length - 1) : 0
+  const xPad = xPaddingEnabled ? Math.min(plotW * 0.25, Math.max(0, plotW * (Number(xPaddingPercent || 0) / 100))) : 0
+  const innerPlotW = Math.max(10, plotW - xPad * 2)
+  const barW = binned.length > 0 ? Math.max(1, innerPlotW / binned.length - 1) : 0
+  const yTicks = buildIntegerTicks(maxCount)
+  const xTicks = buildValueTicks(binned)
+  const minX = binned[0]?.binStart ?? 0
+  const maxX = binned[binned.length - 1]?.binEnd ?? 1
+  const xRange = maxX - minX || 1
+  const xAxisLabel = labelWithUnit(xLabel, unit)
+  const tickSize = Number(tickFontSize || fontSize || 10)
+  const labelSize = Number(labelFontSize || fontSize + 1 || 11)
+  const safeXLabelOffset = Number(xLabelOffset ?? 16)
+  const safeYLabelOffset = Number(yLabelOffset ?? 18)
+  const backgroundFill = backgroundMode === 'transparent'
+    ? 'transparent'
+    : backgroundMode === 'soft'
+      ? backgroundAltColor
+      : backgroundMode === 'gradient'
+        ? 'url(#histogram-bg-gradient)'
+        : backgroundColor
+  const showGrid = gridStyle !== 'none' && grid !== 'none'
+  const gridDash = gridStyle === 'dotted'
+    ? '1 4'
+    : gridStyle === 'dashed'
+      ? '5 4'
+      : undefined
 
   if (!values || values.length === 0) {
     return (
@@ -93,28 +183,48 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
           </tbody>
         </table>
       </div>
-      <svg width={width} height={height} className="histogram-svg">
-        {/* Axes */}
-        <line x1={MARGIN.left} y1={MARGIN.top + plotH} x2={MARGIN.left + plotW} y2={MARGIN.top + plotH} stroke="#76777d" />
-        <line x1={MARGIN.left} y1={MARGIN.top} x2={MARGIN.left} y2={MARGIN.top + plotH} stroke="#76777d" />
+      <svg width={width} height={height} className="histogram-svg" style={{ background: 'transparent', fontFamily }}>
+        <defs>
+          <linearGradient id="histogram-bg-gradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={backgroundColor} />
+            <stop offset="100%" stopColor={backgroundAltColor} />
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width={width} height={height} fill={backgroundFill} />
+
+        {/* Grid */}
+        {yTicks.map((tick) => {
+          const y = MARGIN.top + plotH - (tick / maxCount) * plotH
+          return showGrid && ['y', 'both'].includes(grid) ? (
+            <line key={`ygrid-${tick}`} x1={MARGIN.left} y1={y} x2={MARGIN.left + plotW} y2={y} stroke={gridColor} strokeWidth="0.5" strokeDasharray={gridDash} />
+          ) : null
+        })}
+        {showGrid && ['x', 'both'].includes(grid) ? xTicks.map((tick) => {
+          const x = MARGIN.left + xPad + ((tick - minX) / xRange) * innerPlotW
+          return <line key={`xgrid-${tick}`} x1={x} y1={MARGIN.top} x2={x} y2={MARGIN.top + plotH} stroke={gridColor} strokeWidth="0.35" strokeDasharray={gridDash} />
+        }) : null}
+
+        {/* Plot borders */}
+        {borderTop ? <line x1={MARGIN.left} y1={MARGIN.top} x2={MARGIN.left + plotW} y2={MARGIN.top} stroke={axisColor} /> : null}
+        {borderRight ? <line x1={MARGIN.left + plotW} y1={MARGIN.top} x2={MARGIN.left + plotW} y2={MARGIN.top + plotH} stroke={axisColor} /> : null}
+        {borderBottom ? <line x1={MARGIN.left} y1={MARGIN.top + plotH} x2={MARGIN.left + plotW} y2={MARGIN.top + plotH} stroke={axisColor} /> : null}
+        {borderLeft ? <line x1={MARGIN.left} y1={MARGIN.top} x2={MARGIN.left} y2={MARGIN.top + plotH} stroke={axisColor} /> : null}
 
         {/* Y-axis labels */}
-        {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
-          const y = MARGIN.top + plotH - frac * plotH
-          const val = Math.round(frac * maxCount)
+        {yTicks.map((tick) => {
+          const y = MARGIN.top + plotH - (tick / maxCount) * plotH
           return (
-            <g key={frac}>
-              <text x={MARGIN.left - 8} y={y + 4} textAnchor="end" fontSize="10" fill="#76777d">
-                {val}
+            <g key={tick}>
+              <text x={MARGIN.left - 10} y={y + 4} textAnchor="end" fontSize={tickSize} fill={fontColor}>
+                {tick}
               </text>
-              <line x1={MARGIN.left} y1={y} x2={MARGIN.left + plotW} y2={y} stroke="#eceef0" strokeWidth="0.5" />
             </g>
           )
         })}
 
         {/* Bars */}
         {binned.map((b, i) => {
-          const x = MARGIN.left + i * (barW + 1)
+          const x = MARGIN.left + xPad + i * (barW + 1)
           const barH = (b.count / maxCount) * plotH
           const y = MARGIN.top + plotH - barH
           return (
@@ -124,8 +234,8 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
               y={y}
               width={barW}
               height={barH}
-              fill="#45464d"
-              stroke="#191c1e"
+              fill={barColor}
+              stroke={strokeColor}
               strokeWidth="0.5"
               rx="1"
             >
@@ -134,9 +244,31 @@ export default function Histogram({ values, unit = 'px', bins: binCount = 20, wi
           )
         })}
 
-        {/* X-axis label */}
-        <text x={MARGIN.left + plotW / 2} y={height - 5} textAnchor="middle" fontSize="11" fill="#76777d">
-          Diametro ({unit})
+        {/* X-axis ticks and labels */}
+        {xTicks.map((tick) => {
+          const x = MARGIN.left + xPad + ((tick - minX) / xRange) * innerPlotW
+          return (
+            <g key={`xtick-${tick}`}>
+              {borderBottom ? <line x1={x} y1={MARGIN.top + plotH} x2={x} y2={MARGIN.top + plotH + 4} stroke={axisColor} /> : null}
+              <text x={x} y={MARGIN.top + plotH + tickSize + 11} textAnchor="middle" fontSize={tickSize} fill={fontColor}>
+                {formatTick(tick)}
+              </text>
+            </g>
+          )
+        })}
+
+        <text x={MARGIN.left + plotW / 2} y={height - safeXLabelOffset} textAnchor="middle" fontSize={labelSize} fill={fontColor}>
+          {xAxisLabel}
+        </text>
+        <text
+          x={safeYLabelOffset}
+          y={MARGIN.top + plotH / 2}
+          textAnchor="middle"
+          fontSize={labelSize}
+          fill={fontColor}
+          transform={`rotate(-90 ${safeYLabelOffset} ${MARGIN.top + plotH / 2})`}
+        >
+          {yLabel || 'Frecuencia'}
         </text>
       </svg>
     </div>

@@ -9,6 +9,9 @@ import { TutorialSidebar, TutorialViewer } from './components/TutorialHub'
 import { SCRIBBLE_TUTORIAL_BAD_IMAGE_NAME, SCRIBBLE_TUTORIAL_IMAGE_NAME, TUTORIAL_STORAGE_KEY, TUTORIALS, TUTORIAL_NAV_TABS, getChainedTutorialIds, getTutorialById, getTutorialsByScope } from './tutorials'
 import { apiForm, apiGet, apiPost, b64ToDataUrl, API_BASE } from './api'
 
+const LOCO_BUILTIN_PRESETS_STORAGE_KEY = 'loco_builtin_presets_hidden_v1'
+const LOCO_DEFAULT_PRESET_STORAGE_KEY = 'loco_model_default_preset_v1'
+
 function errMsg(err) {
   if (err instanceof Event || (typeof err === 'object' && err && typeof err.type === 'string')) {
     return 'No se pudo conectar con el servidor. Verifica que el backend esté ejecutándose.'
@@ -132,6 +135,9 @@ function emptyLoading() {
     diamList: false,
     diamGet: false,
     diamExport: false,
+    diamMeasurementSave: false,
+    diamAnalysis: false,
+    diamMeasurementSummary: false,
     locoPreview: false,
     locoRun: false,
     locoDataset: false,
@@ -248,6 +254,22 @@ function loadTutorialProgress() {
   } catch {
     return {}
   }
+}
+
+function loadHiddenLocoBuiltinPresets() {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(LOCO_BUILTIN_PRESETS_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.map((item) => String(item || '')).filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+
+function loadDefaultLocoModelPreset() {
+  if (typeof window === 'undefined') return ''
+  return String(window.localStorage.getItem(LOCO_DEFAULT_PRESET_STORAGE_KEY) || '')
 }
 
 function buildRunRow(item) {
@@ -436,7 +458,7 @@ const LOCO_PRESETS = {
   },
 }
 
-const DEFAULT_LOCO_MODEL_LAYERS = { mask: true, accepted: true, rejected: false, scores: true, tiles: false }
+const DEFAULT_LOCO_MODEL_LAYERS = { mask: true, accepted: true, rejected: false, scores: true, tiles: true }
 const DEFAULT_LOCO_MODEL_STAGE_STATE = {
   detector_state_id: '',
   baseReady: false,
@@ -456,7 +478,7 @@ const DEFAULT_LOCO_MODEL_STAGE_STATE = {
 }
 
 const DEFAULT_DIAM_CALIBRATION = {
-  enabled: false,
+  enabled: true,
   known_value: 100,
   pixel_distance: 0,
   unit_per_px: 0,
@@ -467,22 +489,81 @@ const DEFAULT_DIAM_CALIBRATION = {
   line_y2: null,
 }
 
+const DEFAULT_DIAM_ANALYSIS_CHART = {
+  width: 760,
+  height: 320,
+  bins: 20,
+  xPaddingEnabled: true,
+  xPaddingPercent: 4,
+  fontSize: 11,
+  tickFontSize: 11,
+  labelFontSize: 12,
+  fontFamily: 'Helvetica, Arial, sans-serif',
+  fontColor: '#45464d',
+  axisColor: '#76777d',
+  gridColor: '#eceef0',
+  xLabel: 'Diametro',
+  yLabel: 'Frecuencia',
+  xLabelOffset: 16,
+  yLabelOffset: 18,
+  grid: 'both',
+  gridStyle: 'solid',
+  barColor: '#45464d',
+  strokeColor: '#191c1e',
+  backgroundMode: 'solid',
+  backgroundColor: '#ffffff',
+  backgroundAltColor: '#f7f9fb',
+  borderTop: false,
+  borderRight: false,
+  borderBottom: true,
+  borderLeft: true,
+}
+
+const DIAM_ANALYSIS_FONT_OPTIONS = [
+  { label: 'Helvetica / Arial', value: 'Helvetica, Arial, sans-serif' },
+  { label: 'Arial', value: 'Arial, Helvetica, sans-serif' },
+  { label: 'Helvetica', value: 'Helvetica, Arial, sans-serif' },
+  { label: 'Times New Roman', value: '"Times New Roman", Times, serif' },
+  { label: 'Times', value: 'Times, "Times New Roman", serif' },
+  { label: 'Calibri', value: 'Calibri, sans-serif' },
+  { label: 'Courier New', value: '"Courier New", Courier, monospace' },
+  { label: 'Courier', value: 'Courier, "Courier New", monospace' },
+  { label: 'Ubuntu', value: 'Ubuntu, sans-serif' },
+  { label: 'Hanken Grotesk', value: 'Hanken Grotesk' },
+  { label: 'JetBrains Mono', value: 'JetBrains Mono' },
+]
+
+const DEFAULT_SCRIBBLE_IMAGE_FILTERS = {
+  brightness: 100,
+  contrast: 100,
+  gamma: 1,
+  sharpness: 0,
+  invert: 0,
+}
+
 function normalizeDiamCalibrationState(raw) {
   const next = {
     ...DEFAULT_DIAM_CALIBRATION,
     ...(raw || {}),
   }
-  next.enabled = !!next.enabled
+  next.enabled = true
   next.unit = String(next.unit || 'nm') === 'um' ? 'um' : 'nm'
   next.known_value = Math.max(0, Number(next.known_value ?? next.known_nm ?? DEFAULT_DIAM_CALIBRATION.known_value) || 0)
   ;['line_x1', 'line_y1', 'line_x2', 'line_y2'].forEach((key) => {
     const value = next[key]
-    next[key] = Number.isFinite(Number(value)) ? Number(value) : null
+    next[key] = value === null || value === undefined || value === ''
+      ? null
+      : (Number.isFinite(Number(value)) ? Number(value) : null)
   })
   const hasLine = ['line_x1', 'line_y1', 'line_x2', 'line_y2'].every((key) => Number.isFinite(Number(next[key])))
   const lineDistance = hasLine
     ? Math.hypot(Number(next.line_x2) - Number(next.line_x1), Number(next.line_y2) - Number(next.line_y1))
     : 0
+  if (hasLine && !(lineDistance > 0)) {
+    ;['line_x1', 'line_y1', 'line_x2', 'line_y2'].forEach((key) => {
+      next[key] = null
+    })
+  }
   const rawPixelDistance = Number(next.pixel_distance || 0)
   next.pixel_distance = lineDistance > 0 ? Number(lineDistance.toFixed(4)) : (rawPixelDistance > 0 ? rawPixelDistance : 0)
   next.unit_per_px = next.pixel_distance > 0
@@ -495,6 +576,8 @@ function calibrationLineFromState(calibration) {
   if (!calibration) return null
   const keys = ['line_x1', 'line_y1', 'line_x2', 'line_y2']
   if (!keys.every((key) => Number.isFinite(Number(calibration[key])))) return null
+  const distance = Math.hypot(Number(calibration.line_x2) - Number(calibration.line_x1), Number(calibration.line_y2) - Number(calibration.line_y1))
+  if (!(distance > 0)) return null
   return {
     start: { x: Number(calibration.line_x1), y: Number(calibration.line_y1) },
     end: { x: Number(calibration.line_x2), y: Number(calibration.line_y2) },
@@ -868,6 +951,7 @@ export default function App() {
   const scribbleAutosaveFailCountRef = useRef(0)
   const scribbleTutorialExerciseRef = useRef(emptyScribbleTutorialExercise())
   const scribbleTutorialStrokeBeforeRef = useRef(null)
+  const modelPredictRequestSeqRef = useRef(0)
 
   const [sessionId, setSessionId] = useState('')
   const [imageId, setImageId] = useState('')
@@ -879,6 +963,7 @@ export default function App() {
   const [defaultAssistModelId, setDefaultAssistModelId] = useState('')
   const [selectedAssistModelId, setSelectedAssistModelId] = useState('')
   const [selectedAssistModelIds, setSelectedAssistModelIds] = useState({})
+  const [assistModelEdits, setAssistModelEdits] = useState({})
   const [selectedTrainImages, setSelectedTrainImages] = useState({})
   const [trainConfig, setTrainConfig] = useState({
     model_name: '',
@@ -888,7 +973,9 @@ export default function App() {
     n_estimators: 120,
     notes: '',
   })
-  const [modelMinConfidence, setModelMinConfidence] = useState(0.72)
+  const [modelFiberConfidence, setModelFiberConfidence] = useState(0.7)
+  const [modelHaloConfidence, setModelHaloConfidence] = useState(0.7)
+  const [modelBackgroundConfidence, setModelBackgroundConfidence] = useState(0.7)
   const [modelIncludeFiber, setModelIncludeFiber] = useState(true)
   const [modelIncludeHalo, setModelIncludeHalo] = useState(true)
   const [modelIncludeBackground, setModelIncludeBackground] = useState(false)
@@ -896,6 +983,8 @@ export default function App() {
   const [modelTrainSummary, setModelTrainSummary] = useState(null)
   const [modelImagePreview, setModelImagePreview] = useState(null)
   const [modelSort, setModelSort] = useState({ key: 'path', dir: 'asc' })
+  const [modelDatasetSelectedTags, setModelDatasetSelectedTags] = useState([])
+  const [modelDatasetTagSearch, setModelDatasetTagSearch] = useState('')
   const [scribbleOrigin, setScribbleOrigin] = useState('')
   // Cache scribble thumbnails per image_id per origin, so dropdown switches instantly
   // e.g. { "img123": { "manual": "data:...", "modelo": "data:...", "modelo_modificado": "data:..." } }
@@ -906,7 +995,6 @@ export default function App() {
   const [approvedMaskRunListByImage, setApprovedMaskRunListByImage] = useState({})
   const [maskIndexByImage, setMaskIndexByImage] = useState({})
   const [maskThumbByRun, setMaskThumbByRun] = useState({})
-  const [circleTypeCounts, setCircleTypeCounts] = useState({})
   const [locoDatasetCircleCounts, setLocoDatasetCircleCounts] = useState({})
 
   function handleGridContextMenu(e, imageId, origin) {
@@ -1059,10 +1147,14 @@ export default function App() {
   const [selectedLocalPath, setSelectedLocalPath] = useState('')
   const [localImageSelectExpanded, setLocalImageSelectExpanded] = useState(false)
   const [localImageTutorialHint, setLocalImageTutorialHint] = useState({ start_dir: '', image_name: 'overview-reference.png', exists: false, image_exists: false })
-  const [workspaceTab, setWorkspaceTab] = useState('projectSelect') // projectSelect | projectImages | projectTags | workbench | review | diameter | locoDataset | locoAugment | locoTraining | locoTest | locoModel | models | projectTransfer | tutorialHub
+  const [workspaceTab, setWorkspaceTab] = useState('projectSelect') // projectSelect | projectImages | projectTags | workbench | review | models | scribbleModelManager | locoDataset | locoAugment | locoTraining | locoTest | locoModelManager | locoModel | diameter | diameterAnalysisSelect | diameterAnalysisHistogram | projectTransfer | tutorialHub
   // New hierarchical navigation state
   const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('projectSelect').group)
   const [activeTab, setActiveTab] = useState(() => legacyToGroup('projectSelect').tab)
+  const [lastTabByGroup, setLastTabByGroup] = useState(() => {
+    const initial = legacyToGroup('projectSelect')
+    return { [initial.group]: initial.tab }
+  })
   const [tutorialSelectedId, setTutorialSelectedId] = useState('overview_project')
   const [tutorialProgress, setTutorialProgress] = useState(() => loadTutorialProgress())
   const [tutorialSidebarForcedOpen, setTutorialSidebarForcedOpen] = useState(false)
@@ -1075,6 +1167,8 @@ export default function App() {
   const tutorialChainModeRef = useRef(false)
   const tutorialReturnStateRef = useRef(null)
   const tutorialSignalsRef = useRef({})
+  const calibrationAutosaveRef = useRef({ timer: null, signature: '' })
+  const diamCalibrationRef = useRef(DEFAULT_DIAM_CALIBRATION)
   const tutorialAllByScope = useMemo(() => ({
     global: getTutorialsByScope('global'),
     macro: getTutorialsByScope('macro'),
@@ -1098,17 +1192,24 @@ export default function App() {
   const navigateToWorkspace = useCallback((group, tab) => {
     setActiveGroup(group)
     setActiveTab(tab)
+    setLastTabByGroup((prev) => ({ ...prev, [group]: tab }))
     const legacy = groupToLegacy(group, tab)
     if (legacy) setWorkspaceTab(legacy)
   }, [])
 
   // Sync workspaceTab <-> activeGroup/activeTab for backward compatibility
   const handleGroupChange = useCallback((group) => {
+    const groupConfig = GROUPS.find((item) => item.key === group)
+    const fallbackTab = groupConfig?.tabs?.[0]?.key || 'workbench'
+    const rememberedTab = lastTabByGroup[group]
+    const nextTab = groupConfig?.tabs?.some((tab) => tab.key === rememberedTab) ? rememberedTab : fallbackTab
     setActiveGroup(group)
-  }, [])
+    setActiveTab(nextTab)
+  }, [lastTabByGroup])
 
   const handleTabChange = useCallback((tab) => {
     setActiveTab(tab)
+    setLastTabByGroup((prev) => ({ ...prev, [activeGroup]: tab }))
     const legacy = groupToLegacy(activeGroup, tab)
     if (legacy) setWorkspaceTab(legacy)
   }, [activeGroup])
@@ -1136,6 +1237,8 @@ export default function App() {
   const [tool, setTool] = useState('fiber')
   const [brushSize, setBrushSize] = useState(16)
   const [brushAutoScale, setBrushAutoScale] = useState(true)
+  const [scribbleOverlayTransparency, setScribbleOverlayTransparency] = useState(0)
+  const [scribbleImageFilters, setScribbleImageFilters] = useState(DEFAULT_SCRIBBLE_IMAGE_FILTERS)
   const [viewerMode, setViewerMode] = useState('mark')
   const [viewerZoom, setViewerZoom] = useState(1)
   const [viewerOffset, setViewerOffset] = useState({ x: 0, y: 0 })
@@ -1242,7 +1345,7 @@ export default function App() {
   const [locoTrainingSeed, setLocoTrainingSeed] = useState(42)
   const [locoTrainingResult, setLocoTrainingResult] = useState(null)
   const [locoTrainingSelectedModel, setLocoTrainingSelectedModel] = useState('catboost')
-  const [locoTrainingMulticlass, setLocoTrainingMulticlass] = useState(true)
+  const [locoTrainingSelectedModels, setLocoTrainingSelectedModels] = useState(['catboost', 'lightgbm', 'xgboost'])
   const [locoTrainingThreshold, setLocoTrainingThreshold] = useState(0.5)
   const [locoTrainingErrorType, setLocoTrainingErrorType] = useState('False Positives')
   const [locoTrainingMcErrorClass, setLocoTrainingMcErrorClass] = useState('all')
@@ -1252,7 +1355,11 @@ export default function App() {
   const [locoTrainingCombErrorSubtype, setLocoTrainingCombErrorSubtype] = useState('all')
   const [locoTrainingRuns, setLocoTrainingRuns] = useState([])
   const [locoSavedModels, setLocoSavedModels] = useState([])
+  const [locoRunModels, setLocoRunModels] = useState([])
   const [locoTrainingSelectedSavedModelId, setLocoTrainingSelectedSavedModelId] = useState('')
+  const [locoSavedModelEdits, setLocoSavedModelEdits] = useState({})
+  const [modelTagEditor, setModelTagEditor] = useState(null)
+  const [locoSaveModelDialog, setLocoSaveModelDialog] = useState(null)
   const [locoTrainingProgress, setLocoTrainingProgress] = useState(null)
   const [locoTrainingBatchProgress, setLocoTrainingBatchProgress] = useState({})
   const [locoTrainingPixelMode, setLocoTrainingPixelMode] = useState('circle_only')
@@ -1324,11 +1431,24 @@ export default function App() {
   const [locoModelPreset, setLocoModelPreset] = useState('custom')
   const [locoModelCustomPresets, setLocoModelCustomPresets] = useState([])
   const [locoModelPresetName, setLocoModelPresetName] = useState('')
+  const [locoHiddenBuiltinPresets, setLocoHiddenBuiltinPresets] = useState(loadHiddenLocoBuiltinPresets)
+  const [locoDefaultPreset, setLocoDefaultPreset] = useState(loadDefaultLocoModelPreset)
   const [validationCases, setValidationCases] = useState([])
   const [validationActiveCaseId, setValidationActiveCaseId] = useState('')
   const [diamCalibration, setDiamCalibration] = useState(DEFAULT_DIAM_CALIBRATION)
   const [diamHistogramBins, setDiamHistogramBins] = useState(20)
   const [diamHistogramUnit, setDiamHistogramUnit] = useState('px')
+  const [diamAnalysisUnit, setDiamAnalysisUnit] = useState('nm')
+  const [diamAnalysisIncludeUncalibrated, setDiamAnalysisIncludeUncalibrated] = useState(false)
+  const [diamAnalysisImageView, setDiamAnalysisImageView] = useState('active')
+  const [diamAnalysisSelectedImages, setDiamAnalysisSelectedImages] = useState({})
+  const [diamAnalysisSelectedTags, setDiamAnalysisSelectedTags] = useState([])
+  const [diamAnalysisResult, setDiamAnalysisResult] = useState(null)
+  const [diamAnalysisRuns, setDiamAnalysisRuns] = useState([])
+  const [diamMeasurementSummaryByImage, setDiamMeasurementSummaryByImage] = useState({})
+  const [diamAnalysisName, setDiamAnalysisName] = useState('')
+  const [diamAnalysisChart, setDiamAnalysisChart] = useState(DEFAULT_DIAM_ANALYSIS_CHART)
+  const [diamAnalysisChartPanel, setDiamAnalysisChartPanel] = useState('data')
 
   const [validationForm, setValidationForm] = useState({
     case_id: '',
@@ -1376,6 +1496,10 @@ export default function App() {
   const [draftInfo, setDraftInfo] = useState('')
   const [transferCatalog, setTransferCatalog] = useState([])
   const [transferSelection, setTransferSelection] = useState({})
+  const [transferMode, setTransferMode] = useState('project')
+  const [transferExportMode, setTransferExportMode] = useState('simple')
+  const [transferProjectIds, setTransferProjectIds] = useState([])
+  const [transferImportProjectIds, setTransferImportProjectIds] = useState([])
   const [transferExportInfo, setTransferExportInfo] = useState(null)
   const [transferImportFile, setTransferImportFile] = useState(null)
   const [transferImportInspection, setTransferImportInspection] = useState(null)
@@ -1385,16 +1509,22 @@ export default function App() {
   const [projectForm, setProjectForm] = useState({ project_id: '', name: '', tags_text: '', source_dir: '', active: true })
   const [projectImageView, setProjectImageView] = useState('active')
   const [projectImageEdits, setProjectImageEdits] = useState({})
-  const [projectTagCatalog, setProjectTagCatalog] = useState({ project: [], fiber_type: [], creator: [], unit: ['um', 'nm'], other: [] })
+  const [projectTagCatalog, setProjectTagCatalog] = useState({ project: [], fiber_type: [], creator: [], analysis: [], unit: ['um', 'nm'], other: [] })
   const [projectTagItems, setProjectTagItems] = useState([])
   const [projectTagEdits, setProjectTagEdits] = useState({})
   const [projectImageEditor, setProjectImageEditor] = useState(null)
+  const [projectImageZoom, setProjectImageZoom] = useState(null)
 
   const experimentsById = useMemo(() => {
     const out = {}
     experiments.forEach((x) => { out[x.experiment_id] = x })
     return out
   }, [experiments])
+
+  const visibleLocoBuiltinPresets = useMemo(
+    () => Object.entries(LOCO_PRESETS).filter(([key]) => key === 'custom' || !locoHiddenBuiltinPresets.includes(key)),
+    [locoHiddenBuiltinPresets],
+  )
 
   const reviewByRun = useMemo(() => {
     const out = {}
@@ -1411,8 +1541,168 @@ export default function App() {
 
   const savedImagesForActiveProject = useMemo(() => {
     if (projectImageView === 'all' || !activeProjectId) return savedImages
-    return savedImages.filter((img) => (Array.isArray(img.project_ids) ? img.project_ids : []).includes(activeProjectId))
+    return savedImages.filter((img) => {
+      const projectIds = Array.isArray(img.project_ids) ? img.project_ids : []
+      const inActiveProject = projectIds.includes(activeProjectId)
+      return projectImageView === 'other' ? !inActiveProject : inActiveProject
+    })
   }, [savedImages, projectImageView, activeProjectId])
+
+  const diamAnalysisImages = useMemo(() => {
+    if (diamAnalysisImageView === 'all' || !activeProjectId) return savedImages
+    return savedImages.filter((img) => {
+      const projectIds = Array.isArray(img.project_ids) ? img.project_ids : []
+      const inActiveProject = projectIds.includes(activeProjectId)
+      return diamAnalysisImageView === 'other' ? !inActiveProject : inActiveProject
+    })
+  }, [savedImages, diamAnalysisImageView, activeProjectId])
+
+  const activeProjectAnalysisTags = useMemo(
+    () => normalizeStructuredTags(activeProject?.structured_tags || activeProject?.tags || []).filter((tag) => ['project', 'fiber_type', 'creator'].includes(tag.category)),
+    [activeProject],
+  )
+
+  const diamAnalysisRequiredTags = useMemo(
+    () => {
+      if (diamAnalysisSelectedTags.length) return normalizeStructuredTags(diamAnalysisSelectedTags)
+      if (diamAnalysisImageView === 'all') return []
+      return normalizeStructuredTags(activeProjectAnalysisTags)
+    },
+    [diamAnalysisSelectedTags, activeProjectAnalysisTags, diamAnalysisImageView],
+  )
+
+  const diamAnalysisSuggestedTags = useMemo(() => {
+    const seen = new Set()
+    return normalizeStructuredTags([
+      ...activeProjectAnalysisTags,
+      ...(projectTagCatalog.fiber_type || []).map((label) => ({ category: 'fiber_type', label })),
+      ...(projectTagCatalog.creator || []).map((label) => ({ category: 'creator', label })),
+    ]).filter((tag) => {
+      const key = tagKey(tag)
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [activeProjectAnalysisTags, projectTagCatalog])
+
+  const modelDatasetRequiredTags = useMemo(
+    () => normalizeStructuredTags(modelDatasetSelectedTags),
+    [modelDatasetSelectedTags],
+  )
+
+  const modelDatasetSuggestedTags = useMemo(() => {
+    const seen = new Set()
+    const pushUnique = (items = []) => {
+      const out = []
+      normalizeStructuredTags(items).forEach((tag) => {
+        const key = tagKey(tag)
+        if (!key || seen.has(key)) return
+        seen.add(key)
+        out.push(tag)
+      })
+      return out
+    }
+    return [
+      ...pushUnique(activeProjectAnalysisTags),
+      ...pushUnique((projectTagCatalog.project || []).map((label) => ({ category: 'project', label }))),
+      ...pushUnique((projectTagCatalog.fiber_type || []).map((label) => ({ category: 'fiber_type', label }))),
+      ...pushUnique((projectTagCatalog.creator || []).map((label) => ({ category: 'creator', label }))),
+      ...pushUnique((projectTagCatalog.size || []).map((label) => ({ category: 'size', value: label }))),
+      ...pushUnique((projectTagCatalog.unit || []).map((label) => ({ category: 'unit', label }))),
+      ...pushUnique((projectTagCatalog.other || []).map((label) => ({ category: 'other', label }))),
+      ...pushUnique(modelDataset.flatMap((img) => structuredTagsWithProjects(img.structured_tags || img.tags || [], img.project_ids || []))),
+    ]
+  }, [activeProjectAnalysisTags, projectTagCatalog, modelDataset, projects])
+
+  const filteredModelDatasetSuggestedTags = useMemo(() => {
+    const query = String(modelDatasetTagSearch || '').trim().toLowerCase()
+    if (!query) return modelDatasetSuggestedTags
+    return modelDatasetSuggestedTags.filter((tag) => {
+      const label = tagDisplayLabel(tag).toLowerCase()
+      return label.includes(query) || tagCategoryLabel(tag.category).toLowerCase().includes(query)
+    })
+  }, [modelDatasetSuggestedTags, modelDatasetTagSearch])
+
+  const modelDatasetVisibleRows = useMemo(() => {
+    const hasMaskData = Object.keys(maskRunListByImage).length > 0
+    const withMasks = hasMaskData
+      ? modelDataset.filter((item) => {
+          const runs = maskRunListByImage[item.image_id]
+          return runs?.length > 0
+        })
+      : [...modelDataset]
+    const required = modelDatasetRequiredTags.map((tag) => tagKey(tag)).filter(Boolean)
+    const tagged = required.length
+      ? withMasks.filter((item) => {
+          const imageTags = structuredTagsWithProjects(item.structured_tags || item.tags || [], item.project_ids || []).map((tag) => tagKey(tag))
+          return required.every((key) => imageTags.includes(key))
+        })
+      : withMasks
+    return [...tagged].sort((a, b) => {
+      const dir = modelSort.dir === 'asc' ? 1 : -1
+      let va, vb
+      switch (modelSort.key) {
+        case 'path':
+          va = (a.source_path || a.image_name || '').toLowerCase()
+          vb = (b.source_path || b.image_name || '').toLowerCase()
+          return va < vb ? -dir : va > vb ? dir : 0
+        case 'mtime':
+          va = a.source_mtime || a.updated_at || ''
+          vb = b.source_mtime || b.updated_at || ''
+          return va < vb ? -dir : va > vb ? dir : 0
+        default:
+          return 0
+      }
+    })
+  }, [modelDataset, maskRunListByImage, modelDatasetRequiredTags, modelSort])
+
+  const diamAnalysisFilteredImages = useMemo(() => {
+    if (!diamAnalysisRequiredTags.length) return diamAnalysisImages
+    const required = diamAnalysisRequiredTags.map((tag) => tagKey(tag))
+    return diamAnalysisImages.filter((img) => {
+      const imageTags = structuredTagsWithProjects(img.structured_tags || img.tags || [], img.project_ids || []).map((tag) => tagKey(tag))
+      return required.every((key) => imageTags.includes(key))
+    })
+  }, [diamAnalysisImages, diamAnalysisRequiredTags])
+
+  const diamAnalysisSelectableImages = useMemo(() => {
+    return diamAnalysisFilteredImages.filter((img) => {
+      const imageId = String(img.image_id || '')
+      const summary = diamMeasurementSummaryByImage[imageId] || {}
+      return Number(summary.measurement_count || 0) > 0
+    })
+  }, [diamAnalysisFilteredImages, diamMeasurementSummaryByImage])
+
+  const selectedDiamAnalysisImageIds = useMemo(() => {
+    const selectableIds = new Set(diamAnalysisSelectableImages.map((img) => String(img.image_id || '')).filter(Boolean))
+    if (Object.keys(diamAnalysisSelectedImages).length) {
+      return Object.keys(diamAnalysisSelectedImages).filter((id) => diamAnalysisSelectedImages[id] && selectableIds.has(id))
+    }
+    const checked = Object.keys(diamAnalysisSelectedImages).filter((id) => diamAnalysisSelectedImages[id] && selectableIds.has(id))
+    if (checked.length) return checked
+    return diamAnalysisSelectableImages.map((img) => String(img.image_id || '')).filter(Boolean)
+  }, [diamAnalysisSelectedImages, diamAnalysisSelectableImages])
+
+  const selectedDiamAnalysisMeasurementSummary = useMemo(() => {
+    return selectedDiamAnalysisImageIds.reduce((acc, imageId) => {
+      const summary = diamMeasurementSummaryByImage[imageId] || {}
+      acc.measurement_count += Number(summary.measurement_count || 0)
+      acc.ok_count += Number(summary.ok_count || 0)
+      acc.calibrated_count += Number(summary.calibrated_count || 0)
+      acc.uncalibrated_count += Number(summary.uncalibrated_count || 0)
+      return acc
+    }, { measurement_count: 0, ok_count: 0, calibrated_count: 0, uncalibrated_count: 0 })
+  }, [selectedDiamAnalysisImageIds, diamMeasurementSummaryByImage])
+
+  const diamAnalysisSelectionKey = useMemo(
+    () => selectedDiamAnalysisImageIds.join('|'),
+    [selectedDiamAnalysisImageIds],
+  )
+
+  const diamAnalysisTagKey = useMemo(
+    () => JSON.stringify(diamAnalysisRequiredTags),
+    [diamAnalysisRequiredTags],
+  )
 
   const filteredRuns = useMemo(() => {
     return runs.filter((r) => {
@@ -1458,8 +1748,11 @@ export default function App() {
     return ''
   }, [diamPriorRunId, nextStepRuns, runCache])
   const trainImageIds = useMemo(
-    () => Object.keys(selectedTrainImages).filter((k) => selectedTrainImages[k]),
-    [selectedTrainImages],
+    () => {
+      const visibleIds = new Set(modelDatasetVisibleRows.map((item) => String(item.image_id || '')).filter(Boolean))
+      return Object.keys(selectedTrainImages).filter((k) => selectedTrainImages[k] && visibleIds.has(k))
+    },
+    [selectedTrainImages, modelDatasetVisibleRows],
   )
   const activeAssistModel = useMemo(
     () => assistModels.find((m) => m.model_id === selectedAssistModelId) || assistModels.find((m) => m.model_id === defaultAssistModelId) || null,
@@ -1471,6 +1764,12 @@ export default function App() {
     if (!raw) return '-'
     const parts = raw.split(/[\\/]+/).filter(Boolean)
     return parts.slice(-3).join(' / ') || raw
+  }
+
+  function projectImageViewLabel(value) {
+    if (value === 'all') return 'Todas'
+    if (value === 'other') return 'Otras imagenes'
+    return 'Proyecto activo'
   }
 
   function currentManualLineKind(methodId = diamMethodId) {
@@ -2071,10 +2370,14 @@ export default function App() {
   async function refreshTransferCatalog() {
     await withLoad('transferCatalog', async () => {
       try {
-        const res = await apiGet('/api/project-transfer/catalog')
+        const ids = transferMode === 'project' ? transferProjectIds : []
+        const query = new URLSearchParams()
+        query.set('mode', ids.length ? 'project' : 'full')
+        if (ids.length) query.set('project_ids', ids.join(','))
+        const res = await apiGet(`/api/project-transfer/catalog?${query.toString()}`)
         const categories = Array.isArray(res?.categories) ? res.categories : []
         const selection = {}
-        categories.forEach((item) => { selection[item.key] = item.selected !== false })
+        categories.forEach((item) => { selection[item.key] = transferSelection[item.key] ?? item.selected !== false })
         setTransferCatalog(categories)
         setTransferSelection(selection)
       } catch (err) {
@@ -2093,7 +2396,31 @@ export default function App() {
     setTransferSelection(next)
   }
 
+  function toggleTransferProject(projectId) {
+    const id = String(projectId || '')
+    if (!id) return
+    setTransferProjectIds((prev) => {
+      const current = Array.isArray(prev) ? prev : []
+      return current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    })
+  }
+
+  function toggleImportProject(projectId) {
+    const id = String(projectId || '')
+    if (!id) return
+    setTransferImportProjectIds((prev) => {
+      const current = Array.isArray(prev) ? prev : []
+      return current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    })
+  }
+
   async function prepareProjectExport() {
+    const isProjectExport = transferMode === 'project'
+    const projectIds = isProjectExport ? transferProjectIds : []
+    if (isProjectExport && !projectIds.length) {
+      toast('warning', 'Exportar proyecto', 'Selecciona al menos un proyecto.')
+      return
+    }
     const categories = transferCatalog.filter((item) => transferSelection[item.key]).map((item) => item.key)
     if (!categories.length) {
       toast('warning', 'Exportar proyecto', 'Selecciona al menos una categoria.')
@@ -2101,7 +2428,11 @@ export default function App() {
     }
     await withLoad('transferExport', async () => {
       try {
-        const res = await apiPost('/api/project-transfer/export/prepare', { categories })
+        const res = await apiPost('/api/project-transfer/export/prepare', {
+          categories,
+          project_ids: projectIds,
+          mode: isProjectExport ? 'project' : 'full',
+        })
         setTransferExportInfo(res)
         const link = document.createElement('a')
         link.href = `${API_BASE}/api/project-transfer/export/download?token=${encodeURIComponent(res.token)}`
@@ -2128,6 +2459,8 @@ export default function App() {
         const res = await apiForm('/api/project-transfer/import/inspect', form)
         setTransferImportInspection(res)
         setTransferImportResult(null)
+        const projectIds = Array.isArray(res?.summary?.project_ids) ? res.summary.project_ids : []
+        setTransferImportProjectIds(projectIds)
         const conflicts = Number(res?.summary?.conflict_count || 0)
         toast(conflicts ? 'warning' : 'success', 'Revision de importacion', conflicts ? `${conflicts} archivos ya existen. Elige como continuar.` : 'ZIP valido. No hay conflictos.')
       } catch (err) {
@@ -2142,7 +2475,7 @@ export default function App() {
     if (!token) return
     await withLoad('transferApply', async () => {
       try {
-        const res = await apiPost('/api/project-transfer/import/apply', { token, overwrite: !!overwrite })
+        const res = await apiPost('/api/project-transfer/import/apply', { token, overwrite: !!overwrite, project_ids: transferImportProjectIds })
         setTransferImportResult(res?.result || null)
         setTransferImportInspection(null)
         toast('success', 'Importacion completada', `${res?.result?.imported_count || 0} archivos importados.`)
@@ -2429,6 +2762,57 @@ export default function App() {
     setScribbleOrigin('manual')
     showOriginToast('manual')
     await clearScribbleDraftRemote()
+  }
+
+  async function clearScribbleClass(kind) {
+    if (!imageUrl) return
+    const labelMap = {
+      fiber: { value: 128, label: 'fibra' },
+      halo: { value: 192, label: 'halo' },
+      background: { value: 255, label: 'background' },
+    }
+    const target = labelMap[kind]
+    const labels = labelsCanvasRef.current
+    const ctx = labels?.getContext('2d', { willReadFrequently: true })
+    if (!target || !labels || !ctx || labels.width < 1 || labels.height < 1) return
+    const exercise = scribbleTutorialExerciseRef.current
+    if (exercise.active && exercise.phase === 'seed') {
+      toast('info', 'Tutorial', 'En este paso usa Goma y luego Limpiar todo para avanzar correctamente.')
+      return
+    }
+    const snap = captureAnnotSnapshot()
+    const image = ctx.getImageData(0, 0, labels.width, labels.height)
+    const data = image.data
+    let changed = 0
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 16 || data[i] !== target.value) continue
+      data[i] = 0
+      data[i + 1] = 0
+      data[i + 2] = 0
+      data[i + 3] = 0
+      changed += 1
+    }
+    if (!changed) {
+      toast('info', 'Scribble', `No habia pixeles de ${target.label} para limpiar.`)
+      return
+    }
+    if (snap) {
+      setAnnotHistory((h) => [...h, snap].slice(-40))
+      setAnnotFuture([])
+    }
+    ctx.putImageData(image, 0, 0)
+    renderDrawFromLabels()
+    markScribbleDirty()
+    if (exercise.active && exercise.phase === 'draw') {
+      updateScribbleTutorialExercise((prev) => ({
+        ...prev,
+        [`${kind === 'background' ? 'background' : kind}_done`]: false,
+        erase_user_done: false,
+        continue_requested: false,
+      }))
+    }
+    void saveScribbleDraft({ silent: true })
+    toast('success', 'Scribble', `Se limpio ${target.label}.`)
   }
 
   function captureAnnotSnapshot() {
@@ -3033,6 +3417,11 @@ export default function App() {
   }, [workspaceTab])
 
   useEffect(() => {
+    if (workspaceTab !== 'projectImages') return
+    refreshDiameterMeasurementSummary()
+  }, [workspaceTab])
+
+  useEffect(() => {
     if (workspaceTab !== 'locoAugment') return
     refreshLocoAugItems()
   }, [workspaceTab])
@@ -3048,9 +3437,42 @@ export default function App() {
   }, [workspaceTab])
 
   useEffect(() => {
+    if (workspaceTab !== 'locoModel') return
+    if (!locoDefaultPreset || locoModelPreset !== 'custom') return
+    if (!locoPresetExists(locoDefaultPreset, locoModelCustomPresets)) return
+    applyLocoModelPreset(locoDefaultPreset)
+  }, [workspaceTab, locoDefaultPreset, locoModelCustomPresets, locoHiddenBuiltinPresets])
+
+  useEffect(() => {
     if (workspaceTab !== 'projectTransfer') return
+    if (transferMode === 'project' && activeProjectId && !transferProjectIds.length) {
+      setTransferProjectIds([activeProjectId])
+      return
+    }
     refreshTransferCatalog()
+  }, [workspaceTab, transferMode, activeProjectId, transferProjectIds.join(',')])
+
+  useEffect(() => {
+    if (!['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) return
+    refreshDiameterAnalyses()
+    refreshDiameterMeasurementSummary()
   }, [workspaceTab])
+
+  useEffect(() => {
+    if (!['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) return
+    const timer = window.setTimeout(() => {
+      queryDiameterMeasurements()
+    }, 180)
+    return () => window.clearTimeout(timer)
+  }, [
+    workspaceTab,
+    diamAnalysisUnit,
+    diamAnalysisIncludeUncalibrated,
+    diamAnalysisImageView,
+    activeProjectId,
+    diamAnalysisSelectionKey,
+    diamAnalysisTagKey,
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -3314,8 +3736,11 @@ export default function App() {
   useEffect(() => {
     if (workspaceTab !== 'workbench') return undefined
     const onKey = (ev) => {
-      const tag = String(document.activeElement?.tagName || '').toUpperCase()
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      const active = document.activeElement
+      const tag = String(active?.tagName || '').toUpperCase()
+      const inputType = tag === 'INPUT' ? String(active?.type || '').toLowerCase() : ''
+      const typing = tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !['range', 'checkbox', 'radio', 'color', 'button'].includes(inputType))
+      if (typing) return
       const k = String(ev.key || '').toLowerCase()
       if ((ev.ctrlKey || ev.metaKey) && k === 'z') {
         ev.preventDefault()
@@ -3432,11 +3857,6 @@ export default function App() {
           setLocoDatasetCircles(prev => {
             const toDelete = prev.find(c => String(c.candidate_id) === String(selId))
             if (toDelete) {
-              const ck = toDelete.label === 'invalid_crossing' ? 'crossing' : toDelete.label === 'invalid_other' ? 'other_valid' : 'valid'
-              setCircleTypeCounts(pc => {
-                const cur = pc[imageId] || { valid: 0, crossing: 0, other_valid: 0, unknown: 0 }
-                return { ...pc, [imageId]: { ...cur, [ck]: Math.max(0, (cur[ck] || 0) - 1) } }
-              })
               const dk = toDelete.label === 'invalid_crossing' ? 'invalid_crossing' : toDelete.label === 'invalid_other' ? 'invalid_other' : 'valid'
               setLocoDatasetCircleCounts(pd => {
                 const cur = pd[imageId] || { valid: 0, invalid_crossing: 0, invalid_other: 0 }
@@ -3445,7 +3865,7 @@ export default function App() {
             }
             const filtered = prev.filter(c => String(c.candidate_id) !== String(selId))
             locoDatasetCirclesRef.current = filtered
-            void syncLocoDatasetPoints(filtered)
+            void syncLocoDatasetCircles(filtered)
             return filtered
           })
           setLocoDatasetSelectedId('')
@@ -3538,6 +3958,7 @@ export default function App() {
         await loadScribbleDraftForImage(loadedImageId)
         await loadDiameterPoints(sid, loadedImageId, { silent: true })
         await refreshDiameterRuns(loadedImageId, { silent: true })
+        await loadCalibrationForImage(loadedImageId, { silent: true })
         await refreshValidationCases(loadedImageId, { silent: true })
         toast('success', 'Imagen cargada', `Activa: ${p.image_id || '-'} (${p.image_shape?.[1] || '?'}x${p.image_shape?.[0] || '?'})`)
       } catch (err) {
@@ -3717,6 +4138,7 @@ export default function App() {
         project: Array.isArray(catalog.project) ? catalog.project : [],
         fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
         creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+        analysis: Array.isArray(catalog.analysis) ? catalog.analysis : [],
         unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
         other: Array.isArray(catalog.other) ? catalog.other : [],
       })
@@ -3741,6 +4163,7 @@ export default function App() {
           project: Array.isArray(catalog.project) ? catalog.project : [],
           fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
           creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+          analysis: Array.isArray(catalog.analysis) ? catalog.analysis : [],
           unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
           other: Array.isArray(catalog.other) ? catalog.other : [],
         })
@@ -3768,6 +4191,7 @@ export default function App() {
           project: Array.isArray(catalog.project) ? catalog.project : [],
           fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
           creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+          analysis: Array.isArray(catalog.analysis) ? catalog.analysis : [],
           unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
           other: Array.isArray(catalog.other) ? catalog.other : [],
         })
@@ -3792,6 +4216,7 @@ export default function App() {
           project: Array.isArray(catalog.project) ? catalog.project : [],
           fiber_type: Array.isArray(catalog.fiber_type) ? catalog.fiber_type : [],
           creator: Array.isArray(catalog.creator) ? catalog.creator : [],
+          analysis: Array.isArray(catalog.analysis) ? catalog.analysis : [],
           unit: Array.isArray(catalog.unit) && catalog.unit.length ? catalog.unit : ['um', 'nm'],
           other: Array.isArray(catalog.other) ? catalog.other : [],
         })
@@ -3827,6 +4252,7 @@ export default function App() {
       toast('warning', 'Proyecto', 'Nombre de proyecto requerido.')
       return
     }
+    const prevActiveProjectId = String(activeProjectId || '')
     await withLoad('projectSave', async () => {
       try {
         const res = await apiPost('/api/projects/upsert', {
@@ -3840,6 +4266,8 @@ export default function App() {
           active: Boolean(projectForm.active),
         })
         applyProjectPayload(res?.payload || {})
+        const nextActiveProjectId = String(res?.payload?.active_project_id || '')
+        if (nextActiveProjectId !== prevActiveProjectId) clearActiveImageForProjectSwitch()
         await refreshProjectTagCatalog()
         await refreshSavedImages()
         toast('success', 'Proyecto', 'Proyecto guardado.')
@@ -3850,12 +4278,15 @@ export default function App() {
   }
 
   async function activateProject(projectId) {
+    const nextProjectId = String(projectId || '')
+    const shouldClearActiveImage = nextProjectId !== String(activeProjectId || '')
     await withLoad('projectSave', async () => {
       try {
-        const res = await apiPost('/api/projects/activate', { project_id: projectId })
+        const res = await apiPost('/api/projects/activate', { project_id: nextProjectId })
         applyProjectPayload(res?.payload || {})
-        setProjectImageView(projectId ? 'active' : 'all')
-        toast('success', 'Proyecto', projectId ? 'Proyecto activo actualizado.' : 'Vista sin proyecto activo.')
+        setProjectImageView(nextProjectId ? 'active' : 'all')
+        if (shouldClearActiveImage) clearActiveImageForProjectSwitch()
+        toast('success', 'Proyecto', nextProjectId ? 'Proyecto activo actualizado.' : 'Vista sin proyecto activo.')
       } catch (err) {
         toast('error', 'Proyecto', errMsg(err))
       }
@@ -3896,6 +4327,34 @@ export default function App() {
     return normalizeStructuredTags([...projectTags, ...nonProjectTags])
   }
 
+  function projectTagsFromIds(projectIds = []) {
+    const selectedProjects = new Set(Array.isArray(projectIds) ? projectIds : [])
+    return normalizeStructuredTags(
+      projects
+        .filter((project) => selectedProjects.has(project.project_id))
+        .map((project) => ({ category: 'project', label: project.name, project_id: project.project_id })),
+    )
+  }
+
+  function projectImageStatusItems(image) {
+    const imageIdValue = String(image?.image_id || '')
+    const measurementSummary = diamMeasurementSummaryByImage[imageIdValue] || {}
+    const measurementCount = Number(measurementSummary.measurement_count || 0)
+    return [
+      { key: 'mask', label: 'Mascara', ok: !!image?.mask_thumbnail_b64 },
+      { key: 'scribble', label: 'Scribble', ok: !!image?.has_scribble_draft },
+      { key: 'prior', label: 'Prior', ok: !!image?.has_prior_cache },
+      {
+        key: 'measurements',
+        label: measurementCount > 0 ? `${measurementCount} med.` : 'Mediciones',
+        ok: measurementCount > 0,
+        title: measurementCount > 0
+          ? `${measurementCount} mediciones | ${Number(measurementSummary.calibrated_count || 0)} calibradas | ${Number(measurementSummary.uncalibrated_count || 0)} sin calibracion`
+          : 'Sin mediciones internas guardadas',
+      },
+    ]
+  }
+
   function updateProjectImageDraft(imageId, patch) {
     const iid = String(imageId || '')
     if (!iid) return
@@ -3909,14 +4368,13 @@ export default function App() {
     const structured = structuredTagsWithProjects(draft.structured_tags || draft.tags_text || [], draft.project_ids || [])
     await withLoad('projectImageSave', async () => {
       try {
-        const res = await apiPost('/api/projects/image/update', {
+        await apiPost('/api/projects/image/update', {
           image_id: iid,
           tags: legacyTagsFromStructured(structured),
           structured_tags: structured,
           project_ids: Array.isArray(draft.project_ids) ? draft.project_ids : [],
         })
-        const items = Array.isArray(res?.payload?.items) ? res.payload.items : []
-        setSavedImages(items)
+        await refreshSavedImages()
         await refreshProjectTagCatalog()
         setProjectImageEdits((prev) => {
           const next = { ...prev }
@@ -3943,32 +4401,20 @@ export default function App() {
           if (items.some((it) => it.image_id === imageId)) return imageId
           return ''
         })
-        const ctFetches = items
-          .filter((img) => img.mask_thumbnail_b64)
-          .map(async (img) => {
-            try {
-              const res = await apiGet(`/api/diameter-research/points/counts?image_id=${encodeURIComponent(img.image_id)}`)
-              console.log('[DEBUG-COUNTS] Fetch:', img.image_id, '→', res?.payload?.counts)
-              if (res?.payload?.counts) {
-                setCircleTypeCounts(prev => ({ ...prev, [img.image_id]: res.payload.counts }))
-              }
-            } catch {}
-          })
-        void Promise.allSettled(ctFetches)
-        void refreshMaskRunsForImages(items)
-        void refreshApprovedMaskRunsForImages(items)
         const locoFetches = items
           .filter((img) => img.mask_thumbnail_b64)
           .map(async (img) => {
             try {
               const res = await apiGet(`/api/diameter-research/loco-dataset/circle-counts?image_id=${encodeURIComponent(img.image_id)}`)
-              const counts = res?.payload?.counts
-              if (counts) {
-                setLocoDatasetCircleCounts(prev => ({ ...prev, [img.image_id]: counts }))
+              console.log('[DEBUG-COUNTS] Fetch:', img.image_id, '→', res?.payload?.counts)
+              if (res?.payload?.counts) {
+                setLocoDatasetCircleCounts(prev => ({ ...prev, [img.image_id]: res.payload.counts }))
               }
             } catch {}
           })
         void Promise.allSettled(locoFetches)
+        void refreshMaskRunsForImages(items)
+        void refreshApprovedMaskRunsForImages(items)
       } catch (err) {
         toast('warning', 'Imagenes guardadas', `No se pudo listar biblioteca: ${errMsg(err)}`)
       }
@@ -4210,6 +4656,7 @@ export default function App() {
         await loadScribbleDraftForImage(loadedImageId)
         await loadDiameterPoints(sid, loadedImageId, { silent: true })
         await refreshDiameterRuns(loadedImageId, { silent: true })
+        await loadCalibrationForImage(loadedImageId, { silent: true })
         await refreshValidationCases(loadedImageId, { silent: true })
         toast('success', 'Imagen local', `Activa: ${loadedImageId}`)
         const loadedFileName = localFileName(target)
@@ -4290,9 +4737,9 @@ export default function App() {
         // Pre-fetch circle type counts per image
         const countFetches = items.map(async (item) => {
           try {
-            const res = await apiGet(`/api/diameter-research/points/counts?image_id=${encodeURIComponent(item.image_id)}`)
+            const res = await apiGet(`/api/diameter-research/loco-dataset/circle-counts?image_id=${encodeURIComponent(item.image_id)}`)
             if (res?.payload?.counts) {
-              setCircleTypeCounts(prev => ({ ...prev, [item.image_id]: res.payload.counts }))
+              setLocoDatasetCircleCounts(prev => ({ ...prev, [item.image_id]: res.payload.counts }))
             }
           } catch {}
         })
@@ -4327,9 +4774,27 @@ export default function App() {
     setSelectedTrainImages((prev) => ({ ...prev, [id]: !prev[id] }))
   }
 
+  function toggleModelDatasetTagFilter(tag) {
+    const normalized = normalizeStructuredTags([tag])[0]
+    if (!normalized) return
+    const key = tagKey(normalized)
+    setModelDatasetSelectedTags((prev) => {
+      const current = normalizeStructuredTags(prev)
+      if (current.some((item) => tagKey(item) === key)) {
+        return current.filter((item) => tagKey(item) !== key)
+      }
+      return [...current, normalized]
+    })
+  }
+
+  function removeModelDatasetTagFilter(tag) {
+    const key = tagKey(tag)
+    setModelDatasetSelectedTags((prev) => normalizeStructuredTags(prev).filter((item) => tagKey(item) !== key))
+  }
+
   function selectTrainableImages() {
     const next = {}
-    modelDataset.forEach((item) => {
+    modelDatasetVisibleRows.forEach((item) => {
       if (item.trainable_multiclass || item.trainable_binary) next[item.image_id] = true
     })
     setSelectedTrainImages(next)
@@ -4466,6 +4931,24 @@ export default function App() {
     })
   }
 
+  function assistModelPredictionPayload(sid, mid) {
+    const fiber = clamp(Number(modelFiberConfidence || 0.7), 0.001, 0.999)
+    const halo = clamp(Number(modelHaloConfidence || 0.7), 0.001, 0.999)
+    const background = clamp(Number(modelBackgroundConfidence || 0.7), 0.001, 0.999)
+    return {
+      session_id: sid,
+      image_id: imageId,
+      model_id: mid,
+      min_confidence: 0.72,
+      fiber_confidence: fiber,
+      halo_confidence: halo,
+      background_confidence: background,
+      include_fiber: !!modelIncludeFiber,
+      include_halo: !!modelIncludeHalo,
+      include_background: !!modelIncludeBackground,
+    }
+  }
+
   async function predictWithAssistModel() {
     const sid = await ensureSessionReady()
     if (!sid || !imageId) return
@@ -4476,15 +4959,11 @@ export default function App() {
     }
     await withLoad('modelsPredict', async () => {
       try {
-        const res = await apiPost('/api/assist-models/predict', {
-          session_id: sid,
-          image_id: imageId,
-          model_id: mid,
-          min_confidence: Number(modelMinConfidence || 0.72),
-          include_fiber: !!modelIncludeFiber,
-          include_halo: !!modelIncludeHalo,
-          include_background: !!modelIncludeBackground,
-        })
+        const requestSeq = modelPredictRequestSeqRef.current + 1
+        modelPredictRequestSeqRef.current = requestSeq
+        setModelPrediction(null)
+        const res = await apiPost('/api/assist-models/predict', assistModelPredictionPayload(sid, mid))
+        if (requestSeq !== modelPredictRequestSeqRef.current) return
         const previewUrl = res?.preview_b64 ? b64ToDataUrl(res.preview_b64, res.preview_mime || 'image/png') : ''
         setModelPrediction({ ...res, previewUrl })
         toast('success', 'Prediccion lista', `F${res?.counts?.fiber || 0} H${res?.counts?.halo || 0} B${res?.counts?.background || 0}`)
@@ -4504,15 +4983,11 @@ export default function App() {
     }
     await withLoad('modelsPredict', async () => {
       try {
-        const res = await apiPost('/api/assist-models/predict-mask', {
-          session_id: sid,
-          image_id: imageId,
-          model_id: mid,
-          min_confidence: Number(modelMinConfidence || 0.72),
-          include_fiber: !!modelIncludeFiber,
-          include_halo: !!modelIncludeHalo,
-          include_background: !!modelIncludeBackground,
-        })
+        const requestSeq = modelPredictRequestSeqRef.current + 1
+        modelPredictRequestSeqRef.current = requestSeq
+        setModelPrediction(null)
+        const res = await apiPost('/api/assist-models/predict-mask', assistModelPredictionPayload(sid, mid))
+        if (requestSeq !== modelPredictRequestSeqRef.current) return
         if (res?.ok && res?.run) {
           // Ensure the experiment is in the experiments list so the run appears in filtered results.
           // This handles the case where the catalog hasn't been refreshed yet.
@@ -4637,6 +5112,15 @@ export default function App() {
     setLocoModelStageState(DEFAULT_LOCO_MODEL_STAGE_STATE)
   }
 
+  function clearActiveImageForProjectSwitch() {
+    setImageId('')
+    setImageName('')
+    setImageUrl('')
+    setSelectedSavedImageId('')
+    setSelectedLocalPath('')
+    resetImageScopedState()
+  }
+
   async function loadSavedImage(imageIdToLoad, targetOrigin) {
     console.log('[DEBUG-LOAD2] loadSavedImage called with:', imageIdToLoad)
     const sid = await ensureSessionReady()
@@ -4675,6 +5159,7 @@ export default function App() {
         await loadDiameterPoints(sid, loadedImageId, { silent: true })
         await loadLocoDatasetCirclesFromBackend(loadedImageId)
         await refreshDiameterRuns(loadedImageId, { silent: true })
+        await loadCalibrationForImage(loadedImageId, { silent: true })
         await refreshValidationCases(loadedImageId, { silent: true })
         const runs = maskRunListByImage[loadedImageId]
         const idx = maskIndexByImage[loadedImageId]
@@ -5182,12 +5667,11 @@ export default function App() {
       ? clamp(diamActivePointIdx, 0, nextPoints.length - 1)
       : -1
     if (remember) rememberDiameterManualState()
+    const nextCircles = manualCircleActiveIdx >= 0 && manualCircleActiveIdx < manualCircles.length
+      ? manualCircles.filter((_, idx) => idx !== manualCircleActiveIdx)
+      : []
     setManualCircleDraft(null)
-    setManualCircles((prev) => (
-      manualCircleActiveIdx >= 0 && manualCircleActiveIdx < prev.length
-        ? prev.filter((_, idx) => idx !== manualCircleActiveIdx)
-        : []
-    ))
+    setManualCircles(nextCircles)
     setManualCircleActiveIdx(-1)
     setManualCircleSelected(false)
     setManualCircleConsumed(true)
@@ -5201,6 +5685,12 @@ export default function App() {
     void syncDiameterPointsToServer({
       points: nextPoints,
       active: nextActivePointIdx,
+      maskLines: manualMaskLines,
+      directLines: manualDirectLines,
+      circles: nextCircles,
+      maskLineActiveIdx: manualMaskLineActiveIdx,
+      directLineActiveIdx: manualDirectLineActiveIdx,
+      circleActiveIdx: -1,
     })
   }
 
@@ -5300,17 +5790,26 @@ export default function App() {
       method_id: kind === 'direct' ? 'manual_line_direct_caliper' : 'manual_dual_side_caliper',
       geometry_id: String(existingLine?.geometry_id || draftLine?.geometry_id || makeManualGeometryId(kind, start, end)),
     }
+    const currentLines = linesForKind(kind)
+    const nextLines = Number.isInteger(lineIndex) && lineIndex >= 0
+      ? currentLines.map((item, idx) => (idx === lineIndex ? line : item))
+      : (currentLines.some((item) => lineAlmostEqual(item, line)) ? currentLines : [...currentLines, line])
+    const nextActiveLineIdx = Number.isInteger(lineIndex) && lineIndex >= 0 ? lineIndex : Math.max(0, nextLines.length - 1)
+    const geometrySnapshot = {
+      maskLines: kind === 'mask' ? nextLines : manualMaskLines,
+      directLines: kind === 'direct' ? nextLines : manualDirectLines,
+      maskLineActiveIdx: kind === 'mask' ? nextActiveLineIdx : manualMaskLineActiveIdx,
+      directLineActiveIdx: kind === 'direct' ? nextActiveLineIdx : manualDirectLineActiveIdx,
+      circles: manualCircles,
+      circleActiveIdx: manualCircleActiveIdx,
+    }
     setLineDraftForKind(kind, line)
     if (Number.isInteger(lineIndex) && lineIndex >= 0) {
-      setLinesForKind(kind, (prev) => prev.map((item, idx) => (idx === lineIndex ? line : item)))
-      setLineActiveIndexForKind(kind, lineIndex)
+      setLinesForKind(kind, nextLines)
+      setLineActiveIndexForKind(kind, nextActiveLineIdx)
     } else {
-      setLinesForKind(kind, (prev) => {
-        if (prev.some((item) => lineAlmostEqual(item, line))) return prev
-        const next = [...prev, line]
-        setLineActiveIndexForKind(kind, next.length - 1)
-        return next
-      })
+      setLinesForKind(kind, nextLines)
+      setLineActiveIndexForKind(kind, nextActiveLineIdx)
     }
     setValidationForm((prev) => ({
       ...prev,
@@ -5325,9 +5824,9 @@ export default function App() {
       const center = { x: (Number(start.x) + Number(end.x)) * 0.5, y: (Number(start.y) + Number(end.y)) * 0.5 }
       const existingIdx = diamPoints.findIndex((p) => Math.hypot(Number(p.x) - Number(center.x), Number(p.y) - Number(center.y)) <= 2)
       if (existingIdx >= 0) {
-        void updateDiameterPoints('set_active', { active_index: existingIdx })
+        void updateDiameterPoints('set_active', { active_index: existingIdx }, { geometrySnapshot })
       } else {
-        void updateDiameterPoints('add', { x: center.x, y: center.y }, { remember: false })
+        void updateDiameterPoints('add', { x: center.x, y: center.y }, { remember: false, geometrySnapshot })
       }
     }
   }
@@ -5522,21 +6021,37 @@ export default function App() {
           consumed: false,
           type: manualCircleNextType,
         }
+        const existing = manualCircles.findIndex((item) => String(item.geometry_id || '') === circle.geometry_id)
+        const nextCircles = existing >= 0 ? manualCircles.map((item, idx) => (idx === existing ? circle : item)) : [...manualCircles, circle]
+        const nextCircleIdx = existing >= 0 ? existing : nextCircles.length - 1
         setManualCircleDraft(circle)
         setManualCircleConsumed(false)
-        setManualCircles((prev) => {
-          const existing = prev.findIndex((item) => String(item.geometry_id || '') === circle.geometry_id)
-          const next = existing >= 0 ? prev.map((item, idx) => (idx === existing ? circle : item)) : [...prev, circle]
-          setManualCircleActiveIdx(existing >= 0 ? existing : next.length - 1)
-          return next
-        })
+        setManualCircles(nextCircles)
+        setManualCircleActiveIdx(nextCircleIdx)
       }
       if (center && sessionId && imageId) {
+        const circle = {
+          center: draft?.center || center,
+          radius: Math.max(1, Number(draft?.radius) || 1),
+          geometry_id: String(draft?.geometry_id || geometryId || makeManualGeometryId('circle', draft?.center || center, draft?.center || center)),
+          consumed: false,
+          type: manualCircleNextType,
+        }
+        const existing = manualCircles.findIndex((item) => String(item.geometry_id || '') === circle.geometry_id)
+        const nextCircles = existing >= 0 ? manualCircles.map((item, idx) => (idx === existing ? circle : item)) : [...manualCircles, circle]
+        const geometrySnapshot = {
+          maskLines: manualMaskLines,
+          directLines: manualDirectLines,
+          circles: nextCircles,
+          maskLineActiveIdx: manualMaskLineActiveIdx,
+          directLineActiveIdx: manualDirectLineActiveIdx,
+          circleActiveIdx: existing >= 0 ? existing : nextCircles.length - 1,
+        }
         const existingIdx = diamPoints.findIndex((p) => Math.hypot(Number(p.x) - Number(center.x), Number(p.y) - Number(center.y)) <= 2)
         if (existingIdx >= 0) {
-          void updateDiameterPoints('set_active', { active_index: existingIdx })
+          void updateDiameterPoints('set_active', { active_index: existingIdx }, { geometrySnapshot })
         } else {
-          void updateDiameterPoints('add', { x: center.x, y: center.y }, { remember: false })
+          void updateDiameterPoints('add', { x: center.x, y: center.y }, { remember: false, geometrySnapshot })
         }
         setManualCircleSelected(true)
       }
@@ -5577,6 +6092,72 @@ export default function App() {
     const points = Array.isArray(payload?.points) ? payload.points : []
     setDiamPoints(points)
     setDiamActivePointIdx(Number.isFinite(Number(payload?.active_point_idx)) ? Number(payload.active_point_idx) : -1)
+    applyDiameterGeometryPayload(payload?.geometry)
+  }
+
+  function sanitizePointRef(point) {
+    const x = Number(point?.x)
+    const y = Number(point?.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    return { x, y }
+  }
+
+  function sanitizeManualLine(line, kind = 'mask') {
+    const start = sanitizePointRef(line?.start)
+    const end = sanitizePointRef(line?.end)
+    if (!start || !end) return null
+    return {
+      start,
+      end,
+      method_id: kind === 'direct' ? 'manual_line_direct_caliper' : 'manual_dual_side_caliper',
+      geometry_id: String(line?.geometry_id || line?.manual_geometry_id || makeManualGeometryId(kind, start, end)),
+    }
+  }
+
+  function sanitizeManualCircle(circle) {
+    const center = sanitizePointRef(circle?.center)
+    const radius = Number(circle?.radius)
+    if (!center || !Number.isFinite(radius) || radius < 1) return null
+    return {
+      center,
+      radius,
+      geometry_id: String(circle?.geometry_id || circle?.circle_square_geometry_id || makeManualGeometryId('circle', center, center)),
+      consumed: Boolean(circle?.consumed),
+      type: String(circle?.type || circle?.circle_type || 'valid'),
+    }
+  }
+
+  function buildDiameterGeometryPayload(snapshot = {}) {
+    const maskLines = Array.isArray(snapshot.maskLines) ? snapshot.maskLines : manualMaskLines
+    const directLines = Array.isArray(snapshot.directLines) ? snapshot.directLines : manualDirectLines
+    const circles = Array.isArray(snapshot.circles) ? snapshot.circles : manualCircles
+    return {
+      mask_lines: maskLines.map((line) => sanitizeManualLine(line, 'mask')).filter(Boolean),
+      direct_lines: directLines.map((line) => sanitizeManualLine(line, 'direct')).filter(Boolean),
+      circles: circles.map(sanitizeManualCircle).filter(Boolean),
+      mask_line_active_idx: Number.isFinite(Number(snapshot.maskLineActiveIdx)) ? Number(snapshot.maskLineActiveIdx) : manualMaskLineActiveIdx,
+      direct_line_active_idx: Number.isFinite(Number(snapshot.directLineActiveIdx)) ? Number(snapshot.directLineActiveIdx) : manualDirectLineActiveIdx,
+      circle_active_idx: Number.isFinite(Number(snapshot.circleActiveIdx)) ? Number(snapshot.circleActiveIdx) : manualCircleActiveIdx,
+    }
+  }
+
+  function applyDiameterGeometryPayload(geometry) {
+    const raw = geometry && typeof geometry === 'object' ? geometry : {}
+    const maskLines = (Array.isArray(raw.mask_lines) ? raw.mask_lines : []).map((line) => sanitizeManualLine(line, 'mask')).filter(Boolean)
+    const directLines = (Array.isArray(raw.direct_lines) ? raw.direct_lines : []).map((line) => sanitizeManualLine(line, 'direct')).filter(Boolean)
+    const circles = (Array.isArray(raw.circles) ? raw.circles : []).map(sanitizeManualCircle).filter(Boolean)
+    setManualMaskLines(maskLines)
+    setManualDirectLines(directLines)
+    setManualMaskLineDraft(maskLines.length ? maskLines[Math.max(0, Math.min(maskLines.length - 1, Number(raw.mask_line_active_idx) || 0))] : { start: null, end: null })
+    setManualDirectLineDraft(directLines.length ? directLines[Math.max(0, Math.min(directLines.length - 1, Number(raw.direct_line_active_idx) || 0))] : { start: null, end: null })
+    setManualMaskLineActiveIdx(maskLines.length ? Math.max(0, Math.min(maskLines.length - 1, Number(raw.mask_line_active_idx) || 0)) : -1)
+    setManualDirectLineActiveIdx(directLines.length ? Math.max(0, Math.min(directLines.length - 1, Number(raw.direct_line_active_idx) || 0)) : -1)
+    setManualCircles(circles)
+    const circleIdx = circles.length ? Math.max(0, Math.min(circles.length - 1, Number(raw.circle_active_idx) || 0)) : -1
+    setManualCircleActiveIdx(circleIdx)
+    setManualCircleDraft(circleIdx >= 0 ? circles[circleIdx] : null)
+    setManualCircleSelected(false)
+    setManualCircleConsumed(false)
   }
 
   function buildDetectorSeedCircles(candidates) {
@@ -5642,6 +6223,12 @@ export default function App() {
     await syncDiameterPointsToServer({
       points,
       active: 0,
+      maskLines: [],
+      directLines: [],
+      circles,
+      maskLineActiveIdx: -1,
+      directLineActiveIdx: -1,
+      circleActiveIdx: 0,
     })
     return circles
   }
@@ -5654,6 +6241,7 @@ export default function App() {
         action: 'replace',
         points: Array.isArray(snapshot?.points) ? snapshot.points : [],
         active_index: Number.isFinite(Number(snapshot?.active)) ? Number(snapshot.active) : -1,
+        geometry: buildDiameterGeometryPayload(snapshot || {}),
       })
     } catch (err) {
       toast('warning', 'Diameter undo', errMsg(err))
@@ -5736,6 +6324,7 @@ export default function App() {
           session_id: sessionId,
           action,
           circle_type: action === 'add' ? manualCircleNextType : '',
+          geometry: buildDiameterGeometryPayload(options.geometrySnapshot || {}),
           ...extra,
         })
         syncDiameterPointPayload(res)
@@ -5769,6 +6358,7 @@ export default function App() {
         const res = await apiPost('/api/diameter-research/points/save', {
           session_id: sessionId,
           image_id: imageId,
+          geometry: buildDiameterGeometryPayload(diameterSnapshot()),
         })
         syncDiameterPointPayload(res)
         toast('success', 'Diameter points', 'Puntos guardados.')
@@ -5953,21 +6543,12 @@ export default function App() {
         setLocoDatasetCircles((prev) => {
           const updated = [...prev, next]
           locoDatasetCirclesRef.current = updated
-          void syncLocoDatasetPoints(updated)
+          void syncLocoDatasetCircles(updated)
           return updated
         })
         setLocoDatasetSelectedId(candidate_id)
         setLocoDatasetFeatures([])
         setLocoDatasetSaveInfo(null)
-        setCircleTypeCounts(prev => ({
-          ...prev,
-          [imageId]: {
-            valid: (prev[imageId]?.valid || 0) + (locoDatasetDefaultLabel === 'valid' ? 1 : 0),
-            crossing: (prev[imageId]?.crossing || 0) + (locoDatasetDefaultLabel === 'invalid_crossing' ? 1 : 0),
-            other_valid: (prev[imageId]?.other_valid || 0) + (locoDatasetDefaultLabel === 'invalid_other' ? 1 : 0),
-            unknown: prev[imageId]?.unknown || 0,
-          },
-        }))
         setLocoDatasetCircleCounts(prev => {
           const cur = prev[imageId] || { valid: 0, invalid_crossing: 0, invalid_other: 0 }
           const key = locoDatasetDefaultLabel === 'invalid_crossing' ? 'invalid_crossing' : locoDatasetDefaultLabel === 'invalid_other' ? 'invalid_other' : 'valid'
@@ -5981,7 +6562,7 @@ export default function App() {
     }
     if (drag.mode === 'move') {
       locoDatasetDragRef.current = { mode: '', id: '', start: null, circle: null }
-      void syncLocoDatasetPoints(locoDatasetCirclesRef.current)
+      void syncLocoDatasetCircles(locoDatasetCirclesRef.current)
       e.currentTarget.releasePointerCapture?.(e.pointerId)
       e.preventDefault()
     }
@@ -6265,24 +6846,17 @@ export default function App() {
     const iid = String(targetImageId || imageId || '').trim()
     if (!iid) return
     const datasetCounts = { valid: 0, invalid_crossing: 0, invalid_other: 0 }
-    const pointCounts = { valid: 0, crossing: 0, other_valid: 0, unknown: 0 }
     ;(Array.isArray(circles) ? circles : []).forEach((circle) => {
       const label = String(circle?.label || '')
       if (label === 'invalid_crossing') {
         datasetCounts.invalid_crossing += 1
-        pointCounts.crossing += 1
       } else if (label === 'invalid_other') {
         datasetCounts.invalid_other += 1
-        pointCounts.other_valid += 1
       } else if (label === 'valid') {
         datasetCounts.valid += 1
-        pointCounts.valid += 1
-      } else {
-        pointCounts.unknown += 1
       }
     })
     setLocoDatasetCircleCounts((prev) => ({ ...prev, [iid]: datasetCounts }))
-    setCircleTypeCounts((prev) => ({ ...prev, [iid]: pointCounts }))
   }
 
   function clearLocoDatasetLocalState(targetImageId = '', options = {}) {
@@ -6302,7 +6876,7 @@ export default function App() {
     setLocoDatasetCircles(next)
     if (['valid', 'invalid_crossing', 'invalid_other'].includes(patch?.label)) setLocoDatasetDefaultLabel(patch.label)
     setLocoDatasetCachedCounts(imageId, next)
-    if (options.sync !== false) void syncLocoDatasetPoints(next)
+    if (options.sync !== false) void syncLocoDatasetCircles(next)
     setLocoDatasetFeatures([])
     setLocoDatasetSaveInfo(null)
   }
@@ -6313,11 +6887,6 @@ export default function App() {
     setLocoDatasetCircles((prev) => {
       const toDelete = prev.find((c) => String(c.candidate_id) === String(selId))
       if (toDelete) {
-        const ck = toDelete.label === 'invalid_crossing' ? 'crossing' : toDelete.label === 'invalid_other' ? 'other_valid' : 'valid'
-        setCircleTypeCounts(pc => {
-          const cur = pc[imageId] || { valid: 0, crossing: 0, other_valid: 0, unknown: 0 }
-          return { ...pc, [imageId]: { ...cur, [ck]: Math.max(0, (cur[ck] || 0) - 1) } }
-        })
         const dk = toDelete.label === 'invalid_crossing' ? 'invalid_crossing' : toDelete.label === 'invalid_other' ? 'invalid_other' : 'valid'
         setLocoDatasetCircleCounts(pd => {
           const cur = pd[imageId] || { valid: 0, invalid_crossing: 0, invalid_other: 0 }
@@ -6326,7 +6895,7 @@ export default function App() {
       }
       const filtered = prev.filter((c) => String(c.candidate_id) !== String(selId))
       locoDatasetCirclesRef.current = filtered
-      void syncLocoDatasetPoints(filtered)
+      void syncLocoDatasetCircles(filtered)
       return filtered
     })
     setLocoDatasetSelectedId('')
@@ -6338,19 +6907,19 @@ export default function App() {
     const iid = String(targetImageId || imageId || '').trim()
     if (!iid) return
     try {
-      const res = await apiGet(`/api/diameter-research/points/list?image_id=${encodeURIComponent(iid)}`)
-      const points = Array.isArray(res?.payload?.points) ? res.payload.points : []
-      console.log('[DEBUG-LOAD3] Loaded', points.length, 'circles for image', iid)
-      if (!points.length) {
+      const res = await apiGet(`/api/diameter-research/loco-dataset/circles/load?image_id=${encodeURIComponent(iid)}`)
+      const loadedCircles = Array.isArray(res?.payload?.circles) ? res.payload.circles : []
+      console.log('[DEBUG-LOAD3] Loaded', loadedCircles.length, 'LOCO dataset circles for image', iid)
+      if (!loadedCircles.length) {
         clearLocoDatasetLocalState(iid, { resetCounts: true })
         return
       }
-      const circles = points.map((p, idx) => ({
-        candidate_id: `loaded_${iid}_${idx}`,
-        center_x: Number(p.x),
-        center_y: Number(p.y),
-        radius_px: Number(p.radius_px || 0),
-        label: p.circle_type === 'crossing' ? 'invalid_crossing' : p.circle_type === 'other_valid' ? 'invalid_other' : 'valid',
+      const circles = loadedCircles.map((c, idx) => ({
+        candidate_id: String(c.candidate_id || `loaded_${iid}_${idx}`),
+        center_x: Number(c.center_x),
+        center_y: Number(c.center_y),
+        radius_px: Number(c.radius_px || 0),
+        label: ['valid', 'invalid_crossing', 'invalid_other'].includes(String(c.label || '')) ? String(c.label) : 'invalid_other',
       }))
       locoDatasetCirclesRef.current = circles
       setLocoDatasetCircles(circles)
@@ -6362,19 +6931,24 @@ export default function App() {
     } catch {}
   }
 
-  async function syncLocoDatasetPoints(circles, targetImageId = '') {
+  async function syncLocoDatasetCircles(circles, targetImageId = '') {
     const iid = String(targetImageId || imageId || '').trim()
-    console.log('[DEBUG-SYNC] syncLocoDatasetPoints: imageId=', iid, 'circles=', (circles || []).length)
+    console.log('[DEBUG-SYNC] syncLocoDatasetCircles: imageId=', iid, 'circles=', (circles || []).length)
     if (!iid) { console.warn('[DEBUG-SYNC] Skipping sync: no imageId'); return }
     const list = Array.isArray(circles) ? circles : locoDatasetCirclesRef.current
     try {
-      const pts = list.map(c => ({
-        x: c.center_x,
-        y: c.center_y,
-        circle_type: c.label === 'invalid_crossing' ? 'crossing' : c.label === 'invalid_other' ? 'other_valid' : 'valid',
+      const circlesPayload = list.map(c => ({
+        candidate_id: c.candidate_id,
+        center_x: c.center_x,
+        center_y: c.center_y,
         radius_px: c.radius_px,
+        label: c.label === 'invalid_crossing' ? 'invalid_crossing' : c.label === 'invalid_other' ? 'invalid_other' : 'valid',
       }))
-      const res = await apiPost('/api/diameter-research/points/sync', { image_id: iid, points: pts })
+      const res = await apiPost('/api/diameter-research/loco-dataset/circles/sync', {
+        image_id: iid,
+        circles: circlesPayload,
+        active_circle_id: String(locoDatasetSelectedId || ''),
+      })
       console.log('[DEBUG-SYNC] Sync OK:', res?.ok)
     } catch (err) {
       console.error('[DEBUG-SYNC] Failed to sync:', err?.message, err?.status, err)
@@ -6383,7 +6957,13 @@ export default function App() {
 
   async function clearLocoDatasetCanvas() {
     clearLocoDatasetLocalState(imageId, { resetCounts: true })
-    await syncLocoDatasetPoints([], imageId)
+    const iid = String(imageId || '').trim()
+    if (!iid) return
+    try {
+      await apiPost('/api/diameter-research/loco-dataset/circles/clear', { image_id: iid, circles: [] })
+    } catch (err) {
+      console.error('[DEBUG-SYNC] Failed to clear LOCO dataset circles:', err?.message, err?.status, err)
+    }
   }
 
   async function previewLocoDatasetFeatures() {
@@ -6604,6 +7184,22 @@ export default function App() {
     extratrees: 'ExtraTrees',
   }
 
+  function selectedLocoTrainingModels() {
+    const selected = Array.isArray(locoTrainingSelectedModels) ? locoTrainingSelectedModels : []
+    return LOCO_TRAINING_MODEL_IDS.filter((modelId) => selected.includes(modelId))
+  }
+
+  function setLocoTrainingModelChecked(modelId, checked) {
+    const id = String(modelId || '')
+    if (!LOCO_TRAINING_MODEL_IDS.includes(id)) return
+    setLocoTrainingSelectedModels((prev) => {
+      const current = Array.isArray(prev) ? prev : []
+      if (checked) return LOCO_TRAINING_MODEL_IDS.filter((candidate) => candidate === id || current.includes(candidate))
+      const next = current.filter((candidate) => candidate !== id)
+      return next
+    })
+  }
+
   function syncLocoTrainingRuns(items) {
     const list = Array.isArray(items) ? items : []
     setLocoTrainingRuns(list)
@@ -6613,6 +7209,13 @@ export default function App() {
     const res = await apiGet('/api/diameter-research/loco-training/runs')
     const items = Array.isArray(res?.items) ? res.items : []
     syncLocoTrainingRuns(items)
+    return items
+  }
+
+  async function fetchLocoTrainingModelsList() {
+    const res = await apiGet('/api/diameter-research/loco-training/models')
+    const items = Array.isArray(res?.items) ? res.items : []
+    setLocoRunModels(items)
     return items
   }
 
@@ -6641,6 +7244,28 @@ export default function App() {
     const items = Array.isArray(res?.items) ? res.items : []
     setLocoModelCustomPresets(items)
     return items
+  }
+
+  function locoPresetExists(presetKey, customPresets = locoModelCustomPresets) {
+    const key = String(presetKey || '')
+    if (!key) return false
+    if (key === 'custom') return true
+    if (key.startsWith('custom:')) {
+      const presetId = key.slice('custom:'.length)
+      return customPresets.some((item) => String(item.preset_id || '') === presetId)
+    }
+    return !!LOCO_PRESETS[key] && !locoHiddenBuiltinPresets.includes(key)
+  }
+
+  function locoPresetLabel(presetKey, customPresets = locoModelCustomPresets) {
+    const key = String(presetKey || '')
+    if (!key) return ''
+    if (key === 'custom') return 'Personalizado'
+    if (key.startsWith('custom:')) {
+      const presetId = key.slice('custom:'.length)
+      return customPresets.find((item) => String(item.preset_id || '') === presetId)?.preset_name || 'preset guardado'
+    }
+    return LOCO_PRESETS[key]?.label || key
   }
 
   async function loadLocoModelExcludeRects(customImageId = '') {
@@ -6916,7 +7541,49 @@ export default function App() {
     setDiamCalibration((prev) => normalizeDiamCalibrationState(typeof nextValue === 'function' ? nextValue(prev) : nextValue))
   }
 
+  useEffect(() => {
+    diamCalibrationRef.current = normalizeDiamCalibrationState(diamCalibration)
+  }, [diamCalibration])
+
+  function calibrationSaveSignature(calibration = diamCalibration) {
+    const c = normalizeDiamCalibrationState(calibration)
+    return [
+      imageId,
+      c.unit,
+      Number(c.known_value || 0),
+      Number(c.pixel_distance || 0),
+      Number(c.unit_per_px || 0),
+      c.line_x1,
+      c.line_y1,
+      c.line_x2,
+      c.line_y2,
+    ].join('|')
+  }
+
+  async function persistCalibration(calibration = diamCalibrationRef.current, { silent = true } = {}) {
+    if (!imageId) return false
+    const normalized = normalizeDiamCalibrationState(calibration)
+    const line = calibrationLineFromState(normalized)
+    if (!line) {
+      if (!silent) toast('warning', 'Calibracion', 'Dibuja la linea de escala antes de guardar.')
+      return false
+    }
+    try {
+      await apiPost('/api/diameter-research/calibration/save', {
+        image_id: imageId,
+        ...normalized,
+      })
+      calibrationAutosaveRef.current.signature = calibrationSaveSignature(normalized)
+      if (!silent) toast('success', 'Calibracion', 'Calibracion guardada.')
+      return true
+    } catch (err) {
+      if (!silent) toast('error', 'Calibracion', errMsg(err))
+      return false
+    }
+  }
+
   function buildLocoTrainingPayload({ forceMulticlass = false } = {}) {
+    const models = selectedLocoTrainingModels()
     return {
       data_selection: locoTrainingDataSelection,
       test_size: Number(locoTrainingTestSize || 0.2),
@@ -6927,8 +7594,8 @@ export default function App() {
       uses_patch_zoom_factor: !!locoTrainingUseZoom,
       uses_source_radius_px: !!locoTrainingUseSourceRadius,
       cv5_enabled: !!locoTrainingUseCv5,
-      models: [...LOCO_TRAINING_MODEL_IDS],
-      multiclass_model: forceMulticlass ? true : !!locoTrainingMulticlass,
+      models,
+      multiclass_model: true,
     }
   }
 
@@ -7010,6 +7677,165 @@ export default function App() {
     URL.revokeObjectURL(url)
   }
 
+  function diameterAnalysisFilters() {
+    return {
+      image_ids: selectedDiamAnalysisImageIds.length ? selectedDiamAnalysisImageIds : ['__no_selected_images__'],
+      project_ids: diamAnalysisImageView === 'all' ? [] : (activeProjectId ? [activeProjectId] : []),
+      structured_tags: diamAnalysisRequiredTags,
+    }
+  }
+
+  async function saveCurrentDiameterMeasurements(runIdOverride = '', { silent = false } = {}) {
+    const runId = String(runIdOverride || diamActiveRunId || '').trim()
+    if (!runId) {
+      if (!silent) toast('warning', 'Mediciones internas', 'Carga o ejecuta un run de diametro primero.')
+      return
+    }
+    const saveTask = async () => {
+      const res = await apiPost('/api/diameter-research/measurements/save-from-run', { run_id: runId })
+      const count = Number(res?.payload?.saved_count || 0)
+      if (!silent) toast(count ? 'success' : 'warning', 'Mediciones internas', `${count} mediciones guardadas para analisis.`)
+      return count
+    }
+    if (silent) return saveTask()
+    return withLoad('diamMeasurementSave', async () => {
+      try {
+        const count = await saveTask()
+        await refreshDiameterMeasurementSummary()
+        if (['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) await queryDiameterMeasurements()
+        return count
+      } catch (err) {
+        toast('error', 'Mediciones internas', errMsg(err))
+        return 0
+      }
+    })
+  }
+
+  async function saveAssistModelMetadata(model) {
+    const id = String(model?.model_id || '').trim()
+    if (!id) return
+    const draft = assistModelDraft(model)
+    await withLoad('modelsList', async () => {
+      try {
+        const res = await apiPost('/api/assist-models/update-meta', {
+          model_id: id,
+          model_name: draft.model_name,
+          notes: draft.notes,
+          model_tags: tagsFromText(draft.tags_text),
+        })
+        const items = Array.isArray(res?.models) ? res.models : []
+        setAssistModels(items)
+        setAssistModelEdits((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        toast('success', 'Modelo actualizado', draft.model_name || id)
+      } catch (err) {
+        toast('warning', 'Modelo', errMsg(err))
+      }
+    })
+  }
+
+  async function queryDiameterMeasurements() {
+    await withLoad('diamAnalysis', async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/measurements/query', {
+          ...diameterAnalysisFilters(),
+          unit: diamAnalysisUnit,
+          include_uncalibrated: diamAnalysisIncludeUncalibrated,
+        })
+        setDiamAnalysisResult(res?.payload || null)
+      } catch (err) {
+        toast('error', 'Analisis de diametros', errMsg(err))
+      }
+    })
+  }
+
+  async function refreshDiameterAnalyses() {
+    try {
+      const res = await apiGet('/api/diameter-research/analysis/list')
+      setDiamAnalysisRuns(Array.isArray(res?.items) ? res.items : [])
+    } catch {}
+  }
+
+  async function refreshDiameterMeasurementSummary() {
+    await withLoad('diamMeasurementSummary', async () => {
+      try {
+        const res = await apiGet('/api/diameter-research/measurements/summary-by-image')
+        const next = {}
+        ;(Array.isArray(res?.items) ? res.items : []).forEach((item) => {
+          const imageId = String(item?.image_id || '')
+          if (imageId) next[imageId] = item
+        })
+        setDiamMeasurementSummaryByImage(next)
+      } catch (err) {
+        toast('error', 'Mediciones internas', errMsg(err))
+      }
+    })
+  }
+
+  async function saveDiameterAnalysis() {
+    const name = String(diamAnalysisName || '').trim() || `Analisis diametros ${new Date().toISOString().slice(0, 10)}`
+    await withLoad('diamAnalysis', async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/analysis/save', {
+          name,
+          filters: diameterAnalysisFilters(),
+          unit: diamAnalysisUnit,
+          include_uncalibrated: diamAnalysisIncludeUncalibrated,
+          project_ids: activeProjectId ? [activeProjectId] : [],
+          structured_tags: [{ category: 'analysis', label: name }],
+          chart_config: diamAnalysisChart,
+        })
+        setDiamAnalysisName(name)
+        await refreshDiameterAnalyses()
+        await refreshProjectTagCatalog()
+        toast('success', 'Analisis de diametros', `Analisis guardado: ${res?.item?.name || name}`)
+      } catch (err) {
+        toast('error', 'Analisis de diametros', errMsg(err))
+      }
+    })
+  }
+
+  async function exportDiameterAnalysisData() {
+    const filters = diameterAnalysisFilters()
+    const query = new URLSearchParams()
+    if (filters.image_ids.length) query.set('image_ids', filters.image_ids.join(','))
+    if (filters.project_ids.length) query.set('project_ids', filters.project_ids.join(','))
+    if (filters.structured_tags.length) query.set('structured_tags', JSON.stringify(filters.structured_tags))
+    query.set('unit', diamAnalysisUnit)
+    query.set('include_uncalibrated', diamAnalysisIncludeUncalibrated ? 'true' : 'false')
+    await withLoad('diamAnalysis', async () => {
+      try {
+        const res = await apiGet(`/api/diameter-research/analysis/export?${query.toString()}`)
+        toast('success', 'Exportar analisis', `CSV: ${res.summary_csv || '-'} | JSON: ${res.summary_json || '-'}`)
+      } catch (err) {
+        toast('error', 'Exportar analisis', errMsg(err))
+      }
+    })
+  }
+
+  function exportDiameterAnalysisSvg() {
+    const svg = document.querySelector('.diam-analysis-histogram .histogram-svg')
+    if (!svg) {
+      toast('warning', 'Exportar grafico', 'No hay histograma visible para exportar.')
+      return
+    }
+    const source = new XMLSerializer().serializeToString(svg)
+    const blob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${String(diamAnalysisName || 'histograma_diametros').replace(/[^\w-]+/g, '_')}.svg`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function updateDiamAnalysisChart(key, value) {
+    setDiamAnalysisChart((prev) => ({ ...prev, [key]: value }))
+  }
+
   function pollLocoTrainingProgress(progressId, applyProgress) {
     let cancelled = false
     const tick = async () => {
@@ -7029,6 +7855,7 @@ export default function App() {
 
   function createLocoTrainingBatchJob() {
     const config = buildLocoTrainingPayload({ forceMulticlass: true })
+    if (!config.models.length) return null
     const jobToken = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
     return {
       job_id: `train_batch_${jobToken}`,
@@ -7107,17 +7934,22 @@ export default function App() {
   }
 
   async function trainLocoModels() {
+    const config = buildLocoTrainingPayload()
+    if (!config.models.length) {
+      toast('warning', 'Entrenamiento', 'Selecciona al menos un modelo para entrenar.')
+      return
+    }
     await withLoad('locoTraining', async () => {
       const progressId = makeLocoTrainingProgressId('train')
       const stopPolling = pollLocoTrainingProgress(progressId, setLocoTrainingProgress)
       try {
         setLocoTrainingResult(null)
         setLocoTrainingProgress({ status: 'running', stage: 'preparando', completed_steps: 0, total_steps: 1 })
-        const res = await apiPost('/api/diameter-research/loco-training/train', { ...buildLocoTrainingPayload(), progress_id: progressId })
+        const res = await apiPost('/api/diameter-research/loco-training/train', { ...config, progress_id: progressId })
         setLocoTrainingResult(res || null)
         const firstOk = (res?.metrics_summary || []).find((row) => row.status === 'ok')
         if (firstOk?.model_id) setLocoTrainingSelectedModel(firstOk.model_id)
-        await fetchLocoTrainingRunsList()
+        await Promise.all([fetchLocoTrainingRunsList(), fetchLocoTrainingModelsList()])
         toast('success', 'Entrenamiento', `Run ${res?.run_id || ''} completado.`)
       } catch (err) {
         toast('error', 'Entrenamiento', errMsg(err))
@@ -7132,7 +7964,12 @@ export default function App() {
   }
 
   function addLocoTrainingBatchJob() {
-    setLocoTrainingBatchJobs((prev) => [...prev, createLocoTrainingBatchJob()])
+    const job = createLocoTrainingBatchJob()
+    if (!job) {
+      toast('warning', 'Batch de entrenamiento', 'Selecciona al menos un modelo para agregar al batch.')
+      return
+    }
+    setLocoTrainingBatchJobs((prev) => [...prev, job])
   }
 
   function removeLocoTrainingBatchJob(jobId) {
@@ -7178,7 +8015,7 @@ export default function App() {
         setLocoTrainingBatchJobs([...queue])
       }
       try {
-        await fetchLocoTrainingRunsList()
+        await Promise.all([fetchLocoTrainingRunsList(), fetchLocoTrainingModelsList()])
       } catch {}
       const ranked = buildLocoTrainingBatchRows(queue)
       if (ranked.length) {
@@ -7260,7 +8097,7 @@ export default function App() {
           setLocoTrainingResult(ranked[0].runResponse || null)
           if (ranked[0].model_id) setLocoTrainingSelectedModel(ranked[0].model_id)
         }
-        await fetchLocoTrainingRunsList()
+        await Promise.all([fetchLocoTrainingRunsList(), fetchLocoTrainingModelsList()])
         toast('success', 'Tuning', `${trialJobs.filter((job) => job.status === 'done').length}/${trialJobs.length} trials completados.`)
       } catch (err) {
         toast('error', 'Tuning', errMsg(err))
@@ -7307,14 +8144,30 @@ export default function App() {
   async function refreshLocoTrainingRuns() {
     await withLoad('locoTraining', async () => {
       try {
-        await Promise.all([fetchLocoTrainingRunsList(), fetchLocoSavedModelsList()])
+        await Promise.all([fetchLocoTrainingRunsList(), fetchLocoTrainingModelsList(), fetchLocoSavedModelsList()])
       } catch (err) {
         toast('error', 'Runs de entrenamiento', errMsg(err))
       }
     })
   }
 
-  async function saveLocoTrainingModel(trainingRunId, modelId, metrics = {}) {
+  function openLocoSaveModelDialog(trainingRunId, modelId, metrics = {}) {
+    const runId = String(trainingRunId || '').trim()
+    const mid = String(modelId || '').trim()
+    if (!runId || !mid) {
+      toast('warning', 'Guardar modelo', 'Selecciona un run y un modelo.')
+      return
+    }
+    const label = LOCO_TRAINING_MODEL_LABELS[mid] || mid
+    setLocoSaveModelDialog({
+      training_run_id: runId,
+      model_id: mid,
+      metrics: metrics || {},
+      model_name: label,
+    })
+  }
+
+  async function saveLocoTrainingModel(trainingRunId, modelId, metrics = {}, modelName = '') {
     const runId = String(trainingRunId || '').trim()
     const mid = String(modelId || '').trim()
     if (!runId || !mid) {
@@ -7327,14 +8180,26 @@ export default function App() {
           training_run_id: runId,
           model_id: mid,
           metrics: metrics || {},
+          model_name: String(modelName || '').trim(),
         })
-        await fetchLocoSavedModelsList()
+        await Promise.all([fetchLocoSavedModelsList(), fetchLocoTrainingModelsList()])
         setLocoTrainingSelectedSavedModelId(res?.item?.saved_model_id || '')
+        setLocoSaveModelDialog(null)
         toast('success', 'Guardar modelo', `${res?.item?.model || mid} guardado.`)
       } catch (err) {
         toast('error', 'Guardar modelo', errMsg(err))
       }
     })
+  }
+
+  function confirmLocoSaveModelDialog() {
+    if (!locoSaveModelDialog) return
+    saveLocoTrainingModel(
+      locoSaveModelDialog.training_run_id,
+      locoSaveModelDialog.model_id,
+      locoSaveModelDialog.metrics,
+      locoSaveModelDialog.model_name,
+    )
   }
 
   async function deleteLocoSavedModel(savedModelId) {
@@ -7347,6 +8212,127 @@ export default function App() {
         toast('success', 'Modelo guardado', 'Modelo eliminado.')
       } catch (err) {
         toast('error', 'Modelo guardado', errMsg(err))
+      }
+    })
+  }
+
+  async function saveLocoSavedModelMetadata(model) {
+    const id = String(model?.saved_model_id || '').trim()
+    if (!id) return
+    const draft = locoSavedModelDraft(model)
+    await withLoad('locoTraining', async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/loco-training/update-saved-model', {
+          saved_model_id: id,
+          model_name: draft.model_name,
+          notes: draft.notes,
+          model_tags: tagsFromText(draft.tags_text),
+        })
+        const items = Array.isArray(res?.items) ? res.items : []
+        if (items.length) setLocoSavedModels(items)
+        else await fetchLocoSavedModelsList()
+        setLocoSavedModelEdits((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        toast('success', 'Modelo LOCO actualizado', draft.model_name || id)
+      } catch (err) {
+        toast('error', 'Modelo LOCO', errMsg(err))
+      }
+    })
+  }
+
+  async function saveModelTagEditor() {
+    const editor = modelTagEditor
+    if (!editor) return
+    if (editor.scope === 'scribble') {
+      const id = String(editor.model_id || '').trim()
+      if (!id) return
+      await withLoad('modelsList', async () => {
+        try {
+          const res = await apiPost('/api/assist-models/update-meta', {
+            model_id: id,
+            model_name: editor.model_name || id,
+            notes: editor.notes || '',
+            model_tags: normalizeStructuredTags(editor.own_tags || []),
+          })
+          const items = Array.isArray(res?.models) ? res.models : []
+          setAssistModels(items)
+          setModelTagEditor(null)
+          toast('success', 'Modelo actualizado', editor.model_name || id)
+        } catch (err) {
+          toast('warning', 'Modelo', errMsg(err))
+        }
+      })
+      return
+    }
+    if (editor.scope === 'loco_saved') {
+      const savedId = String(editor.saved_model_id || '').trim()
+      if (!savedId) return
+      await withLoad('locoTraining', async () => {
+        try {
+          const res = await apiPost('/api/diameter-research/loco-training/update-saved-model', {
+            saved_model_id: savedId,
+            model_name: editor.model_name || savedId,
+            notes: editor.notes || '',
+            model_tags: normalizeStructuredTags(editor.own_tags || []),
+          })
+          const items = Array.isArray(res?.items) ? res.items : []
+          if (items.length) setLocoSavedModels(items)
+          else await fetchLocoSavedModelsList()
+          setModelTagEditor(null)
+          toast('success', 'Modelo LOCO actualizado', editor.model_name || savedId)
+        } catch (err) {
+          toast('error', 'Modelo LOCO', errMsg(err))
+        }
+      })
+      return
+    }
+    if (editor.scope === 'loco_run') {
+      const runId = String(editor.training_run_id || '').trim()
+      const modelId = String(editor.model_id || '').trim()
+      if (!runId || !modelId) return
+      await withLoad('locoTraining', async () => {
+        try {
+          const res = await apiPost('/api/diameter-research/loco-training/update-run-model', {
+            training_run_id: runId,
+            model_id: modelId,
+            model_name: editor.model_name || modelId,
+            notes: editor.notes || '',
+            model_tags: normalizeStructuredTags(editor.own_tags || []),
+            hidden: false,
+          })
+          const items = Array.isArray(res?.items) ? res.items : []
+          setLocoRunModels(items)
+          setModelTagEditor(null)
+          toast('success', 'Modelo LOCO actualizado', editor.model_name || modelId)
+        } catch (err) {
+          toast('error', 'Modelo LOCO', errMsg(err))
+        }
+      })
+    }
+  }
+
+  async function hideLocoRunModel(model) {
+    const runId = String(model?.training_run_id || model?.run_id || '').trim()
+    const modelId = String(model?.model_id || '').trim()
+    if (!runId || !modelId) return
+    await withLoad('locoTraining', async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/loco-training/update-run-model', {
+          training_run_id: runId,
+          model_id: modelId,
+          model_name: model.model_name || model.model || modelId,
+          notes: model.notes || '',
+          model_tags: normalizeStructuredTags(model.model_tags || []),
+          hidden: true,
+        })
+        const items = Array.isArray(res?.items) ? res.items : []
+        setLocoRunModels(items)
+        toast('success', 'Modelo LOCO', 'Modelo ocultado de la gestion.')
+      } catch (err) {
+        toast('error', 'Modelo LOCO', errMsg(err))
       }
     })
   }
@@ -7535,6 +8521,36 @@ export default function App() {
         toast('error', 'Preset', errMsg(err))
       }
     })
+  }
+
+  function persistHiddenLocoBuiltinPresets(nextItems) {
+    const next = Array.from(new Set((Array.isArray(nextItems) ? nextItems : []).map((item) => String(item || '')).filter(Boolean)))
+    setLocoHiddenBuiltinPresets(next)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(LOCO_BUILTIN_PRESETS_STORAGE_KEY, JSON.stringify(next))
+    }
+  }
+
+  function hideLocoBuiltinPreset() {
+    const key = String(locoModelPreset || '')
+    if (!key || key === 'custom' || String(key).startsWith('custom:') || !LOCO_PRESETS[key]) return
+    persistHiddenLocoBuiltinPresets([...locoHiddenBuiltinPresets, key])
+    setLocoModelPreset('custom')
+    setLocoModelPresetName('')
+    toast('success', 'Preset', 'Preset precargado ocultado.')
+  }
+
+  function setCurrentLocoPresetAsDefault() {
+    const key = String(locoModelPreset || '')
+    if (!key || key === 'custom') {
+      toast('warning', 'Preset', 'Selecciona un preset para setearlo como predeterminado.')
+      return
+    }
+    setLocoDefaultPreset(key)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(LOCO_DEFAULT_PRESET_STORAGE_KEY, key)
+    }
+    toast('success', 'Preset', 'Preset predeterminado actualizado.')
   }
 
   function applyLocoModelDetectorResult(res, successTitle) {
@@ -7751,48 +8767,24 @@ export default function App() {
     toast('success', 'Calibracion', 'Dibuja una linea sobre la barra de escala.')
   }
 
-  function clearDiameterCalibrationLine() {
-    updateDiamCalibration((prev) => ({
-      ...prev,
-      pixel_distance: 0,
-      unit_per_px: 0,
-      line_x1: null,
-      line_y1: null,
-      line_x2: null,
-      line_y2: null,
-    }))
-  }
-
   // --- Calibration functions ---
   async function saveCalibration() {
     if (!imageId) return
-    const line = calibrationLineFromState(diamCalibration)
-    if (!line) {
-      toast('warning', 'Calibracion', 'Dibuja la linea de escala antes de guardar.')
-      return
-    }
     await withLoad('calibration', async () => {
-      try {
-        await apiPost('/api/diameter-research/calibration/save', {
-          image_id: imageId,
-          ...diamCalibration,
-        })
-        toast('success', 'Calibracion', 'Calibracion guardada.')
-      } catch (err) {
-        toast('error', 'Calibracion', errMsg(err))
-      }
+      await persistCalibration(diamCalibrationRef.current, { silent: false })
     })
   }
 
-  async function loadCalibration() {
-    if (!imageId) return
+  async function loadCalibrationForImage(targetImageId = imageId, { silent = false } = {}) {
+    const iid = String(targetImageId || '').trim()
+    if (!iid) return
     await withLoad('calibration', async () => {
       try {
-        const res = await apiGet(`/api/diameter-research/calibration/load?image_id=${encodeURIComponent(imageId)}`)
+        const res = await apiGet(`/api/diameter-research/calibration/load?image_id=${encodeURIComponent(iid)}`)
         const calibration = res?.calibration
         if (calibration) {
           updateDiamCalibration({
-            enabled: calibration.enabled ?? false,
+            enabled: true,
             known_value: calibration.known_value ?? calibration.known_nm ?? DEFAULT_DIAM_CALIBRATION.known_value,
             pixel_distance: calibration.pixel_distance ?? 0,
             unit_per_px: calibration.unit_per_px ?? calibration.nm_per_px ?? 0,
@@ -7802,29 +8794,44 @@ export default function App() {
             line_x2: calibration.line_x2 ?? null,
             line_y2: calibration.line_y2 ?? null,
           })
-          toast('success', 'Calibracion', 'Calibracion cargada.')
+          if (!silent) {
+            toast('success', 'Calibracion', calibration.suggested_from_tags ? 'Calibracion prellenada desde tags. Dibuja la linea para completar el factor.' : 'Calibracion cargada.')
+          }
         }
       } catch (err) {
-        toast('error', 'Calibracion', errMsg(err))
+        if (!silent) toast('error', 'Calibracion', errMsg(err))
       }
     })
   }
 
-  async function deleteCalibration() {
-    if (!imageId) return
-    await withLoad('calibration', async () => {
-      try {
-        await apiPost('/api/diameter-research/calibration/delete', {
-          image_id: imageId,
-        })
-        setDiamCalibration(DEFAULT_DIAM_CALIBRATION)
-        if (diamViewerMode === 'calibration') setDiamViewerMode('pan')
-        toast('success', 'Calibracion', 'Calibracion eliminada.')
-      } catch (err) {
-        toast('error', 'Calibracion', errMsg(err))
+  useEffect(() => {
+    const line = calibrationLineFromState(diamCalibration)
+    if (!imageId || !line || !(Number(diamCalibration.known_value || 0) > 0)) return undefined
+    const signature = calibrationSaveSignature(diamCalibration)
+    if (signature === calibrationAutosaveRef.current.signature) return undefined
+    if (calibrationAutosaveRef.current.timer) {
+      window.clearTimeout(calibrationAutosaveRef.current.timer)
+    }
+    calibrationAutosaveRef.current.timer = window.setTimeout(() => {
+      void persistCalibration(diamCalibration, { silent: true })
+    }, 650)
+    return () => {
+      if (calibrationAutosaveRef.current.timer) {
+        window.clearTimeout(calibrationAutosaveRef.current.timer)
+        calibrationAutosaveRef.current.timer = null
       }
-    })
-  }
+    }
+  }, [
+    imageId,
+    diamCalibration.unit,
+    diamCalibration.known_value,
+    diamCalibration.pixel_distance,
+    diamCalibration.unit_per_px,
+    diamCalibration.line_x1,
+    diamCalibration.line_y1,
+    diamCalibration.line_x2,
+    diamCalibration.line_y2,
+  ])
 
   function clearLocoModelDetector() {
     void clearLocoModelBackendState()
@@ -8140,9 +9147,23 @@ export default function App() {
           consumeDiameterManualCircle()
         }
         await refreshDiameterRuns(imageId, { silent: true })
+        let savedMeasurementCount = 0
+        try {
+          await persistCalibration(diamCalibrationRef.current, { silent: true })
+          for (const res of responses) {
+            if (res?.run_id) {
+              savedMeasurementCount += Number(await saveCurrentDiameterMeasurements(res.run_id, { silent: true }) || 0)
+            }
+          }
+          await refreshDiameterMeasurementSummary()
+          if (['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) await queryDiameterMeasurements()
+        } catch (err) {
+          toast('warning', 'Mediciones internas', `El run se completo, pero no se pudieron guardar mediciones internas: ${errMsg(err)}`)
+        }
         const okCount = nextResults.filter((r) => r.status === 'ok').length
         const methodCount = new Set(batches.map((batch) => batch.method_id)).size
-        toast(okCount ? 'success' : 'warning', 'Medicion de Diametros', `${okCount}/${nextResults.length} puntos medidos en ${methodCount} metodo(s).`)
+        const savedMsg = savedMeasurementCount ? ` ${savedMeasurementCount} mediciones internas guardadas.` : ''
+        toast(okCount ? 'success' : 'warning', 'Medicion de Diametros', `${okCount}/${nextResults.length} puntos medidos en ${methodCount} metodo(s).${savedMsg}`)
       } catch (err) {
         toast('error', 'Medicion de Diametros', errMsg(err))
       }
@@ -8419,6 +9440,37 @@ export default function App() {
   const brushSliderValue = useMemo(() => brushPxToSlider(brushSize), [brushSize])
 
   const editorRenderMetrics = useMemo(() => getEditorRenderMetrics(), [imageDims, stageSize, viewerZoom, viewerOffset])
+
+  const scribbleBaseFilterStyle = useMemo(() => {
+    const brightness = clamp(Number(scribbleImageFilters.brightness || 100), 50, 160)
+    const contrast = clamp(Number(scribbleImageFilters.contrast || 100), 50, 240)
+    const invert = clamp(Number(scribbleImageFilters.invert || 0), 0, 100)
+    return {
+      filter: `url(#scribble-base-visual-filter) brightness(${brightness}%) contrast(${contrast}%) invert(${invert}%)`,
+    }
+  }, [scribbleImageFilters])
+
+  const scribbleFilterGamma = useMemo(
+    () => clamp(Number(scribbleImageFilters.gamma || 1), 0.4, 2.2),
+    [scribbleImageFilters.gamma],
+  )
+
+  const scribbleFilterSharpness = useMemo(
+    () => clamp(Number(scribbleImageFilters.sharpness || 0), 0, 100) * 0.007,
+    [scribbleImageFilters.sharpness],
+  )
+
+  function updateScribbleImageFilter(key, value) {
+    setScribbleImageFilters((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function resetScribbleImageFilters() {
+    setScribbleImageFilters(DEFAULT_SCRIBBLE_IMAGE_FILTERS)
+  }
+
+  function releaseRangeFocus(ev) {
+    ev.currentTarget?.blur?.()
+  }
 
   // Brush cursor overlay — draws a circle matching the brush size, positioned at mouse
   useEffect(() => {
@@ -8806,6 +9858,13 @@ export default function App() {
   const transferAllSelected = transferCatalog.length > 0 && transferCatalog.every((item) => !!transferSelection[item.key])
   const transferSelectedSize = transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.size_bytes || 0) : 0), 0)
   const transferSelectedFiles = transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.file_count || 0) : 0), 0)
+  const transferSelectedProjects = projects.filter((project) => transferProjectIds.includes(project.project_id))
+  const transferImportProjects = Array.isArray(transferImportInspection?.summary?.projects) ? transferImportInspection.summary.projects : []
+  const transferImportNeedsProjectSelection = transferImportProjects.length > 0 && transferImportProjectIds.length === 0
+  const diamAnalysisRows = Array.isArray(diamAnalysisResult?.items) ? diamAnalysisResult.items : []
+  const diamAnalysisValues = diamAnalysisRows.map((row) => Number(row.diameter_value)).filter((value) => Number.isFinite(value))
+  const diamAnalysisGlobalStats = diamAnalysisResult?.global_metrics?.stats || {}
+  const diamAnalysisImageMetrics = Array.isArray(diamAnalysisResult?.image_metrics) ? diamAnalysisResult.image_metrics : []
   const scribbleTutorialChecklist = [
     ['Corregir semilla con Goma', scribbleTutorialExercise.erase_seed_done],
     ['Agrandar pincel', scribbleTutorialExercise.brush_grow_done],
@@ -8829,6 +9888,7 @@ export default function App() {
       project: 'Proyecto',
       fiber_type: 'Tipo de fibra',
       creator: 'Creador',
+      analysis: 'Analisis',
       size: 'Tamaño',
       unit: 'Unidad',
       other: 'Otro',
@@ -8836,10 +9896,153 @@ export default function App() {
     return labels[String(category || 'other')] || 'Otro'
   }
 
+  function formatStatValue(value, unit = diamAnalysisUnit) {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return '-'
+    return `${n.toFixed(2)} ${unit}`
+  }
+
+  function metricCell(stats, key, unit = diamAnalysisUnit) {
+    if (key === 'n') return Number(stats?.n || 0)
+    return formatStatValue(stats?.[key], unit)
+  }
+
   function tagDisplayLabel(tag) {
     const normalized = normalizeStructuredTags([tag])[0] || { category: 'other', label: String(tag || '') }
     if (normalized.category === 'other' || normalized.category === 'size') return normalized.label
     return `${tagCategoryLabel(normalized.category)}: ${normalized.label}`
+  }
+
+  function tagsTextFromItems(items) {
+    return normalizeStructuredTags(items).map((tag) => tagDisplayLabel(tag).replace(/^Otro:\s*/i, '')).join(', ')
+  }
+
+  function tagsFromText(text) {
+    return normalizeStructuredTags(String(text || '').split(',').map((label) => ({ category: 'other', label: label.trim() })).filter((tag) => tag.label))
+  }
+
+  function assistModelDraft(model) {
+    const id = String(model?.model_id || '')
+    const edit = assistModelEdits[id] || {}
+    return {
+      model_name: edit.model_name ?? String(model?.model_name || model?.model_id || ''),
+      notes: edit.notes ?? String(model?.notes || ''),
+      tags_text: edit.tags_text ?? tagsTextFromItems(model?.model_tags || []),
+    }
+  }
+
+  function locoSavedModelDraft(model) {
+    const id = String(model?.saved_model_id || '')
+    const edit = locoSavedModelEdits[id] || {}
+    return {
+      model_name: edit.model_name ?? String(model?.model_name || model?.model || model?.model_id || ''),
+      notes: edit.notes ?? String(model?.notes || ''),
+      tags_text: edit.tags_text ?? tagsTextFromItems(model?.model_tags || []),
+    }
+  }
+
+  function updateAssistModelDraft(modelId, patch) {
+    const id = String(modelId || '')
+    if (!id) return
+    setAssistModelEdits((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), ...patch } }))
+  }
+
+  function updateLocoSavedModelDraft(savedModelId, patch) {
+    const id = String(savedModelId || '')
+    if (!id) return
+    setLocoSavedModelEdits((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), ...patch } }))
+  }
+
+  function modelMetricValue(model) {
+    const metrics = model?.metrics || {}
+    const f1s = [metrics.f1_valid, metrics.f1_crossing, metrics.f1_other].map(Number).filter((value) => Number.isFinite(value))
+    if (f1s.length === 3) return (f1s.reduce((sum, value) => sum + value, 0) / 3).toFixed(3)
+    const value = metrics.holdout_accuracy ?? metrics.train_accuracy ?? metrics.macro_f1 ?? metrics.accuracy ?? metrics.f1_macro
+    const n = Number(value)
+    return Number.isFinite(n) ? n.toFixed(3) : '-'
+  }
+
+  function openAssistModelTagEditor(model) {
+    setModelTagEditor({
+      scope: 'scribble',
+      model_id: String(model?.model_id || ''),
+      title: String(model?.model_name || model?.model_id || 'Modelo Scribble'),
+      model_name: String(model?.model_name || model?.model_id || ''),
+      notes: String(model?.notes || ''),
+      own_tags: normalizeStructuredTags(model?.model_tags || []),
+      inherited_tags: normalizeStructuredTags(model?.image_tags || []),
+      auto_tags: normalizeStructuredTags(model?.auto_model_tags || []),
+    })
+  }
+
+  function openLocoRunModelTagEditor(model) {
+    const savedModelId = String(model?.saved_model_id || '')
+    setModelTagEditor({
+      scope: savedModelId ? 'loco_saved' : 'loco_run',
+      saved_model_id: savedModelId,
+      training_run_id: String(model?.training_run_id || model?.run_id || model?.source_run_id || ''),
+      model_id: String(model?.model_id || ''),
+      title: String(model?.model_name || model?.model || model?.model_id || 'Modelo LOCO'),
+      model_name: String(model?.model_name || model?.model || model?.model_id || ''),
+      notes: String(model?.notes || ''),
+      own_tags: normalizeStructuredTags(model?.model_tags || []),
+      inherited_tags: normalizeStructuredTags(model?.image_tags || []),
+      auto_tags: normalizeStructuredTags(model?.auto_model_tags || []),
+    })
+  }
+
+  function modelTagLibraryItems(editor = modelTagEditor) {
+    const items = []
+    const push = (tag) => {
+      const normalized = normalizeStructuredTags([tag])[0]
+      if (!normalized) return
+      const key = tagKey(normalized)
+      if (!key || items.some((item) => tagKey(item) === key)) return
+      items.push(normalized)
+    }
+    ;(projectTagCatalog.project || []).forEach((label) => push({ category: 'project', label }))
+    ;(projectTagCatalog.fiber_type || []).forEach((label) => push({ category: 'fiber_type', label }))
+    ;(projectTagCatalog.creator || []).forEach((label) => push({ category: 'creator', label }))
+    ;(projectTagCatalog.analysis || []).forEach((label) => push({ category: 'analysis', label }))
+    ;(projectTagCatalog.unit || ['um', 'nm']).forEach((label) => push({ category: 'unit', label }))
+    ;(projectTagCatalog.other || []).forEach((label) => push({ category: 'other', label }))
+    normalizeStructuredTags(editor?.own_tags || []).forEach(push)
+    normalizeStructuredTags(editor?.inherited_tags || []).forEach(push)
+    normalizeStructuredTags(editor?.auto_tags || []).forEach(push)
+    return items
+  }
+
+  function filteredModelTagLibrary(editor = modelTagEditor) {
+    const query = String(editor?.tag_search || '').trim().toLowerCase()
+    const items = modelTagLibraryItems(editor)
+    if (!query) return items
+    return items.filter((tag) => tagDisplayLabel(tag).toLowerCase().includes(query) || tagCategoryLabel(tag.category).toLowerCase().includes(query))
+  }
+
+  function addTagToModelEditor(tag) {
+    const normalized = normalizeStructuredTags([tag])[0]
+    if (!normalized) return
+    setModelTagEditor((prev) => {
+      if (!prev) return prev
+      const current = normalizeStructuredTags(prev.own_tags || [])
+      if (!current.some((item) => tagKey(item) === tagKey(normalized))) current.push(normalized)
+      return { ...prev, own_tags: current, tag_search: '' }
+    })
+  }
+
+  function removeTagFromModelEditor(tag) {
+    const normalized = normalizeStructuredTags([tag])[0]
+    if (!normalized) return
+    setModelTagEditor((prev) => {
+      if (!prev) return prev
+      return { ...prev, own_tags: normalizeStructuredTags(prev.own_tags || []).filter((item) => tagKey(item) !== tagKey(normalized)) }
+    })
+  }
+
+  function createModelOtherTagFromSearch() {
+    const label = String(modelTagEditor?.tag_search || '').trim()
+    if (!label) return
+    addTagToModelEditor({ category: 'other', label })
   }
 
   function TagChip({ tag, removable = false, onRemove = null }) {
@@ -8863,6 +10066,52 @@ export default function App() {
         ) : null}
       </span>
     )
+  }
+
+  function projectImagePreviewUrl(image) {
+    if (image?.preview_url) return image.preview_url
+    return image?.thumbnail_b64 ? b64ToDataUrl(image.thumbnail_b64, image.thumbnail_mime || 'image/png') : ''
+  }
+
+  async function fetchProjectImagePreview(imageIdValue) {
+    const iid = String(imageIdValue || '').trim()
+    if (!iid) throw new Error('image_id requerido.')
+    const res = await apiGet(`/api/assist-models/dataset/preview?image_id=${encodeURIComponent(iid)}`)
+    return {
+      image_id: iid,
+      image_name: String(res?.image_name || iid),
+      source_mtime: String(res?.source_mtime || ''),
+      url: res?.image_b64 ? b64ToDataUrl(res.image_b64, res.image_mime || 'image/png') : '',
+    }
+  }
+
+  async function openProjectImageZoom(image, initialZoom = 1) {
+    const imageIdValue = String(image?.image_id || '').trim()
+    const initialUrl = projectImagePreviewUrl(image)
+    if (!imageIdValue && !initialUrl) {
+      toast('warning', 'Imagenes y tags', 'No hay imagen disponible para ampliar.')
+      return
+    }
+    setProjectImageZoom({
+      image_id: imageIdValue,
+      image_name: String(image?.image_name || image?.image_id || 'Imagen'),
+      source_mtime: String(image?.source_mtime || image?.updated_at || ''),
+      url: initialUrl,
+      zoom: initialZoom,
+      loading: !!imageIdValue,
+    })
+    if (!imageIdValue) return
+    try {
+      const full = await fetchProjectImagePreview(imageIdValue)
+      setProjectImageZoom((prev) => prev && prev.image_id === imageIdValue ? { ...prev, ...full, loading: false } : prev)
+    } catch (err) {
+      setProjectImageZoom((prev) => prev && prev.image_id === imageIdValue ? { ...prev, loading: false, error: errMsg(err) } : prev)
+      toast('warning', 'Imagenes y tags', errMsg(err))
+    }
+  }
+
+  function zoomProjectImagePreview(factor) {
+    setProjectImageZoom((prev) => prev ? { ...prev, zoom: clamp(Number(prev.zoom || 1) * factor, 0.5, 8) } : prev)
   }
 
   function projectFormStructuredTags(form = projectForm) {
@@ -8957,6 +10206,7 @@ export default function App() {
     projects.forEach((project) => push({ category: 'project', label: project.name, project_id: project.project_id }))
     ;(projectTagCatalog.fiber_type || []).forEach((label) => push({ category: 'fiber_type', label }))
     ;(projectTagCatalog.creator || []).forEach((label) => push({ category: 'creator', label }))
+    ;(projectTagCatalog.analysis || []).forEach((label) => push({ category: 'analysis', label }))
     ;['1', '2', '500'].forEach((value) => push({ category: 'size', value, unit: String(editor?.size_unit || '') }))
     ;(projectTagCatalog.unit || ['um', 'nm']).forEach((label) => push({ category: 'unit', label }))
     savedImages.forEach((image) => {
@@ -9304,6 +10554,178 @@ export default function App() {
         </div>
       ) : null}
 
+      {modelTagEditor ? (
+        <div className="modal-backdrop">
+          <div className="modal project-tag-modal">
+            <div className="project-tag-header">
+              <div>
+                <h2>Editar modelo</h2>
+                <p className="small">{modelTagEditor.scope === 'scribble' ? 'Modelo Scribble' : 'Modelo LOCO'} | {modelTagEditor.title}</p>
+              </div>
+              <button type="button" onClick={() => setModelTagEditor(null)}>Cerrar</button>
+            </div>
+
+            <div className="tag-manager-layout">
+              <aside className="tag-library-panel">
+                <label className="field">
+                  <span>buscar o crear tag propio</span>
+                  <input
+                    value={modelTagEditor.tag_search || ''}
+                    onChange={(e) => setModelTagEditor((prev) => ({ ...prev, tag_search: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        createModelOtherTagFromSearch()
+                      }
+                    }}
+                    placeholder="proyecto, fibra, creador, otro..."
+                  />
+                </label>
+
+                {String(modelTagEditor.tag_search || '').trim() ? (
+                  <button type="button" className="suggest-pill create-tag" onClick={createModelOtherTagFromSearch}>
+                    Crear "{String(modelTagEditor.tag_search || '').trim()}"
+                  </button>
+                ) : null}
+
+                {['project', 'fiber_type', 'creator', 'analysis', 'unit', 'other'].map((category) => {
+                  const items = filteredModelTagLibrary(modelTagEditor).filter((tag) => tag.category === category)
+                  return (
+                    <div className="tag-library-section" key={`model-tag-lib-${category}`}>
+                      <div className="tag-library-title">{tagCategoryLabel(category)}</div>
+                      <div className="tag-library-list">
+                        {items.length ? items.map((tag) => {
+                          const selected = normalizeStructuredTags(modelTagEditor.own_tags || []).some((item) => tagKey(item) === tagKey(tag))
+                          return (
+                            <button
+                              type="button"
+                              key={`model-tag-lib-${category}-${tagDisplayLabel(tag)}`}
+                              className={`tag-library-item ${selected ? 'selected' : ''}`}
+                              onClick={() => addTagToModelEditor(tag)}
+                            >
+                              <TagChip tag={tag} />
+                              <span>{selected ? 'asignado' : 'agregar'}</span>
+                            </button>
+                          )
+                        }) : <span className="tag-empty-state">Sin opciones</span>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </aside>
+
+              <section className="tag-editor-panel">
+                <label className="field">
+                  <span>nombre visible</span>
+                  <input value={modelTagEditor.model_name || ''} onChange={(e) => setModelTagEditor((prev) => ({ ...prev, model_name: e.target.value }))} />
+                </label>
+                <label className="field">
+                  <span>notas</span>
+                  <textarea rows={3} value={modelTagEditor.notes || ''} onChange={(e) => setModelTagEditor((prev) => ({ ...prev, notes: e.target.value }))} />
+                </label>
+                <div className="tag-selected-box">
+                  <div className="tag-library-title">Tags heredados de imagenes</div>
+                  {normalizeStructuredTags(modelTagEditor.inherited_tags || []).length ? (
+                    <StructuredTagPreview tags={modelTagEditor.inherited_tags || []} />
+                  ) : (
+                    <span className="tag-empty-state">Sin tags heredados disponibles.</span>
+                  )}
+                </div>
+                <div className="tag-selected-box">
+                  <div className="tag-library-title">Tags automaticos de entrenamiento</div>
+                  {normalizeStructuredTags(modelTagEditor.auto_tags || []).length ? (
+                    <StructuredTagPreview tags={modelTagEditor.auto_tags || []} />
+                  ) : (
+                    <span className="tag-empty-state">Sin parametros de entrenamiento disponibles.</span>
+                  )}
+                </div>
+                <div className="tag-selected-box">
+                  <div className="tag-library-title">Tags propios del modelo</div>
+                  <StructuredTagPreview
+                    tags={modelTagEditor.own_tags || []}
+                    removable
+                    onRemove={removeTagFromModelEditor}
+                  />
+                </div>
+                <div className="project-tag-actions">
+                  <button className="primary" onClick={saveModelTagEditor} disabled={loading.modelsList || loading.locoTraining}>Guardar</button>
+                  <button onClick={() => setModelTagEditor(null)}>Cancelar</button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {locoSaveModelDialog ? (
+        <div className="modal-backdrop">
+          <div className="modal project-tag-modal">
+            <div className="project-tag-header">
+              <div>
+                <h2>Guardar modelo LOCO</h2>
+                <p className="small">
+                  {(LOCO_TRAINING_MODEL_LABELS[locoSaveModelDialog.model_id] || locoSaveModelDialog.model_id)}
+                  {' | '}
+                  {locoSaveModelDialog.training_run_id}
+                </p>
+              </div>
+              <button type="button" onClick={() => setLocoSaveModelDialog(null)}>Cerrar</button>
+            </div>
+            <div className="tag-editor-panel">
+              <label className="field">
+                <span>nombre visible</span>
+                <input
+                  value={locoSaveModelDialog.model_name || ''}
+                  onChange={(e) => setLocoSaveModelDialog((prev) => (prev ? { ...prev, model_name: e.target.value } : prev))}
+                  autoFocus
+                  placeholder={LOCO_TRAINING_MODEL_LABELS[locoSaveModelDialog.model_id] || locoSaveModelDialog.model_id}
+                />
+              </label>
+              <p className="small">
+                Este nombre solo cambia como se muestra el modelo guardado. Los archivos internos y el identificador estable se mantienen.
+              </p>
+              <div className="project-tag-actions">
+                <button className="primary" onClick={confirmLocoSaveModelDialog} disabled={loading.locoTraining}>Guardar modelo</button>
+                <button onClick={() => setLocoSaveModelDialog(null)}>Cancelar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {projectImageZoom ? (
+        <div className="image-preview-modal" role="dialog" aria-modal="true" onDoubleClick={() => setProjectImageZoom(null)}>
+          <div className="image-preview-dialog project-image-zoom-dialog" onDoubleClick={(e) => e.stopPropagation()}>
+            <div className="point-review-head">
+              <div>
+                <h2>{projectImageZoom.image_name || 'Imagen'}</h2>
+                <p>{projectImageZoom.source_mtime || 'Vista ampliada de imagen'}</p>
+                {projectImageZoom.loading ? <p>Cargando imagen completa...</p> : null}
+                {projectImageZoom.error ? <p>{projectImageZoom.error}</p> : null}
+              </div>
+              <div className="inline">
+                <button className="icon-tool" onClick={() => zoomProjectImagePreview(0.84)}>-</button>
+                <button className="icon-tool" onClick={() => zoomProjectImagePreview(1.2)}>+</button>
+                <button className="icon-tool" onClick={() => setProjectImageZoom((prev) => prev ? { ...prev, zoom: 2 } : prev)}>Reset</button>
+                <span className="zoom-chip">{Math.round(Number(projectImageZoom.zoom || 1) * 100)}%</span>
+                <button className="icon-tool" onClick={() => setProjectImageZoom(null)}>Cerrar</button>
+              </div>
+            </div>
+            <div className="project-image-zoom-stage">
+              {projectImageZoom.url ? (
+                <img
+                  src={projectImageZoom.url}
+                  alt={projectImageZoom.image_name || 'Imagen'}
+                  style={{ transform: `scale(${Number(projectImageZoom.zoom || 1)})` }}
+                />
+              ) : (
+                <div className="placeholder small">{projectImageZoom.loading ? 'Cargando imagen completa...' : 'Sin imagen disponible.'}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="app-layout">
         <Navigation
           activeGroup={activeGroup}
@@ -9333,8 +10755,8 @@ export default function App() {
             )
           })()}
 
-          <div className="layout">
-        <aside className="left" data-tour={`workspace-sidebar-${workspaceTab}`}>
+          <div className={`layout ${workspaceTab === 'scribbleModelManager' || workspaceTab === 'locoModelManager' ? 'layout-wide' : ''}`}>
+        <aside className={`left ${workspaceTab === 'scribbleModelManager' || workspaceTab === 'locoModelManager' ? 'hidden-panel' : ''}`} data-tour={`workspace-sidebar-${workspaceTab}`}>
           {workspaceTab === 'projectSelect' ? (
             <>
               <section className="card">
@@ -9357,6 +10779,9 @@ export default function App() {
               <section className="card">
                 <h2>{projectForm.project_id ? 'Editar proyecto' : 'Crear proyecto'}</h2>
                 <p className="small">Guardar proyecto crea o actualiza. Resetear campos solo limpia este formulario.</p>
+                <p className="small">
+                  {projectForm.project_id ? `Editando ID interno: ${projectForm.project_id}` : 'Modo creacion: se generara un ID nuevo desde el nombre.'}
+                </p>
                 <label className="field">
                   <span>nombre del proyecto</span>
                   <input value={projectForm.name} onChange={(e) => setProjectForm((prev) => ({ ...prev, name: e.target.value }))} placeholder="Tipo 1 / Fibra grande / ..." />
@@ -9428,6 +10853,7 @@ export default function App() {
                   <span>vista</span>
                   <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
                     <option value="active">Proyecto activo</option>
+                    <option value="other">Otras imagenes</option>
                     <option value="all">Todas</option>
                   </select>
                 </label>
@@ -9517,6 +10943,7 @@ export default function App() {
                   <span>vista</span>
                   <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
                     <option value="active">Proyecto activo</option>
+                    <option value="other">Otras imagenes</option>
                     <option value="all">Todas</option>
                   </select>
                 </label>
@@ -9582,7 +11009,7 @@ export default function App() {
                     <div className="brush-panel" data-tour="scribble-brush-control">
                       <label className="brush-toolbar-control wide">
                         <span>Pincel</span>
-                        <input type="range" min="1" max="120" value={brushSliderValue} onChange={(e) => setBrushSize(brushSliderToPx(e.target.value))} disabled={!imageUrl} />
+                        <input type="range" min="1" max="120" value={brushSliderValue} onChange={(e) => setBrushSize(brushSliderToPx(e.target.value))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
                         <strong>{annotBrushPx}px</strong>
                       </label>
                       <button className={`icon-tool ${brushAutoScale ? 'toggle-active' : ''}`} onClick={() => setBrushAutoScale((v) => !v)} disabled={!imageUrl} title="Escalado automatico por resolucion">Auto</button>
@@ -9595,6 +11022,11 @@ export default function App() {
                         />
                       </label>
                     </div>
+                    <label className="brush-toolbar-control wide scribble-opacity-control">
+                      <span>transparencia</span>
+                      <input type="range" min="0" max="100" step="1" value={scribbleOverlayTransparency} onChange={(e) => setScribbleOverlayTransparency(clamp(Number(e.target.value || 0), 0, 100))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
+                      <strong>{Math.round(Number(scribbleOverlayTransparency || 0))}%</strong>
+                    </label>
                     <div className="shortcut-note">Ctrl + rueda hace zoom en la imagen. Alt + rueda cambia el pincel.</div>
                     <div className="tool-row">
                       <button className="icon-tool" onClick={onAnnotUndo} disabled={!annotHistory.length || !imageUrl} title="Deshacer (Ctrl+Z)" aria-label="Deshacer">&#8630;</button>
@@ -9604,8 +11036,11 @@ export default function App() {
                       <button className="icon-tool" onClick={resetEditorView} disabled={!imageUrl} title="Reiniciar vista">Reiniciar</button>
                       <span className="zoom-chip">{Math.round(viewerZoom * 100)}%</span>
                     </div>
-                    <div className="inline">
-                      <button data-tour="scribble-clear" onClick={onClearScribbles} disabled={!imageUrl}>Limpiar</button>
+                    <div className="scribble-clear-grid">
+                      <button onClick={() => clearScribbleClass('fiber')} disabled={!imageUrl}>Limpiar fibra</button>
+                      <button onClick={() => clearScribbleClass('halo')} disabled={!imageUrl}>Limpiar halo</button>
+                      <button onClick={() => clearScribbleClass('background')} disabled={!imageUrl}>Limpiar background</button>
+                      <button data-tour="scribble-clear" onClick={onClearScribbles} disabled={!imageUrl}>Limpiar todo</button>
                       <button onClick={clearExcludeRect} disabled={!imageUrl || !excludeRect}>Limpiar exclusion</button>
                     </div>
                   </section>
@@ -9623,15 +11058,22 @@ export default function App() {
                         ))}
                       </select>
                     </label>
-                    <label className="brush-toolbar-control wide">
-                      <span>confianza</span>
-                      <input type="range" min="0.3" max="0.95" step="0.01" value={modelMinConfidence} onChange={(e) => setModelMinConfidence(Number(e.target.value || 0.72))} disabled={!imageUrl} />
-                      <strong>{Number(modelMinConfidence).toFixed(2)}</strong>
-                    </label>
-                    <div className="model-class-row">
-                      <label><input type="checkbox" checked={modelIncludeFiber} onChange={(e) => setModelIncludeFiber(e.target.checked)} disabled={!imageUrl} /> fibra</label>
-                      <label><input type="checkbox" checked={modelIncludeHalo} onChange={(e) => setModelIncludeHalo(e.target.checked)} disabled={!imageUrl} /> halo</label>
-                      <label><input type="checkbox" checked={modelIncludeBackground} onChange={(e) => setModelIncludeBackground(e.target.checked)} disabled={!imageUrl} /> background</label>
+                    <div className="model-threshold-grid">
+                      <label className={`model-threshold-row ${modelIncludeFiber ? '' : 'disabled-row'}`}>
+                        <span><input type="checkbox" checked={modelIncludeFiber} onChange={(e) => setModelIncludeFiber(e.target.checked)} disabled={!imageUrl} /> fibra</span>
+                        <input type="range" min="0.001" max="0.999" step="0.001" value={modelFiberConfidence} onChange={(e) => setModelFiberConfidence(Number(e.target.value || 0.7))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl || !modelIncludeFiber} />
+                        <strong>{Number(modelFiberConfidence).toFixed(3)}</strong>
+                      </label>
+                      <label className={`model-threshold-row ${modelIncludeHalo ? '' : 'disabled-row'}`}>
+                        <span><input type="checkbox" checked={modelIncludeHalo} onChange={(e) => setModelIncludeHalo(e.target.checked)} disabled={!imageUrl} /> halo</span>
+                        <input type="range" min="0.001" max="0.999" step="0.001" value={modelHaloConfidence} onChange={(e) => setModelHaloConfidence(Number(e.target.value || 0.7))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl || !modelIncludeHalo} />
+                        <strong>{Number(modelHaloConfidence).toFixed(3)}</strong>
+                      </label>
+                      <label className={`model-threshold-row ${modelIncludeBackground ? '' : 'disabled-row'}`}>
+                        <span><input type="checkbox" checked={modelIncludeBackground} onChange={(e) => setModelIncludeBackground(e.target.checked)} disabled={!imageUrl} /> background</span>
+                        <input type="range" min="0.001" max="0.999" step="0.001" value={modelBackgroundConfidence} onChange={(e) => setModelBackgroundConfidence(Number(e.target.value || 0.7))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl || !modelIncludeBackground} />
+                        <strong>{Number(modelBackgroundConfidence).toFixed(3)}</strong>
+                      </label>
                     </div>
                     <div className="inline" style={{ gridTemplateColumns: '1fr 1fr 1fr', width: '100%' }}>
                       <button className="primary" onClick={predictWithAssistModel} disabled={!imageUrl || !selectedAssistModelId || loading.modelsPredict}>Predecir</button>
@@ -9642,11 +11084,54 @@ export default function App() {
                       <button className="primary" onClick={predictMaskAsExperiment} disabled={!imageUrl || !selectedAssistModelId || loading.modelsPredict}>Predecir mascara</button>
                     </div>
                     {modelPrediction ? (
-                      <div className="model-prediction-strip">
-                        <strong>{modelPrediction.model_name || modelPrediction.model_id}</strong>
-                        <span>F{modelPrediction.counts?.fiber || 0} H{modelPrediction.counts?.halo || 0} B{modelPrediction.counts?.background || 0}</span>
+                      <div className="model-prediction-strip stacked">
+                        <div>
+                          <strong>{modelPrediction.model_name || modelPrediction.model_id}</strong>
+                          <span>final F{modelPrediction.counts?.fiber || 0} H{modelPrediction.counts?.halo || 0} B{modelPrediction.counts?.background || 0}</span>
+                        </div>
+                        <span>
+                          thr F{Number(modelPrediction.class_confidence?.fiber ?? modelFiberConfidence).toFixed(3)}
+                          {' '}H{Number(modelPrediction.class_confidence?.halo ?? modelHaloConfidence).toFixed(3)}
+                          {' '}B{Number(modelPrediction.class_confidence?.background ?? modelBackgroundConfidence).toFixed(3)}
+                        </span>
+                        <span>
+                          pasan F{modelPrediction.probability_summary?.fiber?.above_threshold ?? '-'}
+                          {' '}H{modelPrediction.probability_summary?.halo?.above_threshold ?? '-'}
+                          {' '}B{modelPrediction.probability_summary?.background?.above_threshold ?? '-'}
+                        </span>
                       </div>
                     ) : null}
+                    </div>
+                  </section>
+                  <section className="card scribble-controls-card">
+                    <h2>Filtros visuales de imagen</h2>
+                    <div className="visual-filter-panel">
+                      <label className="visual-filter-row">
+                        <span>Brillo</span>
+                        <input type="range" min="50" max="160" step="1" value={scribbleImageFilters.brightness} onChange={(e) => updateScribbleImageFilter('brightness', Number(e.target.value || 100))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
+                        <strong>{Math.round(Number(scribbleImageFilters.brightness || 100))}%</strong>
+                      </label>
+                      <label className="visual-filter-row">
+                        <span>Contraste</span>
+                        <input type="range" min="50" max="240" step="1" value={scribbleImageFilters.contrast} onChange={(e) => updateScribbleImageFilter('contrast', Number(e.target.value || 100))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
+                        <strong>{Math.round(Number(scribbleImageFilters.contrast || 100))}%</strong>
+                      </label>
+                      <label className="visual-filter-row">
+                        <span>Gamma</span>
+                        <input type="range" min="0.4" max="2.2" step="0.01" value={scribbleImageFilters.gamma} onChange={(e) => updateScribbleImageFilter('gamma', Number(e.target.value || 1))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
+                        <strong>{Number(scribbleImageFilters.gamma || 1).toFixed(2)}</strong>
+                      </label>
+                      <label className="visual-filter-row">
+                        <span>Nitidez</span>
+                        <input type="range" min="0" max="100" step="1" value={scribbleImageFilters.sharpness} onChange={(e) => updateScribbleImageFilter('sharpness', Number(e.target.value || 0))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
+                        <strong>{Math.round(Number(scribbleImageFilters.sharpness || 0))}</strong>
+                      </label>
+                      <label className="visual-filter-row">
+                        <span>Negativo</span>
+                        <input type="range" min="0" max="100" step="1" value={scribbleImageFilters.invert} onChange={(e) => updateScribbleImageFilter('invert', Number(e.target.value || 0))} onPointerUp={releaseRangeFocus} onKeyUp={releaseRangeFocus} disabled={!imageUrl} />
+                        <strong>{Math.round(Number(scribbleImageFilters.invert || 0))}%</strong>
+                      </label>
+                      <button onClick={resetScribbleImageFilters} disabled={!imageUrl}>Restablecer filtros</button>
                     </div>
                   </section>
                 </>
@@ -9900,10 +11385,7 @@ export default function App() {
                   calibration={diamCalibration}
                   onChange={updateDiamCalibration}
                   onSave={saveCalibration}
-                  onLoad={loadCalibration}
-                  onDelete={deleteCalibration}
                   onStartDraw={startDiameterCalibrationLine}
-                  onClearLine={clearDiameterCalibrationLine}
                   drawing={diamViewerMode === 'calibration'}
                   loading={loading.calibration}
                   imageId={imageId}
@@ -9947,6 +11429,179 @@ export default function App() {
                   </>
                 ) : (
                   <p className="small">Sin resultados de diametro para mostrar distribucion.</p>
+                )}
+              </section>
+            </>
+          ) : workspaceTab === 'diameterAnalysisSelect' ? (
+            <>
+              <section className="card">
+                <h2>Seleccion de imagenes</h2>
+                <div className="kpi">Proyecto: <strong>{activeProject?.name || 'Todas las imagenes'}</strong></div>
+                <div className="kpi">Imagenes con mediciones: <strong>{diamAnalysisSelectableImages.length}</strong></div>
+                <div className="kpi">Imagenes seleccionadas: <strong>{selectedDiamAnalysisImageIds.length}</strong></div>
+                <label className="field">
+                  <span>vista de imagenes</span>
+                  <select value={diamAnalysisImageView} onChange={(e) => setDiamAnalysisImageView(e.target.value)} disabled={!activeProjectId}>
+                    <option value="active">Proyecto activo</option>
+                    <option value="other">Otras imagenes</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </label>
+                <button onClick={refreshDiameterMeasurementSummary} disabled={loading.diamMeasurementSummary}>Refrescar mediciones</button>
+              </section>
+
+              <section className="card">
+                <h2>Filtros por tags</h2>
+                <p className="small">{diamAnalysisImageView === 'all' && !diamAnalysisSelectedTags.length ? 'Vista Todas sin filtro de tags activo. Agrega chips si quieres acotar el analisis.' : 'Cada cambio actualiza el analisis automaticamente.'}</p>
+                <StructuredTagPreview tags={diamAnalysisRequiredTags} />
+                <div className="tag-picker-suggestions">
+                  {diamAnalysisSuggestedTags.map((tag, idx) => (
+                    <button
+                      type="button"
+                      key={`diam-analysis-tag-${idx}-${tag.category}-${tag.label}`}
+                      className="suggest-pill"
+                      onClick={() => {
+                        const normalized = normalizeStructuredTags([tag])[0]
+                        if (!normalized) return
+                        setDiamAnalysisSelectedTags((prev) => normalizeStructuredTags([...prev, normalized]))
+                      }}
+                    >
+                      <TagChip tag={tag} />
+                    </button>
+                  ))}
+                </div>
+                <button onClick={() => setDiamAnalysisSelectedTags([])}>{diamAnalysisImageView === 'all' ? 'Limpiar tags' : 'Volver a tags del proyecto'}</button>
+              </section>
+            </>
+          ) : workspaceTab === 'diameterAnalysisHistogram' ? (
+            <>
+              <section className="card">
+                <h2>Histograma en vivo</h2>
+                <div className="kpi">Imagenes seleccionadas: <strong>{selectedDiamAnalysisImageIds.length}</strong></div>
+                <div className="kpi">Mediciones internas: <strong>{selectedDiamAnalysisMeasurementSummary.measurement_count}</strong></div>
+                <div className="kpi">Graficables: <strong>{diamAnalysisValues.length}</strong></div>
+                <div className="kpi">Sin calibracion: <strong>{selectedDiamAnalysisMeasurementSummary.uncalibrated_count}</strong></div>
+                {selectedDiamAnalysisMeasurementSummary.measurement_count > 0 && !diamAnalysisValues.length && diamAnalysisUnit !== 'px' ? (
+                  <p className="small">
+                    Las mediciones seleccionadas no tienen factor de calibracion. Cambia la unidad a px o calibra cada imagen para graficar en {diamAnalysisUnit}.
+                  </p>
+                ) : null}
+                <button onClick={refreshDiameterMeasurementSummary} disabled={loading.diamMeasurementSummary}>Refrescar mediciones</button>
+              </section>
+
+              <section className="card">
+                <h2>Histograma</h2>
+                <label className="field">
+                  <span>unidad</span>
+                  <select value={diamAnalysisUnit} onChange={(e) => setDiamAnalysisUnit(e.target.value)}>
+                    <option value="nm">nm</option>
+                    <option value="um">um</option>
+                    <option value="px">px</option>
+                  </select>
+                </label>
+                <label className="check-row">
+                  <input type="checkbox" checked={diamAnalysisIncludeUncalibrated} onChange={(e) => setDiamAnalysisIncludeUncalibrated(e.target.checked)} />
+                  incluir no calibradas en tabla
+                </label>
+                {diamAnalysisUnit !== 'px' ? (
+                  <p className="small">Las mediciones sin calibracion no pueden convertirse a {diamAnalysisUnit}; solo se grafican en px o despues de guardar calibracion.</p>
+                ) : null}
+                <div className="tab-strip compact">
+                  {[
+                    ['data', 'Datos'],
+                    ['fonts', 'Texto y fuentes'],
+                    ['style', 'Estilo y grilla'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={`diam-chart-tab-${key}`}
+                      type="button"
+                      className={`tab-strip-btn ${diamAnalysisChartPanel === key ? 'active' : ''}`}
+                      onClick={() => setDiamAnalysisChartPanel(key)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {diamAnalysisChartPanel === 'data' ? (
+                  <div className="diam-param-grid">
+                    <label className="field"><span>ancho</span><input type="number" min="320" max="1600" value={diamAnalysisChart.width} onChange={(e) => updateDiamAnalysisChart('width', Number(e.target.value || 760))} /></label>
+                    <label className="field"><span>alto</span><input type="number" min="180" max="900" value={diamAnalysisChart.height} onChange={(e) => updateDiamAnalysisChart('height', Number(e.target.value || 320))} /></label>
+                    <label className="field"><span>bins</span><input type="number" min="5" max="80" value={diamAnalysisChart.bins} onChange={(e) => updateDiamAnalysisChart('bins', Number(e.target.value || 20))} /></label>
+                    <label className="check-row"><input type="checkbox" checked={diamAnalysisChart.xPaddingEnabled !== false} onChange={(e) => updateDiamAnalysisChart('xPaddingEnabled', e.target.checked)} /> margen visual X</label>
+                    <label className="field"><span>desplazamiento X %</span><input type="number" min="0" max="25" step="0.5" value={diamAnalysisChart.xPaddingPercent ?? 4} onChange={(e) => updateDiamAnalysisChart('xPaddingPercent', Number(e.target.value || 0))} /></label>
+                  </div>
+                ) : null}
+
+                {diamAnalysisChartPanel === 'fonts' ? (
+                  <div className="diam-param-grid">
+                    <label className="field">
+                      <span>fuente</span>
+                      <select value={diamAnalysisChart.fontFamily} onChange={(e) => updateDiamAnalysisChart('fontFamily', e.target.value)}>
+                        {DIAM_ANALYSIS_FONT_OPTIONS.map((option) => (
+                          <option key={option.label} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field"><span>ticks px</span><input type="number" min="7" max="24" value={diamAnalysisChart.tickFontSize ?? diamAnalysisChart.fontSize ?? 11} onChange={(e) => updateDiamAnalysisChart('tickFontSize', Number(e.target.value || 11))} /></label>
+                    <label className="field"><span>titulos px</span><input type="number" min="8" max="28" value={diamAnalysisChart.labelFontSize ?? ((diamAnalysisChart.fontSize || 11) + 1)} onChange={(e) => updateDiamAnalysisChart('labelFontSize', Number(e.target.value || 12))} /></label>
+                    <label className="field"><span>texto inferior</span><input value={diamAnalysisChart.xLabel} onChange={(e) => updateDiamAnalysisChart('xLabel', e.target.value)} placeholder="Diametro" /></label>
+                    <label className="field"><span>texto izquierdo</span><input value={diamAnalysisChart.yLabel} onChange={(e) => updateDiamAnalysisChart('yLabel', e.target.value)} placeholder="Frecuencia" /></label>
+                    <label className="field"><span>desplazar titulo X</span><input type="number" min="4" max="60" value={diamAnalysisChart.xLabelOffset ?? 16} onChange={(e) => updateDiamAnalysisChart('xLabelOffset', Number(e.target.value || 16))} /></label>
+                    <label className="field"><span>desplazar titulo Y</span><input type="number" min="4" max="60" value={diamAnalysisChart.yLabelOffset ?? 18} onChange={(e) => updateDiamAnalysisChart('yLabelOffset', Number(e.target.value || 18))} /></label>
+                    <label className="field"><span>color texto</span><input type="color" value={diamAnalysisChart.fontColor} onChange={(e) => updateDiamAnalysisChart('fontColor', e.target.value)} /></label>
+                  </div>
+                ) : null}
+
+                {diamAnalysisChartPanel === 'style' ? (
+                  <>
+                    <div className="diam-param-grid">
+                      <label className="field"><span>grilla</span><select value={diamAnalysisChart.grid} onChange={(e) => updateDiamAnalysisChart('grid', e.target.value)}><option value="both">horizontal y vertical</option><option value="y">solo horizontal</option><option value="x">solo vertical</option><option value="none">ninguna</option></select></label>
+                      <label className="field"><span>tipo de grilla</span><select value={diamAnalysisChart.gridStyle || 'solid'} onChange={(e) => updateDiamAnalysisChart('gridStyle', e.target.value)}><option value="solid">lineas solidas</option><option value="dashed">lineas segmentadas</option><option value="dotted">punteada</option><option value="none">sin grilla</option></select></label>
+                      <label className="field"><span>relleno del area</span><select value={diamAnalysisChart.backgroundMode} onChange={(e) => updateDiamAnalysisChart('backgroundMode', e.target.value)}><option value="solid">solido</option><option value="transparent">sin relleno</option></select></label>
+                    </div>
+                    <div className="inline">
+                      <label className="field"><span>barras</span><input type="color" value={diamAnalysisChart.barColor} onChange={(e) => updateDiamAnalysisChart('barColor', e.target.value)} /></label>
+                      <label className="field"><span>borde barras</span><input type="color" value={diamAnalysisChart.strokeColor} onChange={(e) => updateDiamAnalysisChart('strokeColor', e.target.value)} /></label>
+                      <label className="field"><span>ejes/bordes</span><input type="color" value={diamAnalysisChart.axisColor} onChange={(e) => updateDiamAnalysisChart('axisColor', e.target.value)} /></label>
+                      <label className="field"><span>grilla</span><input type="color" value={diamAnalysisChart.gridColor} onChange={(e) => updateDiamAnalysisChart('gridColor', e.target.value)} /></label>
+                      <label className="field"><span>relleno</span><input type="color" value={diamAnalysisChart.backgroundColor} onChange={(e) => updateDiamAnalysisChart('backgroundColor', e.target.value)} /></label>
+                    </div>
+                    <div className="inline">
+                      <label className="check-row"><input type="checkbox" checked={!!diamAnalysisChart.borderTop} onChange={(e) => updateDiamAnalysisChart('borderTop', e.target.checked)} /> borde superior</label>
+                      <label className="check-row"><input type="checkbox" checked={!!diamAnalysisChart.borderRight} onChange={(e) => updateDiamAnalysisChart('borderRight', e.target.checked)} /> borde derecho</label>
+                      <label className="check-row"><input type="checkbox" checked={diamAnalysisChart.borderBottom !== false} onChange={(e) => updateDiamAnalysisChart('borderBottom', e.target.checked)} /> borde inferior</label>
+                      <label className="check-row"><input type="checkbox" checked={diamAnalysisChart.borderLeft !== false} onChange={(e) => updateDiamAnalysisChart('borderLeft', e.target.checked)} /> borde izquierdo</label>
+                    </div>
+                  </>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <h2>Guardar y exportar</h2>
+                <label className="field">
+                  <span>nombre del analisis</span>
+                  <input value={diamAnalysisName} onChange={(e) => setDiamAnalysisName(e.target.value)} placeholder="Analisis lote 1" />
+                </label>
+                <div className="inline">
+                  <button className="primary" onClick={saveDiameterAnalysis} disabled={loading.diamAnalysis}>Guardar analisis</button>
+                  <button onClick={exportDiameterAnalysisData} disabled={loading.diamAnalysis}>Exportar CSV/JSON</button>
+                  <button onClick={exportDiameterAnalysisSvg}>Exportar SVG</button>
+                </div>
+                {!diamAnalysisRuns.length ? <p className="small">Sin analisis guardados.</p> : (
+                  <div className="diam-run-list">
+                    {diamAnalysisRuns.slice(0, 12).map((item) => (
+                      <button key={item.analysis_id} className="diam-run-row" onClick={() => {
+                        setDiamAnalysisName(item.name || '')
+                        setDiamAnalysisUnit(item.unit || 'nm')
+                        setDiamAnalysisChart({ ...DEFAULT_DIAM_ANALYSIS_CHART, ...(item.chart_config || {}) })
+                      }}>
+                        <strong>{item.name}</strong>
+                        <em>{item.summary?.measurement_count || 0} mediciones</em>
+                        <span>{item.updated_at || item.created_at || ''}</span>
+                      </button>
+                    ))}
+                  </div>
                 )}
               </section>
             </>
@@ -10056,12 +11711,12 @@ export default function App() {
                   <span>vista</span>
                   <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
                     <option value="active">Proyecto activo</option>
+                    <option value="other">Otras imagenes</option>
                     <option value="all">Todas</option>
                   </select>
                 </label>
                 <div className="inline">
                   <button onClick={() => {
-                    console.log('[DEBUG-REFRESH] Refreshing saved images, current circleTypeCounts:', JSON.stringify(circleTypeCounts))
                     refreshSavedImages()
                   }} disabled={loading.libraryList}>Refrescar</button>
                 </div>
@@ -10092,15 +11747,13 @@ export default function App() {
                             <strong>{img.image_name || img.image_id}</strong>
                               <em>{(() => {
                               const ds = locoDatasetCircleCounts[img.image_id]
-                              const ct = circleTypeCounts[img.image_id]
                               const parts = []
-                              // Prefer LOCO Dataset counts (generated), fallback to diameter points (auto-saved)
-                              const src = (ds && (ds.valid || ds.invalid_crossing || ds.invalid_other)) ? ds : ct
+                              const src = ds && (ds.valid || ds.invalid_crossing || ds.invalid_other) ? ds : null
                               if (src) {
                                 if (src.valid || src.invalid_crossing || src.invalid_other) {
                                   if (src.valid) parts.push(`${src.valid}V`)
-                                  if (src.invalid_crossing || src.crossing) parts.push(`${src.invalid_crossing || src.crossing || 0}C`)
-                                  if (src.invalid_other || src.other_valid) parts.push(`${src.invalid_other || src.other_valid || 0}O`)
+                                  if (src.invalid_crossing) parts.push(`${src.invalid_crossing}C`)
+                                  if (src.invalid_other) parts.push(`${src.invalid_other}O`)
                                 }
                               }
                               const base = parts.length ? parts.join(' ') : 'sin circulos'
@@ -10217,7 +11870,21 @@ export default function App() {
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseZoom} onChange={(e) => setLocoTrainingUseZoom(e.target.checked)} /><span>patch_zoom_factor</span></label>
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseSourceRadius} onChange={(e) => setLocoTrainingUseSourceRadius(e.target.checked)} /><span>radio real en aumentados</span></label>
                 <label className="check-field"><input type="checkbox" checked={!!locoTrainingUseCv5} onChange={(e) => setLocoTrainingUseCv5(e.target.checked)} /><span>CV5</span></label>
-                <label className="check-field"><input type="checkbox" checked={!!locoTrainingMulticlass} onChange={(e) => setLocoTrainingMulticlass(e.target.checked)} /><span>modelo multiclase (valid/crossing/other)</span></label>
+                <div className="field">
+                  <span>modelos a entrenar</span>
+                  <div className="training-model-choice-list">
+                    {LOCO_TRAINING_MODEL_IDS.map((modelId) => (
+                      <label className="check-field" key={`loco-train-model-${modelId}`}>
+                        <input
+                          type="checkbox"
+                          checked={selectedLocoTrainingModels().includes(modelId)}
+                          onChange={(e) => setLocoTrainingModelChecked(modelId, e.target.checked)}
+                        />
+                        <span>{LOCO_TRAINING_MODEL_LABELS[modelId] || modelId}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
                 <div className="inline">
                   <button className="primary" onClick={trainLocoModels} disabled={loading.locoTraining}>Entrenar modelos</button>
                   <button onClick={addLocoTrainingBatchJob} disabled={loading.locoTraining}>Agregar al batch</button>
@@ -10238,7 +11905,7 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
-                <p className="small">Batch usa esta configuracion como snapshot y fuerza multiclase para todos los jobs.</p>
+                <p className="small">Batch usa esta configuracion como snapshot. El entrenamiento mantiene binario + multiclase activo.</p>
                 {locoTrainingResult ? (
                   <p className="small">{locoTrainingResult.run_id}<br />{locoTrainingResult.meta?.pixel_mode || '-'} prune {locoTrainingResult.meta?.circle_prune_px ?? 0} | {locoTrainingResult.meta?.feature_count ?? '-'} cols | CV5 {locoTrainingResult.meta?.cv5_enabled ? 'on' : 'off'}<br />{locoTrainingResult.run_dir}</p>
                 ) : null}
@@ -10359,38 +12026,6 @@ export default function App() {
                 ) : null}
               </section>
 
-              <section className="card">
-                <h2>Modelos guardados</h2>
-                <div className="inline">
-                  <button onClick={fetchLocoSavedModelsList} disabled={loading.locoTraining}>Refrescar</button>
-                  <button className="bad" onClick={() => deleteLocoSavedModel()} disabled={loading.locoTraining || !locoTrainingSelectedSavedModelId}>Eliminar</button>
-                </div>
-                <div className="table-wrap model-table">
-                  <table>
-                    <thead>
-                      <tr><th>modelo</th><th>origen</th><th>usar</th></tr>
-                    </thead>
-                    <tbody>
-                      {locoSavedModels.length ? locoSavedModels.map((item) => (
-                        <tr
-                          key={item.saved_model_id}
-                          className={item.saved_model_id === locoTrainingSelectedSavedModelId ? 'selected-row' : ''}
-                          onClick={() => setLocoTrainingSelectedSavedModelId(item.saved_model_id)}
-                        >
-                          <td>{item.model || item.model_id}</td>
-                          <td>{item.source_run_id || '-'}</td>
-                          <td>
-                            <button className="small-action" onClick={(e) => { e.stopPropagation(); useLocoSavedModel(item, 'test') }}>Test</button>
-                            <button className="small-action" onClick={(e) => { e.stopPropagation(); useLocoSavedModel(item, 'detector') }}>Detector</button>
-                          </td>
-                        </tr>
-                      )) : (
-                        <tr><td colSpan="3" className="placeholder">Sin modelos guardados.</td></tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
             </>
           ) : workspaceTab === 'locoTest' ? (
             <>
@@ -10401,7 +12036,7 @@ export default function App() {
                   <select value={locoTestTrainingRunId} onChange={(e) => onLocoTestTrainingRunChange(e.target.value)}>
                     <option value="">Selecciona un modelo guardado</option>
                     {locoSavedModels.map((m) => (
-                      <option key={m.saved_model_id} value={m.saved_model_id}>{m.model || m.model_id} | {m.created_at || m.saved_model_id}</option>
+                      <option key={m.saved_model_id} value={m.saved_model_id}>{m.model_name || m.model || m.model_id} | {m.created_at || m.saved_model_id}</option>
                     ))}
                   </select>
                 </label>
@@ -10409,7 +12044,7 @@ export default function App() {
                   <span>modelo</span>
                   <select value={locoTestModelId} onChange={(e) => setLocoTestModelId(e.target.value)} disabled={!!locoTestSelectedSavedModel}>
                     {locoTestSelectedSavedModel ? (
-                      <option value={locoTestSelectedSavedModel.model_id}>{locoTestSelectedSavedModel.model || locoTestSelectedSavedModel.model_id}</option>
+                      <option value={locoTestSelectedSavedModel.model_id}>{locoTestSelectedSavedModel.model_name || locoTestSelectedSavedModel.model || locoTestSelectedSavedModel.model_id}</option>
                     ) : (
                       <>
                         <option value="catboost">CatBoost</option>
@@ -10448,6 +12083,7 @@ export default function App() {
                   <span>vista</span>
                   <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
                     <option value="active">Proyecto activo</option>
+                    <option value="other">Otras imagenes</option>
                     <option value="all">Todas</option>
                   </select>
                 </label>
@@ -10535,7 +12171,7 @@ export default function App() {
                   <select value={locoModelRunId} onChange={(e) => onLocoModelRunChange(e.target.value)}>
                     <option value="">Selecciona un modelo guardado</option>
                     {locoSavedModels.map((m) => (
-                      <option key={m.saved_model_id} value={m.saved_model_id}>{m.model || m.model_id} | {m.created_at || m.saved_model_id}</option>
+                      <option key={m.saved_model_id} value={m.saved_model_id}>{m.model_name || m.model || m.model_id} | {m.created_at || m.saved_model_id}</option>
                     ))}
                   </select>
                 </label>
@@ -10543,7 +12179,7 @@ export default function App() {
                   <span>modelo</span>
                   <select value={locoModelId} onChange={(e) => setLocoModelId(e.target.value)} disabled={!!locoDetectorSelectedSavedModel}>
                     {locoDetectorSelectedSavedModel ? (
-                      <option value={locoDetectorSelectedSavedModel.model_id}>{locoDetectorSelectedSavedModel.model || locoDetectorSelectedSavedModel.model_id}</option>
+                      <option value={locoDetectorSelectedSavedModel.model_id}>{locoDetectorSelectedSavedModel.model_name || locoDetectorSelectedSavedModel.model || locoDetectorSelectedSavedModel.model_id}</option>
                     ) : (
                       <>
                         <option value="catboost">CatBoost</option>
@@ -10611,6 +12247,7 @@ export default function App() {
                   <span>vista</span>
                   <select value={projectImageView} onChange={(e) => setProjectImageView(e.target.value)} disabled={!activeProjectId}>
                     <option value="active">Proyecto activo</option>
+                    <option value="other">Otras imagenes</option>
                     <option value="all">Todas</option>
                   </select>
                 </label>
@@ -10657,16 +12294,27 @@ export default function App() {
               <section className="card">
                 <h2>Preset</h2>
                 <label className="field">
-                  <span>configuraci\u00f3n predefinida</span>
+                  <span>configuración predefinida</span>
                   <select value={locoModelPreset} onChange={(e) => applyLocoModelPreset(e.target.value)}>
-                    {Object.entries(LOCO_PRESETS).map(([key, p]) => (
-                      <option key={key} value={key}>{p.label}</option>
-                    ))}
+                    {visibleLocoBuiltinPresets.map(([key, p]) => {
+                      const isDefaultPreset = String(locoDefaultPreset || '') === String(key)
+                      return (
+                        <option key={key} value={key} className={isDefaultPreset ? 'preset-default-option' : undefined}>
+                          {isDefaultPreset ? `✓ ${p.label} · predeterminado` : p.label}
+                        </option>
+                      )
+                    })}
                     {locoModelCustomPresets.length ? (
                       <optgroup label="presets guardados">
-                        {locoModelCustomPresets.map((item) => (
-                          <option key={item.preset_id} value={makeLocoCustomPresetValue(item.preset_id)}>{item.preset_name}</option>
-                        ))}
+                        {locoModelCustomPresets.map((item) => {
+                          const presetValue = makeLocoCustomPresetValue(item.preset_id)
+                          const isDefaultPreset = String(locoDefaultPreset || '') === String(presetValue)
+                          return (
+                            <option key={item.preset_id} value={presetValue} className={isDefaultPreset ? 'preset-default-option' : undefined}>
+                              {isDefaultPreset ? `✓ ${item.preset_name} · predeterminado` : item.preset_name}
+                            </option>
+                          )
+                        })}
                       </optgroup>
                     ) : null}
                   </select>
@@ -10677,9 +12325,18 @@ export default function App() {
                 </label>
                 <div className="inline">
                   <button onClick={saveLocoModelPreset} disabled={loading.locoModel}>Guardar preset actual</button>
-                  <button onClick={deleteLocoModelPreset} disabled={loading.locoModel || !String(locoModelPreset).startsWith('custom:')}>Eliminar preset</button>
+                  <button
+                    onClick={String(locoModelPreset).startsWith('custom:') ? deleteLocoModelPreset : hideLocoBuiltinPreset}
+                    disabled={loading.locoModel || locoModelPreset === 'custom'}
+                  >
+                    Eliminar preset
+                  </button>
+                  <button onClick={setCurrentLocoPresetAsDefault} disabled={loading.locoModel || locoModelPreset === 'custom'}>Setear predeterminado</button>
                 </div>
-                <p className="small">Selecciona un perfil seg\u00fan el tipo de fibra y nivel de estrictez. Los par\u00e1metros se ajustan autom\u00e1ticamente. Al modificar cualquier par\u00e1metro manualmente, vuelve a "Personalizado".</p>
+                <p className="small">
+                  Predeterminado: {locoDefaultPreset && locoPresetExists(locoDefaultPreset) ? locoPresetLabel(locoDefaultPreset) : 'sin definir'}
+                </p>
+                <p className="small">Selecciona un perfil según el tipo de fibra y nivel de estrictez. Los parámetros se ajustan automáticamente. Al modificar cualquier parámetro manualmente, vuelve a "Personalizado".</p>
               </section>
 
               <section className="card">
@@ -10735,7 +12392,7 @@ export default function App() {
               </section>
 
               <section className="card">
-                <h2>NMS y capas</h2>
+                <h2>Filtro NMS</h2>
                 <label className="check-field"><input type="checkbox" checked={!!locoModelParams.use_nms} onChange={(e) => updateLocoModelParam('use_nms', e.target.checked)} /><ParamSpan paramKey="use_nms">Circle-NMS</ParamSpan></label>
                 <label className="check-field"><input type="checkbox" checked={!!locoModelParams.return_rejected} onChange={(e) => { updateLocoModelParam('return_rejected', e.target.checked); updateLocoModelLayer('rejected', e.target.checked) }} /><ParamSpan paramKey="return_rejected">mostrar rechazados</ParamSpan></label>
                 {locoModelParams.return_rejected ? (
@@ -10747,13 +12404,17 @@ export default function App() {
                   <label className="field"><ParamSpan paramKey="nms_distance_factor">nms distancia</ParamSpan><input type="number" min="0.05" step="0.05" value={locoModelParams.nms_distance_factor} onChange={(e) => updateLocoModelParam('nms_distance_factor', Number(e.target.value || 0.5))} onBlur={clampOnBlur('nms_distance_factor', 0.05, 3, 0.05, 0.5)} /></label>
                   <label className="field"><ParamSpan paramKey="radius_similarity_factor">radio similar</ParamSpan><input type="number" min="0" step="0.05" value={locoModelParams.radius_similarity_factor} onChange={(e) => updateLocoModelParam('radius_similarity_factor', Number(e.target.value || 0.4))} onBlur={clampOnBlur('radius_similarity_factor', 0, 3, 0.05, 0.4)} /></label>
                 </div>
+              </section>
+
+              <section className="card">
+                <h2>Capas visuales</h2>
                 <div className="loco-layer-grid">
                   <label><input type="checkbox" checked={!!locoModelLayers.mask} onChange={(e) => updateLocoModelLayer('mask', e.target.checked)} /> mascara</label>
                   <label><input type="checkbox" checked={!!locoModelLayers.accepted} onChange={(e) => updateLocoModelLayer('accepted', e.target.checked)} /> aceptados</label>
                   <label><input type="checkbox" checked={!!locoModelLayers.rejected} onChange={(e) => updateLocoModelLayer('rejected', e.target.checked)} /> rechazados</label>
                   <label><input type="checkbox" checked={!!locoModelLayers.scores} onChange={(e) => updateLocoModelLayer('scores', e.target.checked)} /> scores</label>
-                  <label><input type="checkbox" checked={!!locoModelLayers.tiles} onChange={(e) => updateLocoModelLayer('tiles', e.target.checked)} /> tiles</label>
                 </div>
+                <p className="small">La grilla de tiles se muestra siempre cuando el muestreo usa tile balanced.</p>
               </section>
 
               <section className="card">
@@ -10853,31 +12514,6 @@ export default function App() {
                     <span>{modelTrainSummary.train_samples || 0} muestras | {modelTrainSummary.image_count || 0} imagenes</span>
                   </div>
                 ) : null}
-                <div className="inline">
-                  <button onClick={refreshAssistModels} disabled={loading.modelsList}>Refrescar modelos</button>
-                  <button onClick={() => setDefaultAssistModel(selectedAssistModelId)} disabled={!selectedAssistModelId || loading.modelsList}>Usar por defecto</button>
-                </div>
-                {!assistModels.length ? (
-                  <div className="placeholder small">Sin modelos entrenados.</div>
-                ) : (
-                  <div className="model-list">
-                    {assistModels.map((model) => (
-                      <button
-                        key={model.model_id}
-                        className={`model-row ${selectedAssistModelId === model.model_id ? 'selected' : ''}`}
-                        onClick={() => setSelectedAssistModelId(model.model_id)}
-                        disabled={loading.modelsList}
-                      >
-                        <strong>{model.model_name || model.model_id}</strong>
-                        <span>
-                          {model.model_id === defaultAssistModelId ? 'default | ' : ''}
-                          {model.class_mode || '-'} | {model.image_count || 0} imagenes | {model.train_samples || 0} muestras
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <button className="bad" onClick={() => deleteAssistModel(selectedAssistModelId)} disabled={!selectedAssistModelId || loading.modelsDelete}>Eliminar seleccionado</button>
               </section>
             </>
           )}
@@ -10935,11 +12571,11 @@ export default function App() {
                       <thead>
                         <tr>
                           <th>imagen</th>
-                          <th>path</th>
                           <th>modificacion</th>
                           <th>proyectos</th>
                           <th>tags</th>
-                          <th>guardar</th>
+                          <th>estado</th>
+                          <th>acciones</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -10947,42 +12583,44 @@ export default function App() {
                           <tr><td colSpan={6}>Sin imagenes para esta vista.</td></tr>
                         ) : savedImagesForActiveProject.map((img) => {
                           const draft = projectImageDraft(img)
+                          const draftProjectIds = Array.isArray(draft.project_ids) ? draft.project_ids : []
+                          const projectTags = projectTagsFromIds(draftProjectIds)
+                          const imageTags = structuredTagsWithProjects(draft.structured_tags || img.structured_tags || img.tags || [], draftProjectIds).filter((tag) => tag.category !== 'project')
+                          const statusItems = projectImageStatusItems(img)
                           return (
                             <tr key={`project-image-${img.image_id}`}>
                               <td>
-                                <div className="project-image-cell">
+                                <div className="project-image-cell" onDoubleClick={() => openProjectImageZoom(img)} title="Doble click para ampliar">
                                   {img.thumbnail_b64 ? (
                                     <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt={img.image_name || img.image_id} />
                                   ) : <span className="saved-image-empty" />}
                                   <strong>{img.image_name || img.image_id}</strong>
                                 </div>
                               </td>
-                              <td title={img.source_path || ''}>{shortPathTail(img.source_path)}</td>
                               <td>{img.source_mtime || img.updated_at || '-'}</td>
                               <td>
-                                <div className="project-checkbox-stack">
-                                  {projects.map((project) => (
-                                    <label key={`${img.image_id}-${project.project_id}`}>
-                                      <input
-                                        type="checkbox"
-                                        checked={(draft.project_ids || []).includes(project.project_id)}
-                                        onChange={(e) => {
-                                          const current = new Set(draft.project_ids || [])
-                                          if (e.target.checked) current.add(project.project_id)
-                                          else current.delete(project.project_id)
-                                          updateProjectImageDraft(img.image_id, { project_ids: Array.from(current) })
-                                        }}
-                                      />
-                                      {project.name}
-                                    </label>
+                                {projectTags.length ? <StructuredTagPreview tags={projectTags} /> : <span className="muted-text">Sin proyecto</span>}
+                              </td>
+                              <td>
+                                {imageTags.length ? <StructuredTagPreview tags={imageTags} /> : <span className="muted-text">Sin tags</span>}
+                              </td>
+                              <td>
+                                <div className="image-status-checklist">
+                                  {statusItems.map((item) => (
+                                    <span
+                                      key={`${img.image_id}-${item.key}`}
+                                      className={`image-status-item ${item.ok ? 'ok' : 'missing'}`}
+                                      title={item.title || item.label}
+                                    >
+                                      <span aria-hidden="true">{item.ok ? 'OK' : '-'}</span>
+                                      {item.label}
+                                    </span>
                                   ))}
                                 </div>
                               </td>
-                              <td><StructuredTagPreview tags={structuredTagsWithProjects(draft.structured_tags || img.structured_tags || img.tags || [], draft.project_ids || img.project_ids || [])} /></td>
                               <td>
                                 <div className="inline">
                                   <button onClick={() => openProjectImageEditor(img)}>Editar tags</button>
-                                  <button onClick={() => saveProjectImageMeta(img)} disabled={loading.projectImageSave}>Guardar</button>
                                 </div>
                               </td>
                             </tr>
@@ -11075,9 +12713,28 @@ export default function App() {
                       : 'translate(-99999px, -99999px) scale(1)',
                   }}
                 >
-                  <img src={imageUrl || ''} alt="base" className="base" draggable={false} />
+                  <svg className="hidden-svg-filters" aria-hidden="true" focusable="false">
+                    <filter id="scribble-base-visual-filter" x="-8%" y="-8%" width="116%" height="116%" colorInterpolationFilters="sRGB">
+                      <feComponentTransfer in="SourceGraphic" result="gammaAdjusted">
+                        <feFuncR type="gamma" amplitude="1" exponent={scribbleFilterGamma} offset="0" />
+                        <feFuncG type="gamma" amplitude="1" exponent={scribbleFilterGamma} offset="0" />
+                        <feFuncB type="gamma" amplitude="1" exponent={scribbleFilterGamma} offset="0" />
+                      </feComponentTransfer>
+                      <feConvolveMatrix
+                        in="gammaAdjusted"
+                        order="3"
+                        preserveAlpha="true"
+                        kernelMatrix={`0 ${-scribbleFilterSharpness} 0 ${-scribbleFilterSharpness} ${1 + (4 * scribbleFilterSharpness)} ${-scribbleFilterSharpness} 0 ${-scribbleFilterSharpness} 0`}
+                      />
+                    </filter>
+                  </svg>
+                  <img src={imageUrl || ''} alt="base" className="base" style={scribbleBaseFilterStyle} draggable={false} />
                   {modelPrediction?.previewUrl ? <img src={modelPrediction.previewUrl} alt="preview modelo" className="model-preview-overlay" draggable={false} /> : null}
-                  <canvas ref={drawCanvasRef} className="draw" />
+                  <canvas
+                    ref={drawCanvasRef}
+                    className="draw"
+                    style={{ opacity: clamp(1 - (Number(scribbleOverlayTransparency || 0) / 100), 0, 1) }}
+                  />
                   {excludeRect ? (
                     <div
                       className="exclude-rect-overlay"
@@ -11576,6 +13233,234 @@ export default function App() {
               {diamActiveRunId && diamRunCache[diamActiveRunId]?.meta ? (
                 <pre className="meta">{JSON.stringify(diamRunCache[diamActiveRunId].meta || {}, null, 2)}</pre>
               ) : null}
+              </div>
+          </article>
+          <article className={`card viewer models-viewer ${['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab) ? '' : 'hidden-panel'}`} data-tour="workspace-panel-diameterAnalysis">
+            <div className="model-workspace diameter-analysis-workspace">
+              <section>
+                <h2>Analisis de Diametros</h2>
+                <div className="kpi-row">
+                  <span>Vista: <strong>{projectImageViewLabel(diamAnalysisImageView)}</strong></span>
+                  <span>Seleccionables: <strong>{diamAnalysisSelectableImages.length}</strong></span>
+                  <span>Seleccionadas: <strong>{selectedDiamAnalysisImageIds.length}</strong></span>
+                  <span>Mediciones internas: <strong>{selectedDiamAnalysisMeasurementSummary.measurement_count}</strong></span>
+                  <span>Graficables: <strong>{diamAnalysisValues.length}</strong></span>
+                  <span>Sin calibracion: <strong>{selectedDiamAnalysisMeasurementSummary.uncalibrated_count}</strong></span>
+                  <span>Unidad: <strong>{diamAnalysisUnit}</strong></span>
+                </div>
+              </section>
+
+              {workspaceTab === 'diameterAnalysisSelect' ? (
+              <section>
+                <h2>Seleccion de imagenes</h2>
+                <div className="table-wrap project-image-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>usar</th>
+                        <th>imagen</th>
+                        <th>mediciones</th>
+                        <th>proyectos</th>
+                        <th>tags</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {!diamAnalysisFilteredImages.length ? (
+                        <tr><td colSpan={5}>Sin imagenes para la vista actual.</td></tr>
+                      ) : diamAnalysisFilteredImages.map((img) => {
+                        const imageId = String(img.image_id || '')
+                        const summary = diamMeasurementSummaryByImage[imageId] || {}
+                        const measurementCount = Number(summary.measurement_count || 0)
+                        const disabled = measurementCount <= 0
+                        const checked = selectedDiamAnalysisImageIds.includes(imageId)
+                        return (
+                          <tr key={`diam-analysis-img-${img.image_id}`}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={disabled}
+                                onChange={(e) => {
+                                  setDiamAnalysisSelectedImages((prev) => {
+                                    const hasExplicitSelection = Object.keys(prev).length > 0
+                                    const base = hasExplicitSelection
+                                      ? { ...prev }
+                                      : Object.fromEntries(diamAnalysisSelectableImages.map((item) => [String(item.image_id || ''), true]).filter(([id]) => id))
+                                    base[imageId] = e.target.checked
+                                    return base
+                                  })
+                                }}
+                              />
+                            </td>
+                            <td>
+                              <div className="project-image-cell">
+                                {img.thumbnail_b64 ? (
+                                  <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt={img.image_name || img.image_id} />
+                                ) : <span className="saved-image-empty" />}
+                                <strong>{img.image_name || img.image_id}</strong>
+                              </div>
+                            </td>
+                            <td>
+                              {disabled ? (
+                                <span className="status-badge muted">Sin mediciones</span>
+                              ) : (
+                                <span className="status-badge success">
+                                  {measurementCount} med. · {Number(summary.calibrated_count || 0)} cal. · {Number(summary.uncalibrated_count || 0)} sin cal.
+                                </span>
+                              )}
+                              {summary.latest_saved_at ? <small>{summary.latest_saved_at}</small> : null}
+                            </td>
+                            <td>{(img.project_ids || []).join(', ') || '-'}</td>
+                            <td><StructuredTagPreview tags={structuredTagsWithProjects(img.structured_tags || img.tags || [], img.project_ids || [])} /></td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              ) : null}
+
+              {workspaceTab === 'diameterAnalysisHistogram' ? (
+              <>
+              <section className="diam-analysis-histogram">
+                <h2>Histograma</h2>
+                {diamAnalysisValues.length ? (
+                  <Histogram
+                    values={diamAnalysisValues}
+                    unit={diamAnalysisUnit}
+                    bins={diamAnalysisChart.bins}
+                    width={diamAnalysisChart.width}
+                    height={diamAnalysisChart.height}
+                    xPaddingEnabled={diamAnalysisChart.xPaddingEnabled !== false}
+                    xPaddingPercent={diamAnalysisChart.xPaddingPercent ?? 4}
+                    grid={diamAnalysisChart.grid}
+                    gridStyle={diamAnalysisChart.gridStyle}
+                    barColor={diamAnalysisChart.barColor}
+                    strokeColor={diamAnalysisChart.strokeColor}
+                    backgroundColor={diamAnalysisChart.backgroundColor}
+                    backgroundAltColor={diamAnalysisChart.backgroundAltColor}
+                    backgroundMode={diamAnalysisChart.backgroundMode}
+                    fontFamily={diamAnalysisChart.fontFamily}
+                    fontSize={diamAnalysisChart.fontSize}
+                    tickFontSize={diamAnalysisChart.tickFontSize ?? diamAnalysisChart.fontSize}
+                    labelFontSize={diamAnalysisChart.labelFontSize ?? ((diamAnalysisChart.fontSize || 11) + 1)}
+                    fontColor={diamAnalysisChart.fontColor}
+                    axisColor={diamAnalysisChart.axisColor}
+                    gridColor={diamAnalysisChart.gridColor}
+                    xLabel={diamAnalysisChart.xLabel}
+                    yLabel={diamAnalysisChart.yLabel}
+                    xLabelOffset={diamAnalysisChart.xLabelOffset}
+                    yLabelOffset={diamAnalysisChart.yLabelOffset}
+                    borderTop={diamAnalysisChart.borderTop}
+                    borderRight={diamAnalysisChart.borderRight}
+                    borderBottom={diamAnalysisChart.borderBottom}
+                    borderLeft={diamAnalysisChart.borderLeft}
+                  />
+                ) : (
+                  <div className="placeholder small">
+                    {selectedDiamAnalysisMeasurementSummary.measurement_count > 0 && diamAnalysisUnit !== 'px' ? (
+                      <>
+                        Hay {selectedDiamAnalysisMeasurementSummary.measurement_count} mediciones internas seleccionadas, pero ninguna tiene valor calibrado en {diamAnalysisUnit}.
+                        {' '}Dibuja y guarda la calibracion de escala para esas imagenes o grafica temporalmente en px.
+                        <div className="inline">
+                          <button type="button" onClick={() => setDiamAnalysisUnit('px')}>Ver en px</button>
+                        </div>
+                      </>
+                    ) : selectedDiamAnalysisMeasurementSummary.measurement_count > 0 ? (
+                      <>Hay mediciones internas, pero no hay valores graficables para la configuracion actual.</>
+                    ) : (
+                      <>Sin diametros guardados para el histograma seleccionado.</>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <h2>Metricas globales</h2>
+                <div className="table-wrap">
+                  <table>
+                    <tbody>
+                      <tr><th>N</th><td>{metricCell(diamAnalysisGlobalStats, 'n')}</td><th>Media</th><td>{metricCell(diamAnalysisGlobalStats, 'mean')}</td><th>Mediana</th><td>{metricCell(diamAnalysisGlobalStats, 'median')}</td></tr>
+                      <tr><th>Std</th><td>{metricCell(diamAnalysisGlobalStats, 'std')}</td><th>Min</th><td>{metricCell(diamAnalysisGlobalStats, 'min')}</td><th>Max</th><td>{metricCell(diamAnalysisGlobalStats, 'max')}</td></tr>
+                      <tr><th>P10</th><td>{metricCell(diamAnalysisGlobalStats, 'p10')}</td><th>P25</th><td>{metricCell(diamAnalysisGlobalStats, 'p25')}</td><th>P75</th><td>{metricCell(diamAnalysisGlobalStats, 'p75')}</td></tr>
+                      <tr><th>P90</th><td>{metricCell(diamAnalysisGlobalStats, 'p90')}</td><th>IQR</th><td>{metricCell(diamAnalysisGlobalStats, 'iqr')}</td><th></th><td></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section>
+                <h2>Metricas por imagen</h2>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>imagen</th>
+                        <th>N</th>
+                        <th>media</th>
+                        <th>mediana</th>
+                        <th>std</th>
+                        <th>min</th>
+                        <th>max</th>
+                        <th>IQR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {!diamAnalysisImageMetrics.length ? (
+                        <tr><td colSpan={8}>Sin metricas por imagen.</td></tr>
+                      ) : diamAnalysisImageMetrics.map((item) => (
+                        <tr key={`diam-analysis-metric-${item.image_id}`}>
+                          <td>{item.image_name || item.image_id}</td>
+                          <td>{metricCell(item.stats, 'n')}</td>
+                          <td>{metricCell(item.stats, 'mean')}</td>
+                          <td>{metricCell(item.stats, 'median')}</td>
+                          <td>{metricCell(item.stats, 'std')}</td>
+                          <td>{metricCell(item.stats, 'min')}</td>
+                          <td>{metricCell(item.stats, 'max')}</td>
+                          <td>{metricCell(item.stats, 'iqr')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section>
+                <h2>Mediciones</h2>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>imagen</th>
+                        <th>run</th>
+                        <th>punto</th>
+                        <th>px</th>
+                        <th>{diamAnalysisUnit}</th>
+                        <th>calibracion</th>
+                        <th>metodo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {!diamAnalysisRows.length ? (
+                        <tr><td colSpan={7}>Sin mediciones internas. Guarda mediciones desde Medicion de Diametros.</td></tr>
+                      ) : diamAnalysisRows.slice(0, 1000).map((row) => (
+                        <tr key={row.measurement_id}>
+                          <td>{row.image_name || row.image_id}</td>
+                          <td>{row.run_id}</td>
+                          <td>{Number(row.point_index ?? 0) + 1}</td>
+                          <td>{row.diameter_px == null ? '-' : Number(row.diameter_px).toFixed(2)}</td>
+                          <td>{row.diameter_value == null ? '-' : Number(row.diameter_value).toFixed(2)}</td>
+                          <td>{row.calibration_status || '-'}</td>
+                          <td>{row.method_id || row.diameter_route || '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              </>
+              ) : null}
             </div>
           </article>
           <article className={`card viewer loco-viewer ${workspaceTab === 'locoDataset' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoDataset">
@@ -11989,7 +13874,7 @@ export default function App() {
                                 className="small-action"
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  saveLocoTrainingModel(row.run_id, row.model_id, row)
+                                  openLocoSaveModelDialog(row.run_id, row.model_id, row)
                                 }}
                                 disabled={loading.locoTraining || row.status !== 'ok' || !row.run_id}
                               >
@@ -12045,7 +13930,7 @@ export default function App() {
                               <td>{row.sample_count ?? '-'}</td>
                               <td>{row.fold_count ?? '-'}</td>
                               <td>{row.status}{row.reason ? `: ${row.reason}` : ''}</td>
-                              <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
+                              <td><button className="small-action" onClick={() => openLocoSaveModelDialog(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
                             </tr>
                           ))}
                         </tbody>
@@ -12078,7 +13963,7 @@ export default function App() {
                               <td>{row.sample_count ?? '-'}</td>
                               <td>{row.fold_count ?? '-'}</td>
                               <td>{row.status}{row.reason ? `: ${row.reason}` : ''}</td>
-                              <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
+                              <td><button className="small-action" onClick={() => openLocoSaveModelDialog(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
                             </tr>
                           ))}
                         </tbody>
@@ -12116,7 +14001,7 @@ export default function App() {
                             <td>{row.accuracy == null ? '-' : Number(row.accuracy).toFixed(3)}</td>
                             <td>{row.balanced_accuracy == null ? '-' : Number(row.balanced_accuracy).toFixed(3)}</td>
                             <td>{row.status}{row.reason ? `: ${row.reason}` : ''}</td>
-                            <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
+                            <td><button className="small-action" onClick={() => openLocoSaveModelDialog(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -12170,7 +14055,7 @@ export default function App() {
                                 Tuning
                               </button>
                             </td>
-                            <td><button className="small-action" onClick={() => saveLocoTrainingModel(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
+                            <td><button className="small-action" onClick={() => openLocoSaveModelDialog(locoTrainingResult.run_id, row.model_id, row)} disabled={loading.locoTraining || row.status !== 'ok'}>Guardar</button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -12710,7 +14595,7 @@ export default function App() {
                             />
                           </g>
                         ))}
-                        {locoModelLayers.tiles && locoModelParams.candidate_sampling_mode === 'tile_balanced' ? (() => {
+                        {locoModelParams.candidate_sampling_mode === 'tile_balanced' ? (() => {
                           const tw = Number(locoModelParams.tile_size_px || 128)
                           const iw = Math.max(1, imageDims.w)
                           const ih = Math.max(1, imageDims.h)
@@ -12888,27 +14773,65 @@ export default function App() {
                   </div>
                   <button className="small-action" onClick={refreshTransferCatalog} disabled={loading.transferCatalog}>Refrescar</button>
                 </div>
+                <div className="mode-tabs compact">
+                  <button className={transferMode === 'project' ? 'active' : ''} onClick={() => setTransferMode('project')}>Por proyecto</button>
+                  <button className={transferMode === 'full' ? 'active' : ''} onClick={() => setTransferMode('full')}>Todo el sistema</button>
+                </div>
+                {transferMode === 'project' ? (
+                  <>
+                    <div className="mode-tabs compact">
+                      <button className={transferExportMode === 'simple' ? 'active' : ''} onClick={() => setTransferExportMode('simple')}>Simple</button>
+                      <button className={transferExportMode === 'advanced' ? 'active' : ''} onClick={() => setTransferExportMode('advanced')}>Avanzado</button>
+                    </div>
+                    <div className="transfer-project-list">
+                      {projects.length ? projects.map((project) => (
+                        <label className="transfer-project-row" key={`transfer-project-${project.project_id}`}>
+                          <input
+                            type="checkbox"
+                            checked={transferProjectIds.includes(project.project_id)}
+                            onChange={() => toggleTransferProject(project.project_id)}
+                          />
+                          <span>
+                            <strong>{project.name || project.project_id}</strong>
+                            <em>{project.project_id === activeProjectId ? 'activo' : project.project_id}</em>
+                          </span>
+                        </label>
+                      )) : <div className="placeholder small">No hay proyectos creados.</div>}
+                    </div>
+                  </>
+                ) : (
+                  <p className="small">Exporta todas las categorias seleccionadas sin filtrar por proyecto.</p>
+                )}
                 <label className="transfer-master-check">
                   <input type="checkbox" checked={transferAllSelected} onChange={(e) => toggleAllTransferCategories(e.target.checked)} />
-                  <strong>Todo</strong>
+                  <strong>{transferMode === 'project' ? 'Todo el proyecto seleccionado' : 'Todo'}</strong>
                   <span>{transferSelectedFiles} archivos | {formatBytes(transferSelectedSize)}</span>
                 </label>
-                <div className="transfer-category-list">
-                  {transferCatalog.map((item) => (
-                    <label className="transfer-category-row" key={`transfer-export-${item.key}`}>
-                      <input type="checkbox" checked={!!transferSelection[item.key]} onChange={() => toggleTransferCategory(item.key)} />
-                      <span>
-                        <strong>{item.label}</strong>
-                        <em>{item.file_count || 0} archivos</em>
-                      </span>
-                      <b>{formatBytes(item.size_bytes)}</b>
-                    </label>
-                  ))}
-                </div>
+                {transferMode === 'full' || transferExportMode === 'advanced' ? (
+                  <div className="transfer-category-list">
+                    {transferCatalog.map((item) => (
+                      <label className="transfer-category-row" key={`transfer-export-${item.key}`}>
+                        <input type="checkbox" checked={!!transferSelection[item.key]} onChange={() => toggleTransferCategory(item.key)} />
+                        <span>
+                          <strong>{item.label}</strong>
+                          <em>{item.file_count || 0} archivos</em>
+                        </span>
+                        <b>{formatBytes(item.size_bytes)}</b>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="transfer-summary">
+                    <span>Proyectos <strong>{transferSelectedProjects.length}</strong></span>
+                    <span>Categorias <strong>{transferCatalog.filter((item) => transferSelection[item.key]).length}</strong></span>
+                    <span>Archivos <strong>{transferSelectedFiles}</strong></span>
+                    <span>Tamano <strong>{formatBytes(transferSelectedSize)}</strong></span>
+                  </div>
+                )}
                 {!transferCatalog.length ? <div className="placeholder small">Refresca para calcular el contenido disponible.</div> : null}
                 <div className="transfer-actions">
                   <button className="primary" onClick={prepareProjectExport} disabled={loading.transferExport || !transferCatalog.some((item) => transferSelection[item.key])}>
-                    {loading.transferExport ? 'Generando ZIP...' : 'Generar ZIP'}
+                    {loading.transferExport ? 'Generando ZIP...' : (transferMode === 'project' ? 'Generar ZIP del proyecto' : 'Generar ZIP')}
                   </button>
                 </div>
                 {transferExportInfo ? (
@@ -12937,6 +14860,7 @@ export default function App() {
                       setTransferImportFile(e.target.files?.[0] || null)
                       setTransferImportInspection(null)
                       setTransferImportResult(null)
+                      setTransferImportProjectIds([])
                     }}
                   />
                 </label>
@@ -12951,6 +14875,26 @@ export default function App() {
                       <span>Total <strong>{transferImportInspection.summary.file_count || 0}</strong></span>
                       <span>Tamano <strong>{formatBytes(transferImportInspection.summary.size_bytes)}</strong></span>
                     </div>
+                    {transferImportProjects.length ? (
+                      <div className="transfer-import-projects">
+                        <strong>Proyectos en el ZIP</strong>
+                        <div className="transfer-project-list">
+                          {transferImportProjects.map((project) => (
+                            <label className="transfer-project-row" key={`transfer-import-project-${project.project_id}`}>
+                              <input
+                                type="checkbox"
+                                checked={transferImportProjectIds.includes(project.project_id)}
+                                onChange={() => toggleImportProject(project.project_id)}
+                              />
+                              <span>
+                                <strong>{project.name || project.project_id}</strong>
+                                <em>{project.project_id}</em>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="table-wrap">
                       <table>
                         <thead>
@@ -12984,13 +14928,14 @@ export default function App() {
                       </table>
                     </div>
                     <p className="small">La importación solo agrega archivos del ZIP. Los archivos locales que no aparecen en el paquete se mantienen intactos.</p>
+                    {transferImportNeedsProjectSelection ? <p className="small">Selecciona al menos un proyecto del ZIP para importar.</p> : null}
                     {Number(transferImportInspection.summary.conflict_count || 0) > 0 ? (
                       <div className="transfer-actions split">
-                        <button onClick={() => applyProjectImport(false)} disabled={loading.transferApply}>Importar conservando existentes</button>
-                        <button className="primary" onClick={() => applyProjectImport(true)} disabled={loading.transferApply}>Importar y sobrescribir conflictos</button>
+                        <button onClick={() => applyProjectImport(false)} disabled={loading.transferApply || transferImportNeedsProjectSelection}>Importar conservando existentes</button>
+                        <button className="primary" onClick={() => applyProjectImport(true)} disabled={loading.transferApply || transferImportNeedsProjectSelection}>Importar y sobrescribir conflictos</button>
                       </div>
                     ) : (
-                      <button className="primary" onClick={() => applyProjectImport(false)} disabled={loading.transferApply}>Importar archivos</button>
+                      <button className="primary" onClick={() => applyProjectImport(false)} disabled={loading.transferApply || transferImportNeedsProjectSelection}>Importar archivos</button>
                     )}
                   </div>
                 ) : null}
@@ -13018,7 +14963,7 @@ export default function App() {
                 </div>
                 <div className="inline model-dataset-actions">
                   <button onClick={() => refreshModelDataset()} disabled={loading.modelsDataset}>Refrescar dataset</button>
-                  <button onClick={selectTrainableImages} disabled={!modelDataset.length}>Seleccionar validas</button>
+                  <button onClick={selectTrainableImages} disabled={!modelDatasetVisibleRows.length}>Seleccionar validas</button>
                   <button onClick={clearTrainImages} disabled={!trainImageIds.length}>Limpiar seleccion</button>
                   <button
                     className="bad"
@@ -13029,15 +14974,44 @@ export default function App() {
                     {loading.modelsDatasetDelete ? '...' : ''}
                   </button>
                 </div>
+                <div className="model-dataset-tag-filter">
+                  <div className="model-dataset-filter-head">
+                    <span>Filtro por tags</span>
+                    <strong>Mostrando {modelDatasetVisibleRows.length} / {modelDataset.length} imagenes</strong>
+                  </div>
+                  <div className="model-dataset-filter-selected">
+                    <StructuredTagPreview tags={modelDatasetRequiredTags} removable onRemove={removeModelDatasetTagFilter} />
+                    <button type="button" className="btn-small" onClick={() => setModelDatasetSelectedTags([])} disabled={!modelDatasetRequiredTags.length}>
+                      Limpiar tags
+                    </button>
+                  </div>
+                  <label className="field compact-field">
+                    <span>buscar tag</span>
+                    <input value={modelDatasetTagSearch} onChange={(e) => setModelDatasetTagSearch(e.target.value)} placeholder="proyecto, fibra, creador..." />
+                  </label>
+                  <div className="tag-filter-list">
+                    {filteredModelDatasetSuggestedTags.length ? filteredModelDatasetSuggestedTags.map((tag, idx) => {
+                      const selected = modelDatasetRequiredTags.some((item) => tagKey(item) === tagKey(tag))
+                      return (
+                        <button
+                          type="button"
+                          key={`model-dataset-tag-${tagKey(tag)}-${idx}`}
+                          className={selected ? 'selected' : ''}
+                          onClick={() => toggleModelDatasetTagFilter(tag)}
+                        >
+                          <TagChip tag={tag} />
+                        </button>
+                      )
+                    }) : <span className="small">Sin tags disponibles.</span>}
+                  </div>
+                </div>
                 <div className="table-wrap model-table">
                   <table>
                     <thead>
                       <tr>
                         <th>usar</th>
                         <th>imagen</th>
-                        <th className="sortable-th" onClick={() => setModelSort((s) => s.key === 'path' ? { key: 'path', dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: 'path', dir: 'asc' })}>
-                          path{modelSort.key === 'path' ? (modelSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
-                        </th>
+                        <th>tags</th>
                         <th className="sortable-th" onClick={() => setModelSort((s) => s.key === 'mtime' ? { key: 'mtime', dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: 'mtime', dir: 'asc' })}>
                           modificacion{modelSort.key === 'mtime' ? (modelSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
                         </th>
@@ -13046,31 +15020,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(() => {
-                        const hasMaskData = Object.keys(maskRunListByImage).length > 0
-                        const withMasks = hasMaskData
-                          ? modelDataset.filter((item) => {
-                              const runs = maskRunListByImage[item.image_id]
-                              return runs?.length > 0
-                            })
-                          : [...modelDataset]
-                        const sorted = [...withMasks].sort((a, b) => {
-                          const dir = modelSort.dir === 'asc' ? 1 : -1
-                          let va, vb
-                          switch (modelSort.key) {
-                            case 'path':
-                              va = (a.source_path || a.image_name || '').toLowerCase()
-                              vb = (b.source_path || b.image_name || '').toLowerCase()
-                              return va < vb ? -dir : va > vb ? dir : 0
-                            case 'mtime':
-                              va = a.source_mtime || a.updated_at || ''
-                              vb = b.source_mtime || b.updated_at || ''
-                              return va < vb ? -dir : va > vb ? dir : 0
-                            default:
-                              return 0
-                          }
-                        })
-                        return sorted.map((item) => {
+                      {modelDatasetVisibleRows.length ? modelDatasetVisibleRows.map((item) => {
                           const thumbs = modelDatasetPreviewUrls(item)
                           return (
                             <tr key={`model-dataset-${item.image_id}`}>
@@ -13151,7 +15101,7 @@ export default function App() {
                                   </div>
                                 </div>
                               </td>
-                              <td title={item.source_path || ''}>{shortPathTail(item.source_path)}</td>
+                              <td><StructuredTagPreview tags={structuredTagsWithProjects(item.structured_tags || item.tags || [], item.project_ids || [])} /></td>
                               <td>{item.source_mtime || item.updated_at || '-'}</td>
                               <td>
                                 {(() => {
@@ -13200,70 +15150,165 @@ export default function App() {
                               </td>
                             </tr>
                           )
-                        })
-                      })()}
+                        }) : (
+                        <tr>
+                          <td colSpan={6}>Sin imagenes para los tags seleccionados.</td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
               </section>
-
-              <section>
-                <h2>Modelos guardados</h2>
-                {assistModels.length > 0 && (
-                  <div className="inline" style={{ marginBottom: 8 }}>
-                    <button
-                      className="bad"
-                      onClick={() => {
-                        const count = Object.values(selectedAssistModelIds).filter(Boolean).length
-                        if (window.confirm(`Eliminar ${count} modelo(s) seleccionado(s)?`)) deleteSelectedAssistModels()
-                      }}
-                      disabled={!Object.values(selectedAssistModelIds).some(Boolean) || loading.modelsDelete}
-                    >
-                      Eliminar seleccionados
-                      {loading.modelsDelete ? '...' : ''}
-                    </button>
-                  </div>
-                )}
-                {!assistModels.length ? (
-                  <div className="placeholder small">Entrena un modelo desde el panel lateral.</div>
-                ) : (
-                  <div className="table-wrap model-table">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>usar</th>
-                          <th>modelo</th>
-                          <th>modo</th>
-                          <th>imagenes</th>
-                          <th>muestras</th>
-                          <th>accuracy</th>
-                          <th>fecha</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {assistModels.map((model) => (
-                          <tr key={`registry-${model.model_id}`} className={model.model_id === selectedAssistModelId ? 'selected-row' : ''} onClick={() => setSelectedAssistModelId(model.model_id)}>
-                            <td onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                checked={!!selectedAssistModelIds[model.model_id]}
-                                onChange={() => toggleAssistModelSelection(model.model_id)}
-                              />
-                            </td>
-                            <td>{model.model_name || model.model_id}{model.model_id === defaultAssistModelId ? ' *' : ''}</td>
-                            <td>{model.class_mode || '-'}</td>
-                            <td>{model.image_count || 0}</td>
-                            <td>{model.train_samples || 0}</td>
-                            <td>{model.metrics?.holdout_accuracy == null ? (model.metrics?.train_accuracy == null ? '-' : Number(model.metrics.train_accuracy).toFixed(3)) : Number(model.metrics.holdout_accuracy).toFixed(3)}</td>
-                            <td>{model.created_at || '-'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
             </div>
+          </article>
+          <article className={`card viewer models-viewer ${workspaceTab === 'scribbleModelManager' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-scribbleModelManager">
+            <section className="model-manager-panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Gestion de modelos Scribble</h2>
+                  <p className="small">Administra modelos de asistencia, sus tags heredados desde imagenes y tags propios del modelo.</p>
+                </div>
+                <div className="inline">
+                  <button onClick={refreshAssistModels} disabled={loading.modelsList}>Refrescar</button>
+                  <button
+                    className="bad"
+                    onClick={() => {
+                      const count = Object.values(selectedAssistModelIds).filter(Boolean).length
+                      if (window.confirm(`Eliminar ${count} modelo(s) seleccionado(s)?`)) deleteSelectedAssistModels()
+                    }}
+                    disabled={!Object.values(selectedAssistModelIds).some(Boolean) || loading.modelsDelete}
+                  >
+                    Eliminar seleccionados
+                  </button>
+                </div>
+              </div>
+              <div className="table-wrap model-table model-manager-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>usar</th>
+                      <th>nombre</th>
+                      <th>origen</th>
+                      <th>tags imagen</th>
+                      <th>tags modelo</th>
+                      <th>notas</th>
+                      <th>acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assistModels.length ? assistModels.map((model) => {
+                      const ownTags = normalizeStructuredTags([...(model.auto_model_tags || []), ...(model.model_tags || [])])
+                      return (
+                        <tr key={`scribble-model-manager-${model.model_id}`} className={model.model_id === selectedAssistModelId ? 'selected-row' : ''}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={!!selectedAssistModelIds[model.model_id]}
+                              onChange={() => toggleAssistModelSelection(model.model_id)}
+                            />
+                          </td>
+                          <td className="model-name-cell">
+                            <strong>{model.model_name || model.model_id}</strong>
+                            <span className="small mono">{model.model_id === defaultAssistModelId ? 'predeterminado' : model.model_id}</span>
+                          </td>
+                          <td>
+                            <div className="model-manager-meta">
+                              <span>{model.class_mode || '-'}</span>
+                              <span>{model.classifier || '-'}</span>
+                              <span>{model.image_count || 0} imagenes</span>
+                              <span>{model.train_samples || 0} muestras</span>
+                              <span>metric {modelMetricValue(model)}</span>
+                              <span>{model.created_at || '-'}</span>
+                            </div>
+                          </td>
+                          <td><StructuredTagPreview tags={model.image_tags || []} /></td>
+                          <td>
+                            {ownTags.length ? <StructuredTagPreview tags={ownTags} /> : <span className="muted-text">Sin tags modelo</span>}
+                          </td>
+                          <td>{model.notes || '-'}</td>
+                          <td>
+                            <div className="model-manager-actions">
+                              <button className="small-action" onClick={() => setSelectedAssistModelId(model.model_id)}>Usar</button>
+                              <button className="small-action" onClick={() => setDefaultAssistModel(model.model_id)}>Predeterminado</button>
+                              <button className="small-action" onClick={() => openAssistModelTagEditor(model)}>Editar</button>
+                              <button className="small-action bad" onClick={() => { if (window.confirm(`Eliminar ${model.model_name || model.model_id}?`)) deleteAssistModel(model.model_id) }}>Eliminar</button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    }) : (
+                      <tr><td colSpan={7} className="placeholder">Sin modelos Scribble guardados.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </article>
+          <article className={`card viewer models-viewer ${workspaceTab === 'locoModelManager' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-locoModelManager">
+            <section className="model-manager-panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Gestion de modelos LOCO</h2>
+                  <p className="small">Administra modelos LOCO guardados para Test de Modelo y Detector LOCO. No incluye modelos Scribble.</p>
+                </div>
+                <div className="inline">
+                  <button onClick={fetchLocoSavedModelsList} disabled={loading.locoTraining}>Refrescar</button>
+                </div>
+              </div>
+              <div className="table-wrap model-table model-manager-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>nombre</th>
+                      <th>origen</th>
+                      <th>tags imagen</th>
+                      <th>tags modelo</th>
+                      <th>notas</th>
+                      <th>acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {locoSavedModels.length ? locoSavedModels.map((model) => {
+                      const ownTags = normalizeStructuredTags([...(model.auto_model_tags || []), ...(model.model_tags || [])])
+                      return (
+                        <tr key={`loco-model-manager-${model.saved_model_id}`} className={model.saved_model_id === locoTrainingSelectedSavedModelId ? 'selected-row' : ''}>
+                          <td className="model-name-cell">
+                            <strong>{model.model_name || model.model || model.model_id}</strong>
+                            <span className="small mono">{model.saved_model_id}</span>
+                          </td>
+                          <td>
+                            <div className="model-manager-meta">
+                              <span>{model.model || model.model_id || '-'}</span>
+                              <span>{model.data_selection || '-'}</span>
+                              <span>{model.sample_count || 0} muestras</span>
+                              <span>{model.feature_count || 0} cols</span>
+                              <span>{model.has_multiclass ? 'multiclase' : 'binario'}</span>
+                              <span>metric {modelMetricValue(model)}</span>
+                              <span>{model.created_at || '-'}</span>
+                            </div>
+                          </td>
+                          <td><StructuredTagPreview tags={model.image_tags || []} /></td>
+                          <td>
+                            {ownTags.length ? <StructuredTagPreview tags={ownTags} /> : <span className="muted-text">Sin tags modelo</span>}
+                          </td>
+                          <td>{model.notes || '-'}</td>
+                          <td>
+                            <div className="model-manager-actions">
+                              <button className="small-action" onClick={() => useLocoSavedModel(model, 'test')}>Usar en Test</button>
+                              <button className="small-action" onClick={() => useLocoSavedModel(model, 'detector')}>Usar en Detector</button>
+                              <button className="small-action" onClick={() => openLocoRunModelTagEditor(model)}>Editar</button>
+                              <button className="small-action bad" onClick={() => { if (window.confirm(`Eliminar ${model.model_name || model.saved_model_id}?`)) deleteLocoSavedModel(model.saved_model_id) }}>Eliminar</button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    }) : (
+                      <tr><td colSpan={6} className="placeholder">Sin modelos LOCO guardados.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </article>
         </section>
       </div>

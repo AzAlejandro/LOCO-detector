@@ -9,25 +9,22 @@ export default function CalibrationPanel({
   calibration,
   onChange,
   onSave,
-  onLoad,
-  onDelete,
   onStartDraw,
-  onClearLine,
   drawing,
   loading,
   imageId,
 }) {
   if (!calibration) return null
 
-  const handleToggle = () => {
-    onChange({ ...calibration, enabled: !calibration.enabled })
-  }
-
   const handleChange = (field, value) => {
-    onChange({ ...calibration, [field]: value })
+    onChange({ ...calibration, enabled: true, [field]: value })
   }
 
-  const hasLine = ['line_x1', 'line_y1', 'line_x2', 'line_y2'].every((key) => Number.isFinite(Number(calibration[key])))
+  const hasLineCoords = ['line_x1', 'line_y1', 'line_x2', 'line_y2'].every((key) => Number.isFinite(Number(calibration[key])))
+  const lineDistance = hasLineCoords
+    ? Math.hypot(Number(calibration.line_x2) - Number(calibration.line_x1), Number(calibration.line_y2) - Number(calibration.line_y1))
+    : 0
+  const hasLine = lineDistance > 0
   const pixelDistance = Number(calibration.pixel_distance || 0)
   const factor = pixelDistance > 0 && Number(calibration.known_value || 0) > 0
     ? Number(calibration.unit_per_px || (calibration.known_value / pixelDistance)).toFixed(4)
@@ -37,13 +34,9 @@ export default function CalibrationPanel({
     <div className="calibration-panel">
       <h3 className="calibration-title">
         Calibracion de Escala
-        {imageId ? <span className="calibration-image-id">({imageId})</span> : null}
       </h3>
 
-      <label className="calibration-toggle">
-        <input type="checkbox" checked={!!calibration.enabled} onChange={handleToggle} />
-        <span>Activar calibracion</span>
-      </label>
+      <p className="small calibration-help">Siempre activa para esta imagen. Dibuja la barra de escala y guarda el factor.</p>
 
       <div className="calibration-fields">
         <label className="field">
@@ -83,9 +76,6 @@ export default function CalibrationPanel({
           <button type="button" onClick={onStartDraw} disabled={loading || !imageId} className={`btn-small ${drawing ? 'active' : ''}`}>
             {drawing ? 'Dibujando...' : 'Dibujar linea'}
           </button>
-          <button type="button" onClick={onClearLine} disabled={loading || !hasLine} className="btn-small">
-            Limpiar linea
-          </button>
         </div>
       </div>
 
@@ -100,12 +90,6 @@ export default function CalibrationPanel({
       <div className="calibration-actions">
         <button onClick={onSave} disabled={loading || !imageId || !hasLine} className="btn-small">
           Guardar
-        </button>
-        <button onClick={onLoad} disabled={loading || !imageId} className="btn-small">
-          Cargar
-        </button>
-        <button onClick={onDelete} disabled={loading || !imageId} className="btn-small btn-danger">
-          Eliminar
         </button>
       </div>
     </div>

@@ -17,6 +17,7 @@ from .pipeline import METHOD_ID
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_ROOT = PROJECT_ROOT / 'outputs' / 'scribble_research' / 'diameter_research'
 POINTS_DIR = OUTPUT_ROOT / 'points'
+LOCO_DATASET_CIRCLES_DIR = OUTPUT_ROOT / 'loco_dataset_circles'
 RUNS_DIR = OUTPUT_ROOT / 'runs'
 INDEX_DIR = OUTPUT_ROOT / 'index'
 REPORTS_DIR = OUTPUT_ROOT / 'reports'
@@ -40,6 +41,7 @@ class DiameterRunArtifacts:
 
 def ensure_dirs() -> None:
     POINTS_DIR.mkdir(parents=True, exist_ok=True)
+    LOCO_DATASET_CIRCLES_DIR.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -108,6 +110,13 @@ def _points_path(image_id: str) -> Path:
     return POINTS_DIR / f'{sid}.json'
 
 
+def _loco_dataset_circles_path(image_id: str) -> Path:
+    sid = _safe_id(image_id)
+    if not sid:
+        raise ValueError('image_id invalido para circulos LOCO')
+    return LOCO_DATASET_CIRCLES_DIR / f'{sid}.json'
+
+
 def normalize_points(points: list[dict[str, Any]] | None) -> list[dict[str, float]]:
     out: list[dict[str, float]] = []
     for item in points or []:
@@ -122,7 +131,78 @@ def normalize_points(points: list[dict[str, Any]] | None) -> list[dict[str, floa
     return out
 
 
-def save_points(image_id: str, points: list[dict[str, Any]], active_point_idx: int | None = None) -> dict[str, Any]:
+def _finite_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return default
+    return out if np.isfinite(out) else default
+
+
+def _normalize_point_ref(item: dict[str, Any] | None) -> dict[str, float] | None:
+    if not isinstance(item, dict):
+        return None
+    x = _finite_float(item.get('x'))
+    y = _finite_float(item.get('y'))
+    if x is None or y is None:
+        return None
+    return {'x': float(x), 'y': float(y)}
+
+
+def _normalize_manual_line(item: dict[str, Any] | None, kind: str) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    start = _normalize_point_ref(item.get('start'))
+    end = _normalize_point_ref(item.get('end'))
+    if not start or not end:
+        return None
+    geometry_id = str(item.get('geometry_id') or item.get('manual_geometry_id') or '').strip()
+    return {
+        'start': start,
+        'end': end,
+        'method_id': 'manual_line_direct_caliper' if kind == 'direct' else 'manual_dual_side_caliper',
+        'geometry_id': geometry_id,
+    }
+
+
+def _normalize_manual_circle(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    center = _normalize_point_ref(item.get('center'))
+    radius = _finite_float(item.get('radius'))
+    if not center or radius is None or radius < 1:
+        return None
+    geometry_id = str(item.get('geometry_id') or item.get('circle_square_geometry_id') or '').strip()
+    return {
+        'center': center,
+        'radius': float(radius),
+        'geometry_id': geometry_id,
+        'consumed': bool(item.get('consumed', False)),
+        'type': str(item.get('type') or item.get('circle_type') or ''),
+    }
+
+
+def normalize_geometry(geometry: dict[str, Any] | None) -> dict[str, Any]:
+    raw = geometry if isinstance(geometry, dict) else {}
+    mask_lines = [_normalize_manual_line(item, 'mask') for item in list(raw.get('mask_lines') or raw.get('maskLines') or [])]
+    direct_lines = [_normalize_manual_line(item, 'direct') for item in list(raw.get('direct_lines') or raw.get('directLines') or [])]
+    circles = [_normalize_manual_circle(item) for item in list(raw.get('circles') or [])]
+    return {
+        'mask_lines': [item for item in mask_lines if item],
+        'direct_lines': [item for item in direct_lines if item],
+        'circles': [item for item in circles if item],
+        'mask_line_active_idx': int(raw.get('mask_line_active_idx', raw.get('maskLineActiveIdx', -1)) or -1),
+        'direct_line_active_idx': int(raw.get('direct_line_active_idx', raw.get('directLineActiveIdx', -1)) or -1),
+        'circle_active_idx': int(raw.get('circle_active_idx', raw.get('circleActiveIdx', -1)) or -1),
+    }
+
+
+def save_points(
+    image_id: str,
+    points: list[dict[str, Any]],
+    active_point_idx: int | None = None,
+    geometry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     ensure_dirs()
     pts = normalize_points(points)
     if active_point_idx is None:
@@ -136,6 +216,7 @@ def save_points(image_id: str, points: list[dict[str, Any]], active_point_idx: i
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'points': pts,
         'active_point_idx': int(active),
+        'geometry': normalize_geometry(geometry),
     }
     _write_json(_points_path(image_id), payload)
     return payload
@@ -145,7 +226,7 @@ def load_points(image_id: str) -> dict[str, Any]:
     ensure_dirs()
     path = _points_path(image_id)
     if not path.exists():
-        return {'found': False, 'image_id': str(image_id), 'points': [], 'active_point_idx': -1}
+        return {'found': False, 'image_id': str(image_id), 'points': [], 'active_point_idx': -1, 'geometry': normalize_geometry({})}
     payload = _read_json(path)
     pts = normalize_points(list(payload.get('points') or []))
     active = int(payload.get('active_point_idx', 0 if pts else -1))
@@ -154,8 +235,106 @@ def load_points(image_id: str) -> dict[str, Any]:
     payload['found'] = True
     payload['points'] = pts
     payload['active_point_idx'] = active
+    payload['geometry'] = normalize_geometry(payload.get('geometry') or {})
     payload.setdefault('image_id', str(image_id))
     return payload
+
+
+def normalize_loco_dataset_circles(circles: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(circles or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            cx = float(item.get('center_x'))
+            cy = float(item.get('center_y'))
+            radius = float(item.get('radius_px'))
+        except Exception:
+            continue
+        if not np.isfinite([cx, cy, radius]).all() or radius < 1:
+            continue
+        label = str(item.get('label') or 'invalid_other')
+        if label not in {'valid', 'invalid_crossing', 'invalid_other'}:
+            label = 'invalid_other'
+        candidate_id = str(item.get('candidate_id') or f'circle_{idx + 1}').strip() or f'circle_{idx + 1}'
+        out.append({
+            'candidate_id': candidate_id,
+            'center_x': float(cx),
+            'center_y': float(cy),
+            'radius_px': float(radius),
+            'label': label,
+        })
+    return out
+
+
+def _loco_dataset_circles_from_legacy_points(image_id: str) -> list[dict[str, Any]]:
+    try:
+        state = load_points(image_id)
+    except Exception:
+        return []
+    circles: list[dict[str, Any]] = []
+    for idx, point in enumerate(list(state.get('points') or [])):
+        circle_type = str(point.get('circle_type') or '')
+        radius = _finite_float(point.get('radius_px'), 0.0) or 0.0
+        if radius < 1 or circle_type not in {'valid', 'crossing', 'other_valid'}:
+            continue
+        label = 'invalid_crossing' if circle_type == 'crossing' else ('invalid_other' if circle_type == 'other_valid' else 'valid')
+        circles.append({
+            'candidate_id': f'legacy_{_safe_id(image_id)}_{idx}',
+            'center_x': point.get('x'),
+            'center_y': point.get('y'),
+            'radius_px': radius,
+            'label': label,
+        })
+    return normalize_loco_dataset_circles(circles)
+
+
+def save_loco_dataset_circles(
+    image_id: str,
+    circles: list[dict[str, Any]],
+    active_circle_id: str = '',
+) -> dict[str, Any]:
+    ensure_dirs()
+    normalized = normalize_loco_dataset_circles(circles)
+    active = str(active_circle_id or '').strip()
+    if active and not any(str(item.get('candidate_id')) == active for item in normalized):
+        active = ''
+    payload = {
+        'image_id': str(image_id),
+        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'circles': normalized,
+        'active_circle_id': active,
+    }
+    _write_json(_loco_dataset_circles_path(image_id), payload)
+    return payload
+
+
+def load_loco_dataset_circles(image_id: str, migrate_legacy: bool = True) -> dict[str, Any]:
+    ensure_dirs()
+    path = _loco_dataset_circles_path(image_id)
+    if path.exists():
+        payload = _read_json(path)
+        circles = normalize_loco_dataset_circles(list(payload.get('circles') or []))
+        active = str(payload.get('active_circle_id') or '').strip()
+        if active and not any(str(item.get('candidate_id')) == active for item in circles):
+            active = ''
+        payload['found'] = True
+        payload['image_id'] = str(payload.get('image_id') or image_id)
+        payload['circles'] = circles
+        payload['active_circle_id'] = active
+        return payload
+    if migrate_legacy:
+        legacy = _loco_dataset_circles_from_legacy_points(image_id)
+        if legacy:
+            migrated = save_loco_dataset_circles(image_id, legacy, '')
+            migrated['found'] = True
+            migrated['migrated_from_points'] = True
+            return migrated
+    return {'found': False, 'image_id': str(image_id), 'circles': [], 'active_circle_id': ''}
+
+
+def clear_loco_dataset_circles(image_id: str) -> dict[str, Any]:
+    return save_loco_dataset_circles(image_id, [], '')
 
 
 def new_run_id(method_id: str = METHOD_ID) -> str:

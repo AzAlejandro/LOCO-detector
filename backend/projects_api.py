@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from .library_store import list_library_images, update_library_image_tags
 from .projects_store import delete_project, delete_tag, list_projects, rename_tag, set_active_project, set_tag_hidden, tag_catalog, tag_catalog_detailed, upsert_project
+from .diameter_research.analysis_store import sync_image_metadata
 
 
 router = APIRouter(prefix='/api/projects', tags=['projects'])
@@ -145,6 +146,7 @@ def api_projects_image_update(req: ProjectImageUpdateReq) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail='image_id requerido.')
     try:
         meta = update_library_image_tags(image_id, req.tags, req.project_ids, structured_tags=req.structured_tags)
+        sync_image_metadata(image_id, project_ids=req.project_ids, tags=req.tags, structured_tags=req.structured_tags)
         return {'ok': True, 'payload': {'image': meta, 'items': list_library_images(), **_payload()}}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -4,7 +4,7 @@ import React, { useState } from 'react'
  * Navigation component: collapsible sidebar (level 1) + exported GROUPS for tab strip.
  *
  * Props:
- *   activeGroup: 'project' | 'scribble' | 'loco' | 'detection' | 'configuration' | 'tutorial'
+ *   activeGroup: 'project' | 'scribble' | 'loco' | 'detection' | 'analysis' | 'configuration' | 'tutorial'
  *   activeTab: string
  *   onGroupChange: (group) => void
  *   onTabChange: (tab) => void
@@ -34,6 +34,7 @@ const GROUPS = [
       { key: 'workbench', label: 'Scribbles y Experimentos' },
       { key: 'review', label: 'Revision de Resultados' },
       { key: 'models', label: 'Modelos de Asistencia' },
+      { key: 'scribbleModelManager', label: 'Gestion de Modelos' },
     ],
   },
   {
@@ -47,6 +48,7 @@ const GROUPS = [
       { key: 'locoAugment', label: 'Aumentacion' },
       { key: 'locoTraining', label: 'Entrenamiento' },
       { key: 'locoTest', label: 'Test de Modelo' },
+      { key: 'locoModelManager', label: 'Gestion de Modelos' },
     ],
   },
   {
@@ -58,6 +60,17 @@ const GROUPS = [
     tabs: [
       { key: 'locoModel', label: 'Detector LOCO' },
       { key: 'diameter', label: 'Medicion de Diametros' },
+    ],
+  },
+  {
+    key: 'analysis',
+    label: 'Analisis',
+    fullLabel: 'Grupo 4: Analisis de diametros',
+    icon: 'bar_chart',
+    section: 'production',
+    tabs: [
+      { key: 'diameterAnalysisSelect', label: 'Seleccion de imagenes' },
+      { key: 'diameterAnalysisHistogram', label: 'Histograma' },
     ],
   },
   {
@@ -101,12 +114,17 @@ export function legacyToGroup(tab) {
     workbench: { group: 'scribble', tab: 'workbench' },
     review: { group: 'scribble', tab: 'review' },
     models: { group: 'scribble', tab: 'models' },
+    scribbleModelManager: { group: 'scribble', tab: 'scribbleModelManager' },
     locoDataset: { group: 'loco', tab: 'locoDataset' },
     locoAugment: { group: 'loco', tab: 'locoAugment' },
     locoTraining: { group: 'loco', tab: 'locoTraining' },
     locoTest: { group: 'loco', tab: 'locoTest' },
+    locoModelManager: { group: 'loco', tab: 'locoModelManager' },
     locoModel: { group: 'detection', tab: 'locoModel' },
     diameter: { group: 'detection', tab: 'diameter' },
+    diameterAnalysis: { group: 'analysis', tab: 'diameterAnalysisSelect' },
+    diameterAnalysisSelect: { group: 'analysis', tab: 'diameterAnalysisSelect' },
+    diameterAnalysisHistogram: { group: 'analysis', tab: 'diameterAnalysisHistogram' },
     projectTransfer: { group: 'configuration', tab: 'projectTransfer' },
     tutorialHub: { group: 'tutorial', tab: 'tutorialOverview' },
     loco: { group: 'detection', tab: 'locoModel' },
@@ -122,12 +140,17 @@ export function groupToLegacy(group, tab) {
     'scribble:workbench': 'workbench',
     'scribble:review': 'review',
     'scribble:models': 'models',
+    'scribble:scribbleModelManager': 'scribbleModelManager',
     'loco:locoDataset': 'locoDataset',
     'loco:locoAugment': 'locoAugment',
     'loco:locoTraining': 'locoTraining',
     'loco:locoTest': 'locoTest',
+    'loco:locoModelManager': 'locoModelManager',
     'detection:locoModel': 'locoModel',
     'detection:diameter': 'diameter',
+    'detection:diameterAnalysis': 'diameterAnalysisSelect',
+    'analysis:diameterAnalysisSelect': 'diameterAnalysisSelect',
+    'analysis:diameterAnalysisHistogram': 'diameterAnalysisHistogram',
     'configuration:projectTransfer': 'projectTransfer',
     'tutorial:tutorialOverview': 'tutorialHub',
     'tutorial:tutorialScribble': 'tutorialHub',
@@ -144,10 +167,7 @@ export default function Navigation({ activeGroup, onGroupChange, onTabChange, fo
   const isCollapsed = forceExpanded ? false : collapsed
 
   function handleGroupClick(key) {
-    const group = GROUPS.find((item) => item.key === key)
-    const firstTab = group ? group.tabs[0].key : 'workbench'
     onGroupChange(key)
-    onTabChange(firstTab)
   }
 
   return (

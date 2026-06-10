@@ -181,6 +181,27 @@ def upsert_project(
     if active or not state.get('active_project_id'):
         state['active_project_id'] = pid
     _save_state(state)
+    previous_name = str(previous.get('name') or '').strip()
+    if existing_idx >= 0 and previous_name and previous_name != clean_name:
+        for image in list_library_images():
+            image_id = str(image.get('image_id') or '')
+            project_ids = _normalize_tags(image.get('project_ids') or [])
+            if not image_id or pid not in project_ids:
+                continue
+            structured = [tag for tag in normalize_structured_tags(image.get('structured_tags') or image.get('tags') or []) if str(tag.get('category') or '') != 'project']
+            structured = normalize_structured_tags([{'category': 'project', 'label': clean_name}, *structured])
+            tags_next = _legacy_tags_from_structured(structured)
+            update_library_image_tags(image_id, tags_next, project_ids, structured_tags=structured)
+            try:
+                from .diameter_research.analysis_store import sync_image_metadata
+                sync_image_metadata(image_id, project_ids=project_ids, tags=tags_next, structured_tags=structured)
+            except Exception:
+                pass
+        try:
+            from .diameter_research.analysis_store import rewrite_analysis_tags
+            rewrite_analysis_tags('project', previous_name, clean_name)
+        except Exception:
+            pass
     return item
 
 
@@ -212,6 +233,8 @@ def delete_project(project_id: str) -> dict[str, Any]:
                 project_ids,
                 structured_tags=image.get('structured_tags') or image.get('tags') or [],
             )
+            from .diameter_research.analysis_store import sync_image_metadata
+            sync_image_metadata(image_id, project_ids=project_ids, tags=image.get('tags') or [], structured_tags=image.get('structured_tags') or image.get('tags') or [])
     return saved
 
 
@@ -229,6 +252,7 @@ def tag_catalog() -> dict[str, list[str]]:
         'project': set(),
         'fiber_type': set(),
         'creator': set(),
+        'analysis': set(),
         'unit': {'um', 'nm'},
         'other': set(),
     }
@@ -268,6 +292,17 @@ def tag_catalog() -> dict[str, list[str]]:
                 label = str(tag.get('label'))
                 if _visible_tag_allowed(category, label, hidden):
                     values[category].add(label)
+    try:
+        from .diameter_research.analysis_store import list_analyses
+        for analysis in list_analyses():
+            for tag in normalize_structured_tags(analysis.get('structured_tags') or []):
+                category = str(tag.get('category') or 'other')
+                if category in values and tag.get('label'):
+                    label = str(tag.get('label'))
+                    if _visible_tag_allowed(category, label, hidden):
+                        values[category].add(label)
+    except Exception:
+        pass
     return {key: sorted(list(items), key=str.lower) for key, items in values.items()}
 
 
@@ -275,7 +310,7 @@ def tag_catalog_detailed() -> dict[str, Any]:
     catalog = tag_catalog()
     hidden = _load_tag_overrides().get('hidden') or []
     rows: list[dict[str, Any]] = []
-    categories = ['project', 'fiber_type', 'creator', 'size', 'unit', 'other']
+    categories = ['project', 'fiber_type', 'creator', 'analysis', 'size', 'unit', 'other']
     for category in categories:
         for label in catalog.get(category, []):
             rows.append({'category': category, 'label': label, 'hidden': False})
@@ -344,6 +379,8 @@ def rename_tag(category: str, old_label: str, new_label: str) -> dict[str, Any]:
             continue
         structured = _rewrite_tag_items(image.get('structured_tags') or image.get('tags') or [], category, old_label, clean_new)
         update_library_image_tags(image_id, _legacy_tags_from_structured(structured), image.get('project_ids') or [], structured_tags=structured)
+    from .diameter_research.analysis_store import rewrite_analysis_tags
+    rewrite_analysis_tags(category, old_label, clean_new)
     set_tag_hidden(category, old_label, False)
     return tag_catalog_detailed()
 
@@ -370,5 +407,7 @@ def delete_tag(category: str, label: str) -> dict[str, Any]:
                 continue
             structured = _rewrite_tag_items(image.get('structured_tags') or image.get('tags') or [], category, label, remove=True)
             update_library_image_tags(image_id, _legacy_tags_from_structured(structured), image.get('project_ids') or [], structured_tags=structured)
+    from .diameter_research.analysis_store import rewrite_analysis_tags
+    rewrite_analysis_tags(category, label, remove=True)
     set_tag_hidden(category, label, True)
     return tag_catalog_detailed()

@@ -21,7 +21,7 @@ from sklearn.model_selection import train_test_split
 
 from .features import build_features
 from .image_codec import apply_mask_overlay, encode_display_b64, encode_gray_png_b64, to_uint8_rgb
-from .library_store import list_library_images, load_library_image, load_library_thumbnail
+from .library_store import list_library_images, load_library_image, load_library_thumbnail, normalize_structured_tags
 from .persistence import OUTPUT_ROOT, load_scribble_draft, load_run, save_run
 from .runner import RunArtifacts, compute_image_id, new_run_id, now_str
 from .scribble import labels_to_visual, scribble_label_counts
@@ -60,6 +60,9 @@ class PredictModelReq(BaseModel):
     image_id: str
     model_id: str = ''
     min_confidence: float = 0.72
+    fiber_confidence: float | None = None
+    halo_confidence: float | None = None
+    background_confidence: float | None = None
     include_fiber: bool = True
     include_halo: bool = True
     include_background: bool = False
@@ -70,6 +73,9 @@ class PredictMaskReq(BaseModel):
     image_id: str
     model_id: str = ''
     min_confidence: float = 0.72
+    fiber_confidence: float | None = None
+    halo_confidence: float | None = None
+    background_confidence: float | None = None
     include_fiber: bool = True
     include_halo: bool = True
     include_background: bool = False
@@ -77,6 +83,13 @@ class PredictMaskReq(BaseModel):
 
 class ModelIdReq(BaseModel):
     model_id: str
+
+
+class ModelMetaUpdateReq(BaseModel):
+    model_id: str
+    model_name: str = ''
+    model_tags: list[dict[str, Any]] = Field(default_factory=list)
+    notes: str = ''
 
 
 def _now() -> str:
@@ -131,6 +144,87 @@ def _read_meta(model_id: str) -> dict[str, Any]:
     return dict(json.loads(mpath.read_text(encoding='utf-8')) or {})
 
 
+def _write_meta(model_id: str, meta: dict[str, Any]) -> None:
+    mpath = _model_dir(model_id) / 'meta.json'
+    if not mpath.exists():
+        raise FileNotFoundError(f'Modelo no encontrado: {model_id}')
+    mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _dedupe_structured_tags(items: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tag in normalize_structured_tags(items):
+        key = json.dumps(tag, sort_keys=True, ensure_ascii=False).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+    return out
+
+
+def _model_training_param_tags(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = meta or {}
+    params = payload.get('params') or {}
+    classifier_labels = {
+        'extratrees': 'ExtraTrees',
+        'rf': 'RandomForest',
+        'catboost': 'CatBoost',
+        'xgboost': 'XGBoost',
+    }
+    class_labels = {
+        'multiclass': 'fibra / halo / background',
+        'binary': 'fibra vs resto',
+    }
+    tags: list[dict[str, Any]] = []
+
+    def add(label: str) -> None:
+        value = str(label or '').strip()
+        if value:
+            tags.append({'category': 'other', 'label': value})
+
+    class_mode = str(payload.get('class_mode') or '').strip()
+    if class_mode:
+        add(f"Clases: {class_labels.get(class_mode, class_mode)}")
+    classifier = str(payload.get('classifier') or '').strip()
+    if classifier:
+        add(f"Modelo: {classifier_labels.get(classifier, classifier)}")
+    feature_variant = str(payload.get('feature_variant') or '').strip()
+    if feature_variant:
+        add(f"Features: {feature_variant}")
+    if params.get('n_estimators') is not None:
+        add(f"Arboles: {params.get('n_estimators')}")
+    if params.get('max_samples_per_class') is not None:
+        add(f"Max/clase: {params.get('max_samples_per_class')}")
+    if params.get('max_samples_per_image_class') is not None:
+        add(f"Max/imagen/clase: {params.get('max_samples_per_image_class')}")
+    if payload.get('image_count') is not None:
+        add(f"Imagenes: {payload.get('image_count')}")
+    if payload.get('train_samples') is not None:
+        add(f"Muestras: {payload.get('train_samples')}")
+    add(f"Tuning: {'si' if bool(payload.get('is_tuning_trial')) else 'no'}")
+    return _dedupe_structured_tags(tags)
+
+
+def _model_image_tags(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    image_ids = {str(x or '').strip() for x in (meta.get('image_ids') or []) if str(x or '').strip()}
+    tags: list[dict[str, Any]] = []
+    for row in meta.get('images') or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get('structured_tags') or row.get('tags'):
+            tags.extend(normalize_structured_tags(row.get('structured_tags') or row.get('tags') or []))
+        iid = str(row.get('image_id') or '').strip()
+        if iid:
+            image_ids.add(iid)
+    if image_ids:
+        for image in list_library_images():
+            if str(image.get('image_id') or '') not in image_ids:
+                continue
+            tags.extend(normalize_structured_tags(image.get('structured_tags') or image.get('tags') or []))
+    return _dedupe_structured_tags(tags)
+
+
 def _registry_item(meta: dict[str, Any]) -> dict[str, Any]:
     return {
         'model_id': str(meta.get('model_id') or ''),
@@ -144,6 +238,10 @@ def _registry_item(meta: dict[str, Any]) -> dict[str, Any]:
         'train_samples': int(meta.get('train_samples') or 0),
         'metrics': dict(meta.get('metrics') or {}),
         'notes': str(meta.get('notes') or ''),
+        'image_ids': [str(x or '') for x in (meta.get('image_ids') or []) if str(x or '')],
+        'image_tags': _model_image_tags(meta),
+        'model_tags': _dedupe_structured_tags(meta.get('model_tags') or []),
+        'auto_model_tags': _model_training_param_tags(meta),
     }
 
 
@@ -343,7 +441,7 @@ def _fit_classifier(req: TrainModelReq, x: np.ndarray, y: np.ndarray):
             allow_writing_files=False,
         )
     elif kind == 'xgboost':
-        objective = 'multi:softmax' if str(req.class_mode) == 'multiclass' else 'binary:logistic'
+        objective = 'multi:softprob' if str(req.class_mode) == 'multiclass' else 'binary:logistic'
         num_class = int(len(np.unique(y))) if str(req.class_mode) == 'multiclass' else None
         clf = XGBClassifier(
             n_estimators=n_estimators,
@@ -427,6 +525,84 @@ def _class_probabilities(clf: Any, x_all: np.ndarray, shape_hw: tuple[int, int])
         return out
     for idx, cls in enumerate(classes):
         out[cls] = proba[:, idx].astype(np.float32).reshape(shape_hw)
+    return out
+
+
+def _prediction_thresholds(req: PredictModelReq | PredictMaskReq) -> dict[int, float]:
+    fallback = float(np.clip(req.min_confidence, 0.001, 0.999))
+
+    def one(value: float | None) -> float:
+        if value is None:
+            return fallback
+        return float(np.clip(value, 0.001, 0.999))
+
+    return {
+        1: one(req.fiber_confidence),
+        2: one(req.halo_confidence),
+        3: one(req.background_confidence),
+    }
+
+
+def _prediction_suggestion(
+    probs: dict[int, np.ndarray],
+    allowed: set[int],
+    thresholds: dict[int, float],
+    shape_hw: tuple[int, int],
+) -> np.ndarray:
+    suggestion = np.zeros(shape_hw, dtype=np.uint8)
+    if not probs:
+        return suggestion
+    valid_classes = [cls for cls in (1, 2, 3) if cls in allowed and cls in probs]
+    if not valid_classes:
+        return suggestion
+
+    # Build one independent threshold mask per class. The only shared step is resolving
+    # overlaps because the final scribble map can store a single class per pixel.
+    margin_stack: list[np.ndarray] = []
+    for cls in valid_classes:
+        prob = np.asarray(probs[cls], dtype=np.float32)
+        threshold = thresholds.get(cls, 0.72)
+        margin_stack.append(np.where(prob >= threshold, prob - threshold, -1.0))
+    margins = np.stack(margin_stack, axis=-1)
+    best_idx = np.argmax(margins, axis=-1)
+    best_margin = np.max(margins, axis=-1)
+    for idx, cls in enumerate(valid_classes):
+        suggestion[(best_idx == idx) & (best_margin >= 0.0)] = int(cls)
+    return suggestion
+
+
+def _prediction_probability_summary(
+    probs: dict[int, np.ndarray],
+    allowed: set[int],
+    thresholds: dict[int, float],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    names = {1: 'fiber', 2: 'halo', 3: 'background'}
+    for cls, name in names.items():
+        if cls not in probs:
+            continue
+        arr = np.asarray(probs[cls], dtype=np.float32)
+        finite = arr[np.isfinite(arr)]
+        threshold = thresholds.get(cls, 0.72)
+        if finite.size == 0:
+            out[name] = {
+                'enabled': bool(cls in allowed),
+                'threshold': float(threshold),
+                'above_threshold': 0,
+            }
+            continue
+        quantiles = np.quantile(finite, [0.5, 0.75, 0.9, 0.95, 0.99])
+        out[name] = {
+            'enabled': bool(cls in allowed),
+            'threshold': float(threshold),
+            'above_threshold': int(np.sum(arr >= threshold)) if cls in allowed else 0,
+            'max': float(np.max(finite)),
+            'p50': float(quantiles[0]),
+            'p75': float(quantiles[1]),
+            'p90': float(quantiles[2]),
+            'p95': float(quantiles[3]),
+            'p99': float(quantiles[4]),
+        }
     return out
 
 
@@ -537,6 +713,27 @@ def set_default_model(req: ModelIdReq) -> dict[str, Any]:
     return {'ok': True, **payload}
 
 
+@router.post('/update-meta')
+def update_model_meta(req: ModelMetaUpdateReq) -> dict[str, Any]:
+    mid = str(req.model_id or '').strip()
+    if not mid:
+        raise HTTPException(status_code=400, detail='model_id requerido.')
+    try:
+        meta = _read_meta(mid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail='Modelo no encontrado.')
+    name = str(req.model_name or '').strip()
+    if name:
+        meta['model_name'] = name
+    meta['model_tags'] = _dedupe_structured_tags(req.model_tags or [])
+    meta['notes'] = str(req.notes or '').strip()
+    meta['updated_at'] = _now()
+    _write_meta(mid, meta)
+    payload = _sync_registry()
+    item = next((m for m in payload.get('models', []) if str(m.get('model_id') or '') == mid), _registry_item(meta))
+    return {'ok': True, 'model': item, **payload}
+
+
 @router.post('/delete')
 def delete_model(req: ModelIdReq) -> dict[str, Any]:
     mid = str(req.model_id or '').strip()
@@ -571,9 +768,8 @@ def predict_model(req: PredictModelReq) -> dict[str, Any]:
     feats = build_features(rgb, variant=str(meta.get('feature_variant') or 'context'))
     h, w, c = feats.shape
     probs = _class_probabilities(clf, feats.reshape(-1, c), (h, w))
-    min_conf = float(np.clip(req.min_confidence, 0.05, 0.99))
-
-    suggestion = np.zeros((h, w), dtype=np.uint8)
+    min_conf = float(np.clip(req.min_confidence, 0.001, 0.999))
+    thresholds = _prediction_thresholds(req)
     allowed = set()
     if req.include_fiber:
         allowed.add(1)
@@ -581,16 +777,7 @@ def predict_model(req: PredictModelReq) -> dict[str, Any]:
         allowed.add(2)
     if req.include_background:
         allowed.add(3)
-
-    if probs:
-        stack_classes = sorted(probs.keys())
-        stack = np.stack([probs[cls] for cls in stack_classes], axis=-1)
-        best_idx = np.argmax(stack, axis=-1)
-        best_prob = np.max(stack, axis=-1)
-        for idx, cls in enumerate(stack_classes):
-            if cls not in allowed:
-                continue
-            suggestion[(best_idx == idx) & (best_prob >= min_conf)] = int(cls)
+    suggestion = _prediction_suggestion(probs, allowed, thresholds, (h, w))
 
     preview = _overlay_suggestion(rgb, suggestion)
     maps_b64: dict[str, str] = {}
@@ -599,6 +786,7 @@ def predict_model(req: PredictModelReq) -> dict[str, Any]:
             maps_b64[name] = encode_gray_png_b64((np.clip(probs[cls], 0.0, 1.0) * 255.0).astype(np.uint8))
     preview_b64, preview_mime = encode_display_b64(preview)
     counts = scribble_label_counts(suggestion)
+    probability_summary = _prediction_probability_summary(probs, allowed, thresholds)
     return {
         'ok': True,
         'model_id': model_id,
@@ -610,6 +798,13 @@ def predict_model(req: PredictModelReq) -> dict[str, Any]:
         'score_maps_b64': maps_b64,
         'counts': counts,
         'min_confidence': min_conf,
+        'class_confidence': {
+            'fiber': thresholds[1],
+            'halo': thresholds[2],
+            'background': thresholds[3],
+        },
+        'probability_summary': probability_summary,
+        'conflict_policy': 'independent_threshold_max_margin',
         'meta': {
             'class_mode': str(meta.get('class_mode') or ''),
             'classes': list(meta.get('classes') or []),
@@ -640,9 +835,8 @@ def predict_mask(req: PredictMaskReq) -> dict[str, Any]:
     feats = build_features(rgb, variant=str(meta.get('feature_variant') or 'context'))
     h, w, c = feats.shape
     probs = _class_probabilities(clf, feats.reshape(-1, c), (h, w))
-    min_conf = float(np.clip(req.min_confidence, 0.05, 0.99))
-
-    suggestion = np.zeros((h, w), dtype=np.uint8)
+    min_conf = float(np.clip(req.min_confidence, 0.001, 0.999))
+    thresholds = _prediction_thresholds(req)
     allowed = set()
     if req.include_fiber:
         allowed.add(1)
@@ -650,16 +844,8 @@ def predict_mask(req: PredictMaskReq) -> dict[str, Any]:
         allowed.add(2)
     if req.include_background:
         allowed.add(3)
-
-    if probs:
-        stack_classes = sorted(probs.keys())
-        stack = np.stack([probs[cls] for cls in stack_classes], axis=-1)
-        best_idx = np.argmax(stack, axis=-1)
-        best_prob = np.max(stack, axis=-1)
-        for idx, cls in enumerate(stack_classes):
-            if cls not in allowed:
-                continue
-            suggestion[(best_idx == idx) & (best_prob >= min_conf)] = int(cls)
+    suggestion = _prediction_suggestion(probs, allowed, thresholds, (h, w))
+    probability_summary = _prediction_probability_summary(probs, allowed, thresholds)
 
     # Build overlay from the suggestion mask
     overlay = apply_mask_overlay(rgb, suggestion, color=(0, 220, 80), alpha=0.35)
@@ -682,6 +868,13 @@ def predict_mask(req: PredictMaskReq) -> dict[str, Any]:
             'classifier': str(meta.get('classifier') or ''),
             'class_mode': str(meta.get('class_mode') or ''),
             'min_confidence': min_conf,
+            'class_confidence': {
+                'fiber': thresholds[1],
+                'halo': thresholds[2],
+                'background': thresholds[3],
+            },
+            'probability_summary': probability_summary,
+            'conflict_policy': 'independent_threshold_max_margin',
             'experiment_label': 'Prediccion de mascara',
             'run_status_level': 'success',
             # Include experiment metadata so save_run() writes group/display_name to the index.

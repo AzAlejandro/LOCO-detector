@@ -8,13 +8,14 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import tempfile
+import threading
 import time
 from typing import Any, Literal
 from uuid import uuid4
 import zipfile
 import zlib
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -54,9 +55,13 @@ class ExportEntry:
     project_ids: tuple[str, ...] = ()
 
 
+SCRIBBLE_RUN_REQUIRED_FILES = {'meta.json', 'scribble_map.npz', 'mask.png', 'overlay.png', 'input_image.png'}
+
+
 class ExportPrepareReq(BaseModel):
     categories: list[str] = Field(default_factory=list)
     project_ids: list[str] = Field(default_factory=list)
+    project_category_selection: dict[str, list[str]] = Field(default_factory=dict)
     mode: Literal['full', 'project'] = 'full'
 
 
@@ -67,6 +72,9 @@ class ImportApplyReq(BaseModel):
 
 
 _tokens: dict[str, dict[str, Any]] = {}
+_import_jobs: dict[str, dict[str, Any]] = {}
+_import_jobs_lock = threading.Lock()
+IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 
 
 def _category_definitions() -> dict[str, TransferCategory]:
@@ -199,6 +207,59 @@ def _model_dir_image_refs(meta_path: Path, selected_images: set[str]) -> set[str
     return ids & selected_images
 
 
+def _scribble_run_meta(run_dir: Path) -> dict[str, Any]:
+    meta = _read_json_file(run_dir / 'meta.json', {})
+    return meta if isinstance(meta, dict) else {}
+
+
+def _scribble_run_image_id(run_dir: Path) -> str:
+    return str(_scribble_run_meta(run_dir).get('image_id') or '').strip()
+
+
+def _scribble_run_is_complete(run_dir: Path) -> bool:
+    return run_dir.is_dir() and all((run_dir / name).is_file() for name in SCRIBBLE_RUN_REQUIRED_FILES)
+
+
+def _complete_scribble_run_ids_for_images(image_ids: set[str]) -> set[str]:
+    runs_root = scribble_persistence.OUTPUT_ROOT / 'runs'
+    out: set[str] = set()
+    if not image_ids or not runs_root.exists():
+        return out
+    for run_dir in runs_root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        if _scribble_run_image_id(run_dir) in image_ids and _scribble_run_is_complete(run_dir):
+            out.add(run_dir.name)
+    return out
+
+
+def _skipped_incomplete_scribble_runs(project_ids: list[str]) -> list[dict[str, str]]:
+    image_ids = _selected_image_ids(project_ids)
+    runs_root = scribble_persistence.OUTPUT_ROOT / 'runs'
+    if not image_ids or not runs_root.exists():
+        return []
+    skipped: list[dict[str, str]] = []
+    for run_dir in sorted((p for p in runs_root.iterdir() if p.is_dir()), key=lambda p: p.name):
+        image_id = _scribble_run_image_id(run_dir)
+        if image_id not in image_ids or _scribble_run_is_complete(run_dir):
+            continue
+        missing = [name for name in sorted(SCRIBBLE_RUN_REQUIRED_FILES) if not (run_dir / name).is_file()]
+        skipped.append({'run_id': run_dir.name, 'image_id': image_id, 'missing': ','.join(missing)})
+    return skipped
+
+
+def _filtered_scribble_index(path: Path, complete_run_ids: set[str]) -> bytes | None:
+    payload = _read_json_file(path, None)
+    if not isinstance(payload, dict):
+        return None
+    runs = [dict(item or {}) for item in (payload.get('runs') or []) if str((item or {}).get('run_id') or '') in complete_run_ids]
+    if not runs:
+        return None
+    out = dict(payload)
+    out['runs'] = runs
+    return json.dumps(out, ensure_ascii=False, indent=2).encode('utf-8')
+
+
 def _filtered_projects_json(project_ids: list[str]) -> bytes:
     state = _project_state()
     ids = set(project_ids)
@@ -248,6 +309,62 @@ def _cleanup_expired_tokens() -> None:
     for token, item in list(_tokens.items()):
         if now - float(item.get('created_ts') or 0.0) > TOKEN_TTL_SECONDS:
             _cleanup_token(token)
+    with _import_jobs_lock:
+        for job_id, job in list(_import_jobs.items()):
+            if now - float(job.get('created_ts') or 0.0) > IMPORT_JOB_TTL_SECONDS:
+                _import_jobs.pop(job_id, None)
+
+
+def _category_label(category_key: str) -> str:
+    definition = _category_definitions().get(str(category_key or ''))
+    return definition.label if definition else str(category_key or '')
+
+
+def _progress_category_rows(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        key = str(entry.get('category') or '')
+        row = rows.setdefault(key, {
+            'key': key,
+            'label': _category_label(key),
+            'status': 'pending',
+            'total_files': 0,
+            'processed_files': 0,
+            'imported': 0,
+            'skipped': 0,
+            'replaced': 0,
+        })
+        row['total_files'] += 1
+    return list(rows.values())
+
+
+def _set_import_job(job_id: str, **updates: Any) -> None:
+    with _import_jobs_lock:
+        job = _import_jobs.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job['updated_ts'] = time.time()
+
+
+def _update_import_job_category(job_id: str, category_key: str, **updates: Any) -> None:
+    with _import_jobs_lock:
+        job = _import_jobs.get(job_id)
+        if not job:
+            return
+        categories = list(job.get('categories') or [])
+        for row in categories:
+            if str(row.get('key') or '') == str(category_key or ''):
+                row.update(updates)
+                break
+        job['categories'] = categories
+        job['updated_ts'] = time.time()
+
+
+def _snapshot_import_job(job_id: str) -> dict[str, Any] | None:
+    with _import_jobs_lock:
+        job = _import_jobs.get(job_id)
+        return json.loads(json.dumps(job, ensure_ascii=False)) if job else None
 
 
 def _new_temp_dir() -> Path:
@@ -348,6 +465,25 @@ def _export_entries_for_source(
                 rows.append(ExportEntry(path=path, relative_path=relative, project_ids=_entry_project_ids_from_image_ids(refs, image_projects, selected)))
         return rows
 
+    if category_key == 'scribble_experiments' and source.key == 'runs':
+        for run_dir in sorted((p for p in source.root.iterdir() if p.is_dir()), key=lambda p: p.name) if source.root.exists() else []:
+            image_id = _scribble_run_image_id(run_dir)
+            if image_id not in images or not _scribble_run_is_complete(run_dir):
+                continue
+            project_tuple = _entry_project_ids_from_image_ids({image_id}, image_projects, selected)
+            for path, relative in _iter_source_files(TransferSource(source.key, run_dir)):
+                rows.append(ExportEntry(path=path, relative_path=PurePosixPath(run_dir.name, relative).as_posix(), project_ids=project_tuple))
+        return rows
+
+    if category_key == 'scribble_experiments' and source.key == 'index':
+        complete_run_ids = _complete_scribble_run_ids_for_images(images)
+        for image_id in sorted(images):
+            path = source.root / f'{image_id}.json'
+            data = _filtered_scribble_index(path, complete_run_ids)
+            if data:
+                rows.append(ExportEntry(path=None, relative_path=f'{image_id}.json', data=data, project_ids=_entry_project_ids_from_image_ids({image_id}, image_projects, selected)))
+        return rows
+
     owner_cache: dict[str, tuple[bool, tuple[str, ...]]] = {}
     for path, relative in _iter_source_files(source):
         parts = PurePosixPath(relative).parts
@@ -432,30 +568,85 @@ def _selected_categories(keys: list[str]) -> list[TransferCategory]:
     return selected
 
 
+def _normalize_project_category_selection(raw: Any) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    definitions = _category_definitions()
+    valid_projects = {str(item.get('project_id') or '') for item in _project_state().get('projects') or []}
+    normalized: dict[str, list[str]] = {}
+    for project_id, keys in raw.items():
+        pid = str(project_id or '').strip()
+        if not pid or (valid_projects and pid not in valid_projects) or not isinstance(keys, list):
+            continue
+        seen: set[str] = set()
+        selected: list[str] = []
+        for key in keys:
+            category_key = str(key or '').strip()
+            if category_key in definitions and category_key not in seen:
+                seen.add(category_key)
+                selected.append(category_key)
+        if selected:
+            normalized[pid] = selected
+    return normalized
+
+
+def _project_ids_by_category(project_category_selection: dict[str, list[str]]) -> dict[str, list[str]]:
+    by_category: dict[str, list[str]] = {}
+    for project_id, categories in project_category_selection.items():
+        for category in categories:
+            by_category.setdefault(category, [])
+            if project_id not in by_category[category]:
+                by_category[category].append(project_id)
+    return by_category
+
+
 def _zip_archive_path(category: str, source: str, relative_path: str) -> str:
     relative = _safe_relative_path(relative_path)
     return PurePosixPath('payload', category, source, *relative.parts).as_posix()
 
 
-def _create_export_zip(categories: list[str], zip_path: Path, *, mode: str = 'full', project_ids: list[str] | None = None) -> dict[str, Any]:
-    selected = _selected_categories(categories)
+def _create_export_zip(
+    categories: list[str],
+    zip_path: Path,
+    *,
+    mode: str = 'full',
+    project_ids: list[str] | None = None,
+    project_category_selection: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    per_project_selection = _normalize_project_category_selection(project_category_selection or {})
+    selection_by_category = _project_ids_by_category(per_project_selection)
+    if per_project_selection and 'projects' not in selection_by_category:
+        selection_by_category['projects'] = list(per_project_selection.keys())
+    selected = _selected_categories(list(selection_by_category.keys()) if per_project_selection else categories)
     export_mode = 'project' if mode == 'project' and project_ids else 'full'
     selected_project_ids = _normalize_project_ids(project_ids or []) if export_mode == 'project' else []
+    if per_project_selection:
+        export_mode = 'project'
+        selected_project_ids = _normalize_project_ids(list(per_project_selection.keys()))
+    skipped_incomplete_runs = _skipped_incomplete_scribble_runs(selected_project_ids) if export_mode == 'project' else []
     entries: list[dict[str, Any]] = []
+    written: dict[str, dict[str, Any]] = {}
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
         for category in selected:
+            category_project_ids = _normalize_project_ids(selection_by_category.get(category.key, selected_project_ids)) if per_project_selection else selected_project_ids
+            category_mode = 'project' if export_mode == 'project' and category_project_ids else 'full'
             for source in category.sources:
                 source_entries = _export_entries_for_source(
                     category.key,
                     source,
-                    mode=export_mode,
-                    project_ids=selected_project_ids,
-                    selected_images=_selected_image_ids(selected_project_ids),
+                    mode=category_mode,
+                    project_ids=category_project_ids,
+                    selected_images=_selected_image_ids(category_project_ids),
                     image_project_map=_library_image_project_map(),
                 )
                 for entry in source_entries:
                     archive_path = _zip_archive_path(category.key, source.key, entry.relative_path)
+                    if archive_path in written:
+                        current_projects = set(written[archive_path].get('project_ids') or [])
+                        current_projects.update(entry.project_ids or category_project_ids)
+                        written[archive_path]['project_ids'] = sorted(current_projects)
+                        continue
                     if entry.data is not None:
                         archive.writestr(archive_path, entry.data)
                     elif entry.path is not None:
@@ -471,16 +662,20 @@ def _create_export_zip(categories: list[str], zip_path: Path, *, mode: str = 'fu
                             'archive_path': archive_path,
                             'size_bytes': int(info.file_size),
                             'crc32': int(info.CRC),
-                            'project_ids': list(entry.project_ids or selected_project_ids),
+                            'project_ids': list(entry.project_ids or category_project_ids),
                         }
                     )
+                    written[archive_path] = entries[-1]
         manifest = {
             'format_version': FORMAT_VERSION,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'export_mode': export_mode,
+            'export_selection_mode': 'per_project' if per_project_selection else 'global',
             'project_ids': selected_project_ids,
             'projects': _project_rows(selected_project_ids),
+            'project_category_selection': per_project_selection,
             'project_filter_policy': 'include_if_touches' if export_mode == 'project' else '',
+            'skipped_incomplete_runs': skipped_incomplete_runs,
             'categories': [item.key for item in selected],
             'entries': entries,
         }
@@ -708,24 +903,85 @@ def _merge_measurements_file(archive: zipfile.ZipFile, entry: dict[str, Any]) ->
     return {'imported': imported, 'replaced': replaced, 'skipped': 0}
 
 
-def _apply_import(zip_path: Path, entries: list[dict[str, Any]], overwrite: bool, project_ids: list[str] | None = None) -> dict[str, Any]:
+def _repair_scribble_run_indices() -> dict[str, int]:
+    index_root = scribble_persistence.OUTPUT_ROOT / 'index'
+    runs_root = scribble_persistence.OUTPUT_ROOT / 'runs'
+    checked = 0
+    repaired = 0
+    removed = 0
+    if not index_root.exists():
+        return {'checked': checked, 'repaired': repaired, 'removed_runs': removed}
+    for path in sorted(index_root.glob('*.json')):
+        payload = _read_json_file(path, None)
+        if not isinstance(payload, dict):
+            continue
+        checked += 1
+        original = [dict(item or {}) for item in (payload.get('runs') or []) if isinstance(item, dict)]
+        keep: list[dict[str, Any]] = []
+        for row in original:
+            run_id = str(row.get('run_id') or '').strip()
+            if run_id and _scribble_run_is_complete(runs_root / run_id):
+                keep.append(row)
+        if len(keep) == len(original):
+            continue
+        removed += len(original) - len(keep)
+        repaired += 1
+        if keep:
+            out = dict(payload)
+            out['runs'] = keep
+            path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
+        else:
+            path.unlink(missing_ok=True)
+    return {'checked': checked, 'repaired': repaired, 'removed_runs': removed}
+
+
+def _apply_import(
+    zip_path: Path,
+    entries: list[dict[str, Any]],
+    overwrite: bool,
+    project_ids: list[str] | None = None,
+    progress: Any = None,
+) -> dict[str, Any]:
     imported = 0
     skipped = 0
     replaced = 0
     per_category: dict[str, dict[str, int]] = {}
     selected_project_ids = [str(pid or '').strip() for pid in (project_ids or []) if str(pid or '').strip()]
     entries = _filter_entries_by_projects(entries, selected_project_ids)
+    if progress:
+        progress({
+            'event': 'start',
+            'total_files': len(entries),
+            'categories': _progress_category_rows(entries),
+        })
     with zipfile.ZipFile(zip_path, 'r') as archive:
         for entry in entries:
             category = str(entry['category'])
             row = per_category.setdefault(category, {'imported': 0, 'skipped': 0, 'replaced': 0})
             target = _safe_destination(category, str(entry['source']), str(entry['path']))
+            if progress:
+                progress({
+                    'event': 'entry_start',
+                    'category': category,
+                    'file': str(entry.get('path') or entry.get('archive_path') or ''),
+                    'summary': {'imported': imported, 'skipped': skipped, 'replaced': replaced},
+                })
             if category == 'projects' and str(entry['source']) == 'projects' and str(entry['path']) == 'projects.json':
                 result = _merge_projects_file(zip_path, archive, entry, selected_project_ids)
                 imported += result['imported']
                 replaced += result['replaced']
                 row['imported'] += result['imported']
                 row['replaced'] += result['replaced']
+                if progress:
+                    progress({
+                        'event': 'entry_done',
+                        'category': category,
+                        'file': str(entry.get('path') or entry.get('archive_path') or ''),
+                        'imported_delta': result['imported'],
+                        'skipped_delta': result.get('skipped', 0),
+                        'replaced_delta': result['replaced'],
+                        'summary': {'imported': imported, 'skipped': skipped, 'replaced': replaced},
+                    })
                 continue
             if category == 'diameter_analysis' and str(entry['source']) == 'diameter_analysis' and str(entry['path']) == 'measurements.json':
                 result = _merge_measurements_file(archive, entry)
@@ -733,19 +989,56 @@ def _apply_import(zip_path: Path, entries: list[dict[str, Any]], overwrite: bool
                 replaced += result['replaced']
                 row['imported'] += result['imported']
                 row['replaced'] += result['replaced']
+                if progress:
+                    progress({
+                        'event': 'entry_done',
+                        'category': category,
+                        'file': str(entry.get('path') or entry.get('archive_path') or ''),
+                        'imported_delta': result['imported'],
+                        'skipped_delta': result.get('skipped', 0),
+                        'replaced_delta': result['replaced'],
+                        'summary': {'imported': imported, 'skipped': skipped, 'replaced': replaced},
+                    })
                 continue
             exists = target.exists()
             if exists and not overwrite:
                 skipped += 1
                 row['skipped'] += 1
+                if progress:
+                    progress({
+                        'event': 'entry_done',
+                        'category': category,
+                        'file': str(entry.get('path') or entry.get('archive_path') or ''),
+                        'imported_delta': 0,
+                        'skipped_delta': 1,
+                        'replaced_delta': 0,
+                        'summary': {'imported': imported, 'skipped': skipped, 'replaced': replaced},
+                    })
                 continue
             _copy_member_atomic(archive, entry, target)
             imported += 1
             row['imported'] += 1
+            replaced_delta = 0
             if exists:
                 replaced += 1
                 row['replaced'] += 1
-    return {'imported_count': imported, 'skipped_count': skipped, 'replaced_count': replaced, 'categories': per_category}
+                replaced_delta = 1
+            if progress:
+                progress({
+                    'event': 'entry_done',
+                    'category': category,
+                    'file': str(entry.get('path') or entry.get('archive_path') or ''),
+                    'imported_delta': 1,
+                    'skipped_delta': 0,
+                    'replaced_delta': replaced_delta,
+                    'summary': {'imported': imported, 'skipped': skipped, 'replaced': replaced},
+                })
+    if progress:
+        progress({'event': 'repair_start', 'label': 'Actualizando indices'})
+    repair = _repair_scribble_run_indices()
+    if progress:
+        progress({'event': 'repair_done', 'label': 'Actualizando indices', 'repair': repair})
+    return {'imported_count': imported, 'skipped_count': skipped, 'replaced_count': replaced, 'categories': per_category, 'scribble_index_repair': repair}
 
 
 async def _save_upload(upload: UploadFile, path: Path) -> None:
@@ -761,17 +1054,108 @@ async def _save_upload(upload: UploadFile, path: Path) -> None:
             destination.write(chunk)
 
 
+def _run_import_job(job_id: str, token: str, overwrite: bool, project_ids: list[str]) -> None:
+    def emit(event: dict[str, Any]) -> None:
+        kind = str(event.get('event') or '')
+        if kind == 'start':
+            _set_import_job(
+                job_id,
+                status='running',
+                total_files=int(event.get('total_files') or 0),
+                processed_files=0,
+                categories=list(event.get('categories') or []),
+                current_category='',
+                current_file='',
+                imported_count=0,
+                skipped_count=0,
+                replaced_count=0,
+            )
+            return
+        if kind == 'entry_start':
+            category = str(event.get('category') or '')
+            _set_import_job(
+                job_id,
+                status='running',
+                current_category=_category_label(category),
+                current_file=str(event.get('file') or ''),
+            )
+            _update_import_job_category(job_id, category, status='running')
+            return
+        if kind == 'entry_done':
+            category = str(event.get('category') or '')
+            with _import_jobs_lock:
+                job = _import_jobs.get(job_id)
+                if not job:
+                    return
+                job['processed_files'] = int(job.get('processed_files') or 0) + 1
+                summary = dict(event.get('summary') or {})
+                job['imported_count'] = int(summary.get('imported') or job.get('imported_count') or 0)
+                job['skipped_count'] = int(summary.get('skipped') or job.get('skipped_count') or 0)
+                job['replaced_count'] = int(summary.get('replaced') or job.get('replaced_count') or 0)
+                categories = list(job.get('categories') or [])
+                for row in categories:
+                    if str(row.get('key') or '') != category:
+                        continue
+                    row['processed_files'] = int(row.get('processed_files') or 0) + 1
+                    row['imported'] = int(row.get('imported') or 0) + int(event.get('imported_delta') or 0)
+                    row['skipped'] = int(row.get('skipped') or 0) + int(event.get('skipped_delta') or 0)
+                    row['replaced'] = int(row.get('replaced') or 0) + int(event.get('replaced_delta') or 0)
+                    row['status'] = 'completed' if int(row.get('processed_files') or 0) >= int(row.get('total_files') or 0) else 'running'
+                    break
+                job['categories'] = categories
+                job['updated_ts'] = time.time()
+            return
+        if kind == 'repair_start':
+            _set_import_job(job_id, current_category=str(event.get('label') or 'Actualizando indices'), current_file='')
+            return
+        if kind == 'repair_done':
+            _set_import_job(job_id, scribble_index_repair=dict(event.get('repair') or {}))
+
+    _set_import_job(job_id, status='running')
+    try:
+        item = _tokens.get(str(token or ''))
+        if not item or item.get('kind') != 'import':
+            raise ValueError('Importacion no encontrada o expirada.')
+        zip_path = Path(item['zip_path'])
+        manifest = _validate_import_zip(zip_path)
+        result = _apply_import(zip_path, list(manifest['entries']), bool(overwrite), project_ids, progress=emit)
+        _set_import_job(
+            job_id,
+            status='completed',
+            current_category='',
+            current_file='',
+            result=result,
+            imported_count=int(result.get('imported_count') or 0),
+            skipped_count=int(result.get('skipped_count') or 0),
+            replaced_count=int(result.get('replaced_count') or 0),
+        )
+    except Exception as exc:
+        _set_import_job(job_id, status='error', error=str(exc))
+    finally:
+        _cleanup_token(token)
+
+
 @router.get('/catalog')
 def project_transfer_catalog(project_ids: str = '', mode: str = 'full') -> dict[str, Any]:
     _cleanup_expired_tokens()
     ids = _normalize_project_ids([item.strip() for item in str(project_ids or '').split(',') if item.strip()])
     export_mode = 'project' if str(mode or '') == 'project' and ids else 'full'
+    all_projects = _project_state().get('projects') or []
+    project_catalog_ids = ids if ids else [str(item.get('project_id') or '') for item in all_projects if str(item.get('project_id') or '')]
     return {
         'ok': True,
         'mode': export_mode,
         'project_ids': ids,
         'projects': _project_rows(ids),
         'categories': [_category_summary(item, export_mode, ids) for item in _category_definitions().values()],
+        'project_catalogs': [
+            {
+                'project_id': pid,
+                'project': (_project_rows([pid]) or [{}])[0],
+                'categories': [_category_summary(item, 'project', [pid]) for item in _category_definitions().values()],
+            }
+            for pid in project_catalog_ids
+        ] if str(mode or '') == 'project' else [],
     }
 
 
@@ -780,12 +1164,20 @@ def project_transfer_export_prepare(req: ExportPrepareReq) -> dict[str, Any]:
     _cleanup_expired_tokens()
     temp_dir = _new_temp_dir()
     token = uuid4().hex
-    export_mode = 'project' if req.mode == 'project' and req.project_ids else 'full'
+    project_category_selection = _normalize_project_category_selection(req.project_category_selection)
+    selected_project_ids = list(project_category_selection.keys()) if project_category_selection else req.project_ids
+    export_mode = 'project' if req.mode == 'project' and selected_project_ids else 'full'
     zip_prefix = 'loco_project' if export_mode == 'project' else 'loco_training_project'
     zip_name = f"{zip_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
     zip_path = temp_dir / zip_name
     try:
-        manifest = _create_export_zip(req.categories, zip_path, mode=export_mode, project_ids=req.project_ids)
+        manifest = _create_export_zip(
+            req.categories,
+            zip_path,
+            mode=export_mode,
+            project_ids=selected_project_ids,
+            project_category_selection=project_category_selection,
+        )
     except ValueError as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -798,8 +1190,11 @@ def project_transfer_export_prepare(req: ExportPrepareReq) -> dict[str, Any]:
         'file_count': len(manifest['entries']),
         'categories': list(manifest['categories']),
         'export_mode': manifest.get('export_mode') or 'full',
+        'export_selection_mode': manifest.get('export_selection_mode') or 'global',
         'project_ids': list(manifest.get('project_ids') or []),
         'projects': list(manifest.get('projects') or []),
+        'project_category_selection': dict(manifest.get('project_category_selection') or {}),
+        'skipped_incomplete_runs': list(manifest.get('skipped_incomplete_runs') or []),
     }
 
 
@@ -833,12 +1228,60 @@ async def project_transfer_import_inspect(file: UploadFile = File(...)) -> dict[
         summary['projects'] = list(manifest.get('projects') or [])
         summary['project_ids'] = list(manifest.get('project_ids') or [])
         summary['export_mode'] = str(manifest.get('export_mode') or 'full')
+        summary['export_selection_mode'] = str(manifest.get('export_selection_mode') or 'global')
+        summary['project_category_selection'] = dict(manifest.get('project_category_selection') or {})
     except ValueError as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     token = uuid4().hex
     _tokens[token] = {'kind': 'import', 'temp_dir': str(temp_dir), 'zip_path': str(zip_path), 'manifest': manifest, 'created_ts': time.time()}
     return {'ok': True, 'token': token, 'summary': summary}
+
+
+@router.post('/import/start')
+def project_transfer_import_start(req: ImportApplyReq, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    _cleanup_expired_tokens()
+    token = str(req.token or '')
+    item = _tokens.get(token)
+    if not item or item.get('kind') != 'import':
+        raise HTTPException(status_code=404, detail='Importacion no encontrada o expirada.')
+    zip_path = Path(item['zip_path'])
+    try:
+        manifest = _validate_import_zip(zip_path)
+        selected_project_ids = [str(pid or '').strip() for pid in (req.project_ids or []) if str(pid or '').strip()]
+        entries = _filter_entries_by_projects(list(manifest['entries']), selected_project_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job_id = uuid4().hex
+    now = time.time()
+    with _import_jobs_lock:
+        _import_jobs[job_id] = {
+            'job_id': job_id,
+            'status': 'queued',
+            'created_ts': now,
+            'updated_ts': now,
+            'total_files': len(entries),
+            'processed_files': 0,
+            'current_category': '',
+            'current_file': '',
+            'categories': _progress_category_rows(entries),
+            'imported_count': 0,
+            'skipped_count': 0,
+            'replaced_count': 0,
+            'result': None,
+            'error': '',
+        }
+    background_tasks.add_task(_run_import_job, job_id, token, bool(req.overwrite), req.project_ids)
+    return {'ok': True, 'job_id': job_id, 'progress': _snapshot_import_job(job_id)}
+
+
+@router.get('/import/progress')
+def project_transfer_import_progress(job_id: str) -> dict[str, Any]:
+    _cleanup_expired_tokens()
+    job = _snapshot_import_job(str(job_id or ''))
+    if not job:
+        raise HTTPException(status_code=404, detail='Trabajo de importacion no encontrado o expirado.')
+    return {'ok': True, 'progress': job}
 
 
 @router.post('/import/apply')

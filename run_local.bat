@@ -57,7 +57,7 @@ if %errorlevel% neq 0 (
 
 :: --- Stop any leftover LOCO processes before starting ---
 echo [INFO] Stopping any leftover LOCO processes...
-powershell -ExecutionPolicy Bypass -File .\stop_servers.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\stop_servers.ps1
 echo.
 
 :: --- Install Python dependencies if needed ---
@@ -112,7 +112,7 @@ echo   Backend:  http://%BACKEND_HOST%:%BACKEND_PORT%
 echo ============================================
 echo.
 echo   Close this window to keep servers running.
-echo   Use stop_servers.ps1 to stop all processes.
+echo   Use tools\stop_servers.ps1 to stop all processes.
 echo.
 
 endlocal

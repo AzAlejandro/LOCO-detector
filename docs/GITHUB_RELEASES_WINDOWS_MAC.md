@@ -59,7 +59,7 @@ docker-compose.yml
 Dockerfile.backend
 Dockerfile.frontend
 run_docker.bat
-check_docker_ports.ps1
+tools/check_docker_ports.ps1
 README.md
 ```
 
@@ -73,7 +73,7 @@ iniciar_loco_detector.bat
 detener_loco_detector.bat
 iniciar_loco_detector.command
 detener_loco_detector.command
-README_USUARIO.md
+docs/README_USUARIO.md
 ```
 
 Esta guia muestra exactamente que debe contener cada uno.
@@ -354,9 +354,9 @@ chmod +x iniciar_loco_detector.command
 chmod +x detener_loco_detector.command
 ```
 
-## 6. Crear `README_USUARIO.md`
+## 6. Crear `docs/README_USUARIO.md`
 
-Crea `README_USUARIO.md` en la raiz del repositorio con este contenido:
+Crea `docs/README_USUARIO.md` en el repositorio con este contenido:
 
 ```markdown
 # LOCO Detector - Uso rapido
@@ -418,7 +418,7 @@ Abre PowerShell en Windows o Terminal en macOS y entra a la raiz del repositorio
 En Windows:
 
 ```powershell
-cd "C:\Users\alejo\Documents\GitHub\LOCO-detector"
+cd "C:\ruta\donde\clonaste\LOCO-detector"
 ```
 
 En macOS, usa la ruta donde tengas clonado el repo:
@@ -512,7 +512,7 @@ En Windows:
 mkdir release-assets\LOCO-detector-v1.0.0-release
 copy release-assets\loco-detector-v1.0.0-docker-images.tar.gz release-assets\LOCO-detector-v1.0.0-release\
 copy docker-compose.release.yml release-assets\LOCO-detector-v1.0.0-release\
-copy README_USUARIO.md release-assets\LOCO-detector-v1.0.0-release\
+copy docs\README_USUARIO.md release-assets\LOCO-detector-v1.0.0-release\README_USUARIO.md
 copy iniciar_loco_detector.bat release-assets\LOCO-detector-v1.0.0-release\
 copy detener_loco_detector.bat release-assets\LOCO-detector-v1.0.0-release\
 copy iniciar_loco_detector.command release-assets\LOCO-detector-v1.0.0-release\
@@ -525,7 +525,7 @@ En macOS:
 mkdir -p release-assets/LOCO-detector-v1.0.0-release
 cp release-assets/loco-detector-v1.0.0-docker-images.tar.gz release-assets/LOCO-detector-v1.0.0-release/
 cp docker-compose.release.yml release-assets/LOCO-detector-v1.0.0-release/
-cp README_USUARIO.md release-assets/LOCO-detector-v1.0.0-release/
+cp docs/README_USUARIO.md release-assets/LOCO-detector-v1.0.0-release/README_USUARIO.md
 cp iniciar_loco_detector.bat release-assets/LOCO-detector-v1.0.0-release/
 cp detener_loco_detector.bat release-assets/LOCO-detector-v1.0.0-release/
 cp iniciar_loco_detector.command release-assets/LOCO-detector-v1.0.0-release/

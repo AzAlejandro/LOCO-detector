@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "CHECKPOINT_REMOTE=origin"
 set "CHECKPOINT_SHA=7c0c9bdad809e6d4e28a3e305dfa480587898bdb"

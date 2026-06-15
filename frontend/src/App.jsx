@@ -1145,8 +1145,12 @@ export default function App() {
   const [localImageFiles, setLocalImageFiles] = useState([])
   const localImageFilesRef = useRef([])
   const [selectedLocalPath, setSelectedLocalPath] = useState('')
+  const [browserImageFiles, setBrowserImageFiles] = useState([])
+  const [selectedBrowserImageIndex, setSelectedBrowserImageIndex] = useState(0)
+  const [browserImageFolderName, setBrowserImageFolderName] = useState('')
   const [localImageSelectExpanded, setLocalImageSelectExpanded] = useState(false)
   const [localImageTutorialHint, setLocalImageTutorialHint] = useState({ start_dir: '', image_name: 'overview-reference.png', exists: false, image_exists: false })
+  const [systemCapabilities, setSystemCapabilities] = useState({ native_folder_picker: false, open_folder: false, runtime_os: '' })
   const [workspaceTab, setWorkspaceTab] = useState('projectSelect') // projectSelect | projectImages | projectTags | workbench | review | models | scribbleModelManager | locoDataset | locoAugment | locoTraining | locoTest | locoModelManager | locoModel | diameter | diameterAnalysisSelect | diameterAnalysisHistogram | projectTransfer | tutorialHub
   // New hierarchical navigation state
   const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('projectSelect').group)
@@ -1499,11 +1503,23 @@ export default function App() {
   const [transferMode, setTransferMode] = useState('project')
   const [transferExportMode, setTransferExportMode] = useState('simple')
   const [transferProjectIds, setTransferProjectIds] = useState([])
+  const [transferProjectCatalogs, setTransferProjectCatalogs] = useState([])
+  const [transferProjectCategorySelection, setTransferProjectCategorySelection] = useState({})
+  const [transferProjectOpen, setTransferProjectOpen] = useState({})
   const [transferImportProjectIds, setTransferImportProjectIds] = useState([])
   const [transferExportInfo, setTransferExportInfo] = useState(null)
   const [transferImportFile, setTransferImportFile] = useState(null)
   const [transferImportInspection, setTransferImportInspection] = useState(null)
   const [transferImportResult, setTransferImportResult] = useState(null)
+  const [transferImportJob, setTransferImportJob] = useState(null)
+  const [transferImportProgress, setTransferImportProgress] = useState(null)
+  const [transferImportRefreshing, setTransferImportRefreshing] = useState(false)
+  const [transferImportReloadModal, setTransferImportReloadModal] = useState(false)
+  const [transferImportVerifyStatus, setTransferImportVerifyStatus] = useState('idle')
+  const [transferImportVerifyError, setTransferImportVerifyError] = useState('')
+  const [transferImportVerifyMode, setTransferImportVerifyMode] = useState('quick')
+  const [transferImportVerifyDetails, setTransferImportVerifyDetails] = useState([])
+  const [transferImportVerifySummary, setTransferImportVerifySummary] = useState(null)
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState('')
   const [projectForm, setProjectForm] = useState({ project_id: '', name: '', tags_text: '', source_dir: '', active: true })
@@ -1631,11 +1647,10 @@ export default function App() {
           return runs?.length > 0
         })
       : [...modelDataset]
-    const required = modelDatasetRequiredTags.map((tag) => tagKey(tag)).filter(Boolean)
-    const tagged = required.length
+    const tagged = modelDatasetRequiredTags.length
       ? withMasks.filter((item) => {
-          const imageTags = structuredTagsWithProjects(item.structured_tags || item.tags || [], item.project_ids || []).map((tag) => tagKey(tag))
-          return required.every((key) => imageTags.includes(key))
+          const imageTags = structuredTagsWithProjects(item.structured_tags || item.tags || [], item.project_ids || [])
+          return tagsMatchCategorizedFilter(imageTags, modelDatasetRequiredTags)
         })
       : withMasks
     return [...tagged].sort((a, b) => {
@@ -1658,10 +1673,9 @@ export default function App() {
 
   const diamAnalysisFilteredImages = useMemo(() => {
     if (!diamAnalysisRequiredTags.length) return diamAnalysisImages
-    const required = diamAnalysisRequiredTags.map((tag) => tagKey(tag))
     return diamAnalysisImages.filter((img) => {
-      const imageTags = structuredTagsWithProjects(img.structured_tags || img.tags || [], img.project_ids || []).map((tag) => tagKey(tag))
-      return required.every((key) => imageTags.includes(key))
+      const imageTags = structuredTagsWithProjects(img.structured_tags || img.tags || [], img.project_ids || [])
+      return tagsMatchCategorizedFilter(imageTags, diamAnalysisRequiredTags)
     })
   }, [diamAnalysisImages, diamAnalysisRequiredTags])
 
@@ -2370,16 +2384,34 @@ export default function App() {
   async function refreshTransferCatalog() {
     await withLoad('transferCatalog', async () => {
       try {
-        const ids = transferMode === 'project' ? transferProjectIds : []
+        const ids = transferMode === 'project' && transferExportMode !== 'advanced' ? transferProjectIds : []
         const query = new URLSearchParams()
-        query.set('mode', ids.length ? 'project' : 'full')
+        query.set('mode', transferMode === 'project' ? 'project' : 'full')
         if (ids.length) query.set('project_ids', ids.join(','))
         const res = await apiGet(`/api/project-transfer/catalog?${query.toString()}`)
         const categories = Array.isArray(res?.categories) ? res.categories : []
+        const projectCatalogs = Array.isArray(res?.project_catalogs) ? res.project_catalogs : []
         const selection = {}
         categories.forEach((item) => { selection[item.key] = transferSelection[item.key] ?? item.selected !== false })
         setTransferCatalog(categories)
+        setTransferProjectCatalogs(projectCatalogs)
         setTransferSelection(selection)
+        setTransferProjectCategorySelection((prev) => {
+          const next = { ...(prev || {}) }
+          projectCatalogs.forEach((row) => {
+            const projectId = String(row.project_id || '')
+            if (!projectId || !transferProjectIds.includes(projectId) || next[projectId]) return
+            next[projectId] = (Array.isArray(row.categories) ? row.categories : [])
+              .filter((item) => item.selected !== false)
+              .map((item) => item.key)
+          })
+          if (transferExportMode !== 'advanced') {
+            Object.keys(next).forEach((projectId) => {
+              if (!transferProjectIds.includes(projectId)) delete next[projectId]
+            })
+          }
+          return next
+        })
       } catch (err) {
         toast('error', 'Configuracion', errMsg(err))
       }
@@ -2396,12 +2428,58 @@ export default function App() {
     setTransferSelection(next)
   }
 
+  function transferProjectCatalog(projectId) {
+    return transferProjectCatalogs.find((item) => String(item.project_id) === String(projectId)) || null
+  }
+
+  function transferProjectCategories(projectId) {
+    return Array.isArray(transferProjectCatalog(projectId)?.categories) ? transferProjectCatalog(projectId).categories : []
+  }
+
+  function toggleTransferProjectOpen(projectId) {
+    const id = String(projectId || '')
+    if (!id) return
+    setTransferProjectOpen((prev) => ({ ...prev, [id]: !prev[id] }))
+  }
+
+  function setAllTransferProjectCategories(projectId, checked) {
+    const id = String(projectId || '')
+    if (!id) return
+    const keys = checked ? transferProjectCategories(id).map((item) => item.key).filter(Boolean) : []
+    setTransferProjectCategorySelection((prev) => ({ ...prev, [id]: keys }))
+  }
+
+  function toggleTransferProjectCategory(projectId, categoryKey) {
+    const id = String(projectId || '')
+    const key = String(categoryKey || '')
+    if (!id || !key) return
+    setTransferProjectCategorySelection((prev) => {
+      const current = Array.isArray(prev?.[id]) ? prev[id] : []
+      const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+      return { ...(prev || {}), [id]: next }
+    })
+  }
+
   function toggleTransferProject(projectId) {
     const id = String(projectId || '')
     if (!id) return
     setTransferProjectIds((prev) => {
       const current = Array.isArray(prev) ? prev : []
-      return current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+      const exists = current.includes(id)
+      if (exists) {
+        setTransferProjectCategorySelection((sel) => {
+          const next = { ...(sel || {}) }
+          delete next[id]
+          return next
+        })
+        return current.filter((item) => item !== id)
+      }
+      setTransferProjectOpen((open) => ({ ...open, [id]: true }))
+      setTransferProjectCategorySelection((sel) => ({
+        ...(sel || {}),
+        [id]: transferProjectCategories(id).map((item) => item.key).filter(Boolean),
+      }))
+      return [...current, id]
     })
   }
 
@@ -2416,13 +2494,24 @@ export default function App() {
 
   async function prepareProjectExport() {
     const isProjectExport = transferMode === 'project'
-    const projectIds = isProjectExport ? transferProjectIds : []
+    const isPerProject = isProjectExport && transferExportMode === 'advanced'
+    const projectCategorySelection = {}
+    if (isPerProject) {
+      projects.forEach((project) => {
+        const projectId = project.project_id
+        const keys = Array.isArray(transferProjectCategorySelection?.[projectId]) ? transferProjectCategorySelection[projectId] : []
+        if (keys.length) projectCategorySelection[projectId] = keys
+      })
+    }
+    const projectIds = isPerProject ? Object.keys(projectCategorySelection) : (isProjectExport ? transferProjectIds : [])
     if (isProjectExport && !projectIds.length) {
       toast('warning', 'Exportar proyecto', 'Selecciona al menos un proyecto.')
       return
     }
-    const categories = transferCatalog.filter((item) => transferSelection[item.key]).map((item) => item.key)
-    if (!categories.length) {
+    const categories = isPerProject
+      ? Array.from(new Set(Object.values(projectCategorySelection).flat()))
+      : transferCatalog.filter((item) => transferSelection[item.key]).map((item) => item.key)
+    if (!categories.length && !Object.keys(projectCategorySelection).length) {
       toast('warning', 'Exportar proyecto', 'Selecciona al menos una categoria.')
       return
     }
@@ -2430,7 +2519,8 @@ export default function App() {
       try {
         const res = await apiPost('/api/project-transfer/export/prepare', {
           categories,
-          project_ids: projectIds,
+          project_ids: isPerProject ? Object.keys(projectCategorySelection) : projectIds,
+          project_category_selection: isPerProject ? projectCategorySelection : {},
           mode: isProjectExport ? 'project' : 'full',
         })
         setTransferExportInfo(res)
@@ -2459,6 +2549,9 @@ export default function App() {
         const res = await apiForm('/api/project-transfer/import/inspect', form)
         setTransferImportInspection(res)
         setTransferImportResult(null)
+        setTransferImportJob(null)
+        setTransferImportProgress(null)
+        setTransferImportRefreshing(false)
         const projectIds = Array.isArray(res?.summary?.project_ids) ? res.summary.project_ids : []
         setTransferImportProjectIds(projectIds)
         const conflicts = Number(res?.summary?.conflict_count || 0)
@@ -2470,20 +2563,185 @@ export default function App() {
     })
   }
 
+  function importSummaryCategoryKeys(summary = transferImportVerifySummary) {
+    const applied = summary?.applied_categories && typeof summary.applied_categories === 'object'
+      ? Object.keys(summary.applied_categories).map((key) => ({ key, file_count: 1 }))
+      : null
+    return new Set((Array.isArray(applied) ? applied : (Array.isArray(summary?.categories) ? summary.categories : []))
+      .filter((item) => Number(item?.file_count || 0) > 0)
+      .map((item) => String(item?.key || ''))
+      .filter(Boolean))
+  }
+
+  function selectedImportProjectIds(summary = transferImportVerifySummary) {
+    const selected = (Array.isArray(transferImportProjectIds) ? transferImportProjectIds : []).map(String).filter(Boolean)
+    if (selected.length) return selected
+    return (Array.isArray(summary?.project_ids) ? summary.project_ids : []).map(String).filter(Boolean)
+  }
+
+  async function runStrictImportVerification(summary = transferImportVerifySummary) {
+    const categories = importSummaryCategoryKeys(summary)
+    const details = []
+    const failures = []
+    const selectedProjects = new Set(selectedImportProjectIds(summary))
+
+    const projectRes = await apiGet('/api/projects/list')
+    const projectRows = Array.isArray(projectRes?.payload?.projects) ? projectRes.payload.projects : []
+    const projectIds = new Set(projectRows.map((project) => String(project?.project_id || '')).filter(Boolean))
+    const expectedProjectIds = selectedProjects.size
+      ? Array.from(selectedProjects)
+      : (Array.isArray(summary?.projects) ? summary.projects.map((project) => String(project?.project_id || '')).filter(Boolean) : [])
+    if (expectedProjectIds.length) {
+      const missing = expectedProjectIds.filter((projectId) => !projectIds.has(projectId))
+      const ok = missing.length === 0
+      details.push({ key: 'projects', label: 'Proyectos', ok, message: ok ? `${expectedProjectIds.length} proyecto(s) disponibles.` : `Faltan proyectos: ${missing.join(', ')}` })
+      if (!ok) failures.push('Proyectos')
+    }
+
+    const sid = sessionId || ''
+    const libraryPath = sid ? `/api/library/images?session_id=${encodeURIComponent(sid)}` : '/api/library/images'
+    const libraryRes = await apiGet(libraryPath)
+    const libraryItems = Array.isArray(libraryRes?.payload?.items) ? libraryRes.payload.items : []
+    const scopedImages = selectedProjects.size
+      ? libraryItems.filter((img) => (Array.isArray(img?.project_ids) ? img.project_ids : []).some((pid) => selectedProjects.has(String(pid))))
+      : libraryItems
+
+    if (categories.has('library')) {
+      const ok = scopedImages.length > 0
+      details.push({ key: 'library', label: 'Imagenes Scribble', ok, message: ok ? `${scopedImages.length} imagen(es) disponibles.` : 'No se encontraron imagenes importadas en biblioteca.' })
+      if (!ok) failures.push('Imagenes Scribble')
+    }
+
+    if (categories.has('scribble_experiments')) {
+      const candidates = scopedImages.length ? scopedImages : libraryItems
+      let runCount = 0
+      for (const image of candidates.slice(0, 80)) {
+        const iid = String(image?.image_id || '')
+        if (!iid) continue
+        try {
+          const res = await apiGet(`/api/results/list?image_id=${encodeURIComponent(iid)}`)
+          runCount += Array.isArray(res?.payload?.items) ? res.payload.items.length : 0
+          if (runCount > 0) break
+        } catch {}
+      }
+      const ok = runCount > 0
+      details.push({ key: 'scribble_experiments', label: 'Imagenes Scribble / mascaras', ok, message: ok ? 'Se encontraron runs/mascaras Scribble disponibles.' : 'No se encontraron runs/mascaras Scribble para las imagenes importadas.' })
+      if (!ok) failures.push('Imagenes Scribble / mascaras')
+    }
+
+    if (categories.has('assist_models')) {
+      const res = await apiGet('/api/assist-models/list')
+      const models = Array.isArray(res?.models) ? res.models : []
+      const ok = models.length > 0
+      details.push({ key: 'assist_models', label: 'Modelos Scribble', ok, message: ok ? `${models.length} modelo(s) Scribble disponibles.` : 'No se encontraron modelos Scribble.' })
+      if (!ok) failures.push('Modelos Scribble')
+    }
+
+    if (categories.has('loco_saved_models')) {
+      const res = await apiGet('/api/diameter-research/loco-training/saved-models')
+      const models = Array.isArray(res?.items) ? res.items : []
+      const ok = models.length > 0
+      details.push({ key: 'loco_saved_models', label: 'Modelos LOCO', ok, message: ok ? `${models.length} modelo(s) LOCO guardados disponibles.` : 'No se encontraron modelos LOCO guardados.' })
+      if (!ok) failures.push('Modelos LOCO')
+    }
+
+    setTransferImportVerifyDetails(details)
+    if (failures.length) {
+      throw new Error(`Verificacion estricta incompleta: ${failures.join(', ')}.`)
+    }
+  }
+
+  async function verifyImportedProjectData(mode = transferImportVerifyMode, summary = transferImportVerifySummary) {
+    setTransferImportRefreshing(true)
+    setTransferImportReloadModal(true)
+    setTransferImportVerifyStatus('verifying')
+    setTransferImportVerifyError('')
+    setTransferImportVerifyDetails([])
+    try {
+      const sid = sessionId || ''
+      await apiGet('/api/projects/list')
+      const libraryPath = sid ? `/api/library/images?session_id=${encodeURIComponent(sid)}` : '/api/library/images'
+      await apiGet(libraryPath)
+      await refreshProjects({ prefillRoute: false })
+      await refreshSavedImages(sid)
+      await refreshProjectTagCatalog()
+      await refreshAssistModels()
+      await refreshModelDataset(sid)
+      await refreshLocoAugItems()
+      await refreshLocoTrainingRuns()
+      await refreshDiameterMeasurementSummary()
+      await refreshDiameterAnalyses()
+      await refreshTransferCatalog()
+      if (imageId) {
+        await refreshResults(imageId)
+        await refreshDiameterRuns(imageId, { silent: true })
+      }
+      if (mode === 'strict') {
+        await runStrictImportVerification(summary)
+      } else {
+        setTransferImportVerifyDetails([{ key: 'quick', label: 'Verificacion rapida', ok: true, message: 'Catalogos principales actualizados.' }])
+      }
+      setTransferImportVerifyStatus('ready')
+      setTransferImportVerifyError('')
+      return true
+    } catch (err) {
+      setTransferImportVerifyStatus('error')
+      setTransferImportVerifyError(errMsg(err))
+      return false
+    } finally {
+      setTransferImportRefreshing(false)
+    }
+  }
+
   async function applyProjectImport(overwrite) {
     const token = String(transferImportInspection?.token || '')
     if (!token) return
-    await withLoad('transferApply', async () => {
-      try {
-        const res = await apiPost('/api/project-transfer/import/apply', { token, overwrite: !!overwrite, project_ids: transferImportProjectIds })
-        setTransferImportResult(res?.result || null)
-        setTransferImportInspection(null)
-        toast('success', 'Importacion completada', `${res?.result?.imported_count || 0} archivos importados.`)
-        await refreshTransferCatalog()
-      } catch (err) {
-        toast('error', 'Importar proyecto', errMsg(err))
+    const importSummary = transferImportInspection?.summary || null
+    const verifyMode = transferImportVerifyMode
+    setTransferImportVerifySummary(importSummary)
+    setLoad('transferApply', true)
+    setTransferImportResult(null)
+    setTransferImportProgress(null)
+    setTransferImportJob(null)
+    setTransferImportVerifyDetails([])
+    try {
+      const started = await apiPost('/api/project-transfer/import/start', { token, overwrite: !!overwrite, project_ids: transferImportProjectIds })
+      const jobId = String(started?.job_id || '')
+      if (!jobId) throw new Error('El servidor no devolvio job_id de importacion.')
+      setTransferImportJob({ job_id: jobId })
+      if (started?.progress) setTransferImportProgress(started.progress)
+      let finalProgress = started?.progress || null
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 700))
+        const res = await apiGet(`/api/project-transfer/import/progress?job_id=${encodeURIComponent(jobId)}`)
+        const progress = res?.progress || null
+        if (!progress) throw new Error('No se pudo leer el progreso de importacion.')
+        setTransferImportProgress(progress)
+        finalProgress = progress
+        if (progress.status === 'completed') break
+        if (progress.status === 'error') throw new Error(progress.error || 'La importacion fallo.')
       }
-    })
+      const result = finalProgress?.result || {
+        imported_count: finalProgress?.imported_count || 0,
+        skipped_count: finalProgress?.skipped_count || 0,
+        replaced_count: finalProgress?.replaced_count || 0,
+      }
+      setTransferImportResult(result)
+      setTransferImportInspection(null)
+      const verificationSummary = { ...(importSummary || {}), applied_categories: result.categories || {} }
+      setTransferImportVerifySummary(verificationSummary)
+      setTransferImportReloadModal(true)
+      await verifyImportedProjectData(verifyMode, verificationSummary)
+      toast('success', 'Importacion completada', `${result.imported_count || 0} archivos importados.`)
+    } catch (err) {
+      setTransferImportReloadModal(true)
+      setTransferImportVerifyStatus('error')
+      setTransferImportVerifyError(errMsg(err))
+      toast('error', 'Importar proyecto', errMsg(err))
+    } finally {
+      setTransferImportJob(null)
+      setLoad('transferApply', false)
+    }
   }
 
   function quantizeLabelsCanvas(canvas) {
@@ -3325,6 +3583,12 @@ export default function App() {
         if (!healthRes.ok) {
           throw new Error(`Backend respondio con HTTP ${healthRes.status}`)
         }
+        const healthPayload = await healthRes.json().catch(() => ({}))
+        setSystemCapabilities({
+          native_folder_picker: Boolean(healthPayload?.capabilities?.native_folder_picker),
+          open_folder: Boolean(healthPayload?.capabilities?.open_folder),
+          runtime_os: String(healthPayload?.capabilities?.runtime_os || ''),
+        })
 
         const s = await apiPost('/api/session/new', {})
         const sid = String(s?.payload?.session_id || '')
@@ -3445,12 +3709,8 @@ export default function App() {
 
   useEffect(() => {
     if (workspaceTab !== 'projectTransfer') return
-    if (transferMode === 'project' && activeProjectId && !transferProjectIds.length) {
-      setTransferProjectIds([activeProjectId])
-      return
-    }
     refreshTransferCatalog()
-  }, [workspaceTab, transferMode, activeProjectId, transferProjectIds.join(',')])
+  }, [workspaceTab, transferMode, transferExportMode, activeProjectId, transferProjectIds.join(',')])
 
   useEffect(() => {
     if (!['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) return
@@ -4422,14 +4682,11 @@ export default function App() {
   }
 
   async function refreshLocalImagePrefs() {
-    await withLoad('localPrefs', async () => {
-      try {
-        const res = await apiGet('/api/local-images/prefs')
-        setImageStartDir(String(res?.payload?.start_dir || ''))
-      } catch (err) {
-        toast('warning', 'Ruta inicial', `No se pudo cargar ruta inicial: ${errMsg(err)}`)
-      }
-    })
+    // El flujo oficial de carga ahora vive en el navegador. No se cargan rutas
+    // locales del backend porque no son portables entre Docker, Windows y macOS.
+    if (!browserImageFiles.length) {
+      setImageStartDir('')
+    }
   }
 
   async function refreshLocalImageTutorialHint(silent = true) {
@@ -4497,7 +4754,7 @@ export default function App() {
     const copied = await copyTextToClipboard(
       String(freshHint?.start_dir || overridePath || ''),
       'Ruta tutorial',
-      'Ruta copiada. Pegala en el selector de directorio del sistema.',
+      'Ruta copiada. Usala como referencia al elegir la carpeta desde navegador.',
     )
     if (copied) {
       markTutorialSignal('copiedTutorialPath')
@@ -4507,20 +4764,11 @@ export default function App() {
   }
 
   async function saveLocalImagePrefs() {
-    const path = String(imageStartDir || '').trim()
-    if (!path) {
-      toast('warning', 'Ruta inicial', 'Escribe una ruta de carpeta.')
+    if (!browserImageFiles.length) {
+      toast('warning', 'Ruta inicial', 'Primero elige una carpeta o archivos.')
       return
     }
-    await withLoad('localPrefs', async () => {
-      try {
-        const res = await apiPost('/api/local-images/prefs', { start_dir: path })
-        setImageStartDir(String(res?.payload?.start_dir || path))
-        toast('success', 'Ruta inicial', 'Ruta guardada.')
-      } catch (err) {
-        toast('warning', 'Ruta inicial', errMsg(err))
-      }
-    })
+    toast('success', 'Ruta inicial', 'Carpeta lista desde navegador.')
   }
 
   function applyLocalImageStartDir(path) {
@@ -4540,71 +4788,69 @@ export default function App() {
     }
   }
 
-  async function chooseLocalImageDir() {
-    const tutorialDir = String(tutorialOverlayState?.path || localImageTutorialHint.start_dir || '').trim()
-    const initialDir = String(hasTutorialSignal('copiedTutorialPath') ? tutorialDir : (imageStartDir || tutorialDir)).trim()
-    await withLoad('localDirPick', async () => {
-      try {
-        const res = await apiPost('/api/local-images/select-folder', { initial_dir: initialDir })
-        const nextPath = String(res?.payload?.start_dir || '').trim()
-        if (nextPath) {
-          applyLocalImageStartDir(nextPath)
-        }
-        if (nextPath) {
-          markTutorialSignal('localDirectoryChosen')
-        }
-        toast('success', 'Ruta inicial', nextPath || 'Directorio seleccionado.')
-      } catch (err) {
-        const message = errMsg(err)
-        if (/cancelad/i.test(message)) {
-          toast('info', 'Ruta inicial', 'Seleccion de directorio cancelada.')
-          return
-        }
-        toast('warning', 'Ruta inicial', message)
-      }
-    })
+  function browserImageRelativeName(file) {
+    return String(file?.webkitRelativePath || file?.name || '').replace(/\\/g, '/')
   }
 
-  async function chooseProjectSourceDir() {
-    const initialDir = String(projectForm.source_dir || imageStartDir || '').trim()
-    await withLoad('localDirPick', async () => {
-      try {
-        const res = await apiPost('/api/local-images/select-folder', { initial_dir: initialDir })
-        const nextPath = String(res?.payload?.start_dir || '').trim()
-        if (nextPath) {
-          setProjectForm((prev) => ({ ...prev, source_dir: nextPath }))
-        }
-        toast('success', 'Ruta proyecto', nextPath || 'Directorio seleccionado.')
-      } catch (err) {
-        const message = errMsg(err)
-        if (/cancelad/i.test(message)) {
-          toast('info', 'Ruta proyecto', 'Seleccion de directorio cancelada.')
-          return
-        }
-        toast('warning', 'Ruta proyecto', message)
-      }
-    })
+  function isBrowserImageFile(file) {
+    const name = String(file?.name || '').toLowerCase()
+    return /\.(png|jpe?g|tiff?|bmp)$/.test(name)
+  }
+
+  function applyBrowserImageFiles(fileList, source = 'files') {
+    const files = Array.from(fileList || []).filter(isBrowserImageFile)
+    files.sort((a, b) => browserImageRelativeName(a).localeCompare(browserImageRelativeName(b)))
+    setBrowserImageFiles(files)
+    setSelectedBrowserImageIndex(0)
+    const first = files[0]
+    const rel = browserImageRelativeName(first)
+    const folder = rel.includes('/') ? rel.split('/')[0] : (source === 'folder' ? 'carpeta seleccionada' : 'archivos seleccionados')
+    setBrowserImageFolderName(files.length ? folder : '')
+    const localItems = files.map((file, idx) => ({
+      path: `browser://${idx}`,
+      name: file.name,
+      relative_path: browserImageRelativeName(file),
+      browser_index: idx,
+    }))
+    setLocalImageFiles(localItems)
+    localImageFilesRef.current = localItems
+    setSelectedLocalPath(localItems[0]?.path || '')
+    setImageStartDir(files.length ? `Navegador: ${folder}` : '')
+    if (files.length) {
+      toast('success', 'Imagenes desde navegador', `${files.length} imagenes disponibles.`)
+    } else {
+      toast('warning', 'Imagenes desde navegador', 'No se encontraron imagenes soportadas.')
+    }
+  }
+
+  function onBrowserFolderPicked(e) {
+    applyBrowserImageFiles(e.target.files, 'folder')
+    e.target.value = ''
+  }
+
+  function onBrowserFilesPicked(e) {
+    applyBrowserImageFiles(e.target.files, 'files')
+    e.target.value = ''
   }
 
   async function listLocalImages() {
-    const path = String(imageStartDir || '').trim()
-    if (!path) {
-      toast('warning', 'Imagenes locales', 'Guarda o escribe una ruta inicial primero.')
+    if (!browserImageFiles.length) {
+      toast('warning', 'Imagenes locales', 'Primero elige una carpeta o archivos.')
       return
     }
     await withLoad('localImages', async () => {
-      try {
-        const res = await apiGet(`/api/local-images/list?start_dir=${encodeURIComponent(path)}&recursive=true&limit=600`)
-        const items = Array.isArray(res?.payload?.items) ? res.payload.items : []
-        localImageFilesRef.current = items
-        setLocalImageFiles(items)
-        setSelectedLocalPath((prev) => (items.some((it) => it.path === prev) ? prev : String(items[0]?.path || '')))
-        toast('success', 'Imagenes locales', `${items.length} imagenes encontradas.`)
-        markTutorialSignal('localImagesListed')
-        advanceTutorialAfterSignal('localImagesListed')
-      } catch (err) {
-        toast('warning', 'Imagenes locales', errMsg(err))
-      }
+      const items = browserImageFiles.map((file, idx) => ({
+        path: `browser://${idx}`,
+        name: file.name,
+        relative_path: browserImageRelativeName(file),
+        browser_index: idx,
+      }))
+      localImageFilesRef.current = items
+      setLocalImageFiles(items)
+      setSelectedLocalPath((prev) => (items.some((it) => it.path === prev) ? prev : String(items[0]?.path || '')))
+      toast('success', 'Imagenes locales', `${items.length} imagenes encontradas.`)
+      markTutorialSignal('localImagesListed')
+      advanceTutorialAfterSignal('localImagesListed')
     })
   }
 
@@ -4631,47 +4877,10 @@ export default function App() {
   }
 
   async function loadLocalImage(pathToLoad = '') {
-    const sid = await ensureSessionReady()
     const target = String(pathToLoad || selectedLocalPath || '').trim()
-    if (!sid || !target) return
-    await withLoad('localLoad', async () => {
-      try {
-        const res = await apiPost('/api/local-images/load', {
-          session_id: sid,
-          path: target,
-          scale_percent: 100,
-        })
-        const p = res.payload || {}
-        const ok = await applyImageB64(p.image_b64, String(p.image_mime || 'image/png'))
-        if (!ok) throw new Error('No se pudo renderizar imagen local.')
-        const loadedImageId = String(p.image_id || '')
-        setImageId(loadedImageId)
-        setSelectedSavedImageId(loadedImageId)
-        setImageName(String(p.image_name || 'image'))
-        setImageStartDir(String(target).replace(/[\\/][^\\/]*$/, ''))
-        resetImageScopedState()
-        await refreshSavedImages(sid)
-        await refreshModelDataset(sid)
-        await refreshResults(loadedImageId)
-        await loadScribbleDraftForImage(loadedImageId)
-        await loadDiameterPoints(sid, loadedImageId, { silent: true })
-        await refreshDiameterRuns(loadedImageId, { silent: true })
-        await loadCalibrationForImage(loadedImageId, { silent: true })
-        await refreshValidationCases(loadedImageId, { silent: true })
-        toast('success', 'Imagen local', `Activa: ${loadedImageId}`)
-        const loadedFileName = localFileName(target)
-        if (loadedFileName === SCRIBBLE_TUTORIAL_BAD_IMAGE_NAME) {
-          markTutorialSignal('badTutorialImageLoaded')
-          advanceTutorialAfterSignal('badTutorialImageLoaded')
-        } else if (loadedFileName === SCRIBBLE_TUTORIAL_IMAGE_NAME) {
-          setLocalImageSelectExpanded(false)
-          markTutorialSignal('correctTutorialImageLoaded')
-          advanceTutorialAfterSignal('correctTutorialImageLoaded')
-        }
-      } catch (err) {
-        toast('error', 'Imagen local', errMsg(err))
-      }
-    })
+    const item = localImageFilesRef.current.find((row) => String(row.path || '') === target)
+    const index = item ? Number(item.browser_index || 0) : Number(selectedBrowserImageIndex || 0)
+    await loadBrowserImage(index)
   }
 
   async function deleteSelectedSavedImage() {
@@ -4927,6 +5136,51 @@ export default function App() {
         toast('success', 'Modelos', `${ids.length} modelo(s) eliminado(s).`)
       } catch (err) {
         toast('warning', 'Modelos', errMsg(err))
+      }
+    })
+  }
+
+  async function loadBrowserImage(index = selectedBrowserImageIndex) {
+    const sid = await ensureSessionReady()
+    const file = browserImageFiles[Number(index) || 0]
+    if (!sid || !file) return
+    await withLoad('localLoad', async () => {
+      try {
+        const form = new FormData()
+        form.append('session_id', sid)
+        form.append('project_id', activeProjectId || '')
+        form.append('source_label', browserImageRelativeName(file) || file.name)
+        form.append('scale_percent', '100')
+        form.append('file', file, file.name)
+        const res = await apiForm('/api/local-images/upload-browser', form)
+        const p = res.payload || {}
+        const ok = await applyImageB64(p.image_b64, String(p.image_mime || 'image/png'))
+        if (!ok) throw new Error('No se pudo renderizar imagen seleccionada.')
+        const loadedImageId = String(p.image_id || '')
+        setImageId(loadedImageId)
+        setSelectedSavedImageId(loadedImageId)
+        setImageName(String(p.image_name || file.name || 'image'))
+        resetImageScopedState()
+        await refreshSavedImages(sid)
+        await refreshModelDataset(sid)
+        await refreshResults(loadedImageId)
+        await loadScribbleDraftForImage(loadedImageId)
+        await loadDiameterPoints(sid, loadedImageId, { silent: true })
+        await refreshDiameterRuns(loadedImageId, { silent: true })
+        await loadCalibrationForImage(loadedImageId, { silent: true })
+        await refreshValidationCases(loadedImageId, { silent: true })
+        toast('success', 'Imagen desde navegador', `Activa: ${loadedImageId}`)
+        const loadedFileName = String(file.name || '').trim()
+        if (loadedFileName === SCRIBBLE_TUTORIAL_BAD_IMAGE_NAME) {
+          markTutorialSignal('badTutorialImageLoaded')
+          advanceTutorialAfterSignal('badTutorialImageLoaded')
+        } else if (loadedFileName === SCRIBBLE_TUTORIAL_IMAGE_NAME) {
+          setLocalImageSelectExpanded(false)
+          markTutorialSignal('correctTutorialImageLoaded')
+          advanceTutorialAfterSignal('correctTutorialImageLoaded')
+        }
+      } catch (err) {
+        toast('error', 'Imagen desde navegador', errMsg(err))
       }
     })
   }
@@ -5201,7 +5455,16 @@ export default function App() {
         const item = res.payload || {}
         setRunCache((prev) => ({ ...prev, [runId]: item }))
       } catch (err) {
-        toast('error', 'Resultado', errMsg(err))
+        const message = errMsg(err)
+        setRunCache((prev) => ({
+          ...prev,
+          [runId]: {
+            run_id: runId,
+            load_error: message,
+            experiment_id: filteredRuns.find((r) => r.run_id === runId)?.experiment_id || '',
+          },
+        }))
+        toast('warning', 'Resultado incompleto', message)
       }
     })
   }
@@ -5429,6 +5692,26 @@ export default function App() {
       x: clientX - rect.left - imgX * nextScale - (diamStageSize.w - imageDims.w * nextScale) * 0.5,
       y: clientY - rect.top - imgY * nextScale - (diamStageSize.h - imageDims.h * nextScale) * 0.5,
     })
+  }
+
+  function centerDiameterViewerOnPoint(point, { preferredZoom = 2 } = {}) {
+    if (!point || !imageUrl || !imageDims.w || !imageDims.h) return false
+    const x = Number(point.x)
+    const y = Number(point.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false
+    const rect = diameterStageRef.current?.getBoundingClientRect?.()
+    const stageW = Number(rect?.width || diamStageSize.w || 0)
+    const stageH = Number(rect?.height || diamStageSize.h || 0)
+    if (stageW < 1 || stageH < 1) return false
+    const zoom = clamp(Number.isFinite(Number(diamViewerZoom)) && Number(diamViewerZoom) > 0 ? Math.max(Number(diamViewerZoom), preferredZoom) : preferredZoom, 0.25, 12)
+    const fit = Math.min(stageW / Math.max(1, imageDims.w), stageH / Math.max(1, imageDims.h))
+    const scale = Math.max(0.0001, fit * zoom)
+    setDiamViewerZoom(zoom)
+    setDiamViewerOffset({
+      x: stageW * 0.5 - x * scale - (stageW - imageDims.w * scale) * 0.5,
+      y: stageH * 0.5 - y * scale - (stageH - imageDims.h * scale) * 0.5,
+    })
+    return true
   }
 
   function zoomLocoDatasetBy(factor) {
@@ -6307,6 +6590,50 @@ export default function App() {
     })
   }
 
+  function diameterCircleRemovalForPoint(point) {
+    if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) {
+      return { changed: false, snapshot: null, removedCircles: [] }
+    }
+    const circles = Array.isArray(manualCircles) ? manualCircles : []
+    const removedIndices = new Set()
+    const removedCircles = []
+    const nextCircles = circles.filter((circle, idx) => {
+      const center = circle?.center
+      const remove = center && samePoint(center, point, 2.5)
+      if (remove) {
+        removedIndices.add(idx)
+        removedCircles.push(circle)
+      }
+      return !remove
+    })
+    const draftMatches = manualCircleDraft?.center && samePoint(manualCircleDraft.center, point, 2.5)
+    if (!removedCircles.length && !draftMatches) {
+      return { changed: false, snapshot: null, removedCircles: [] }
+    }
+    let nextActiveCircleIdx = manualCircleActiveIdx
+    if (removedIndices.has(manualCircleActiveIdx)) {
+      nextActiveCircleIdx = -1
+    } else if (manualCircleActiveIdx >= 0) {
+      const removedBefore = Array.from(removedIndices).filter((idx) => idx < manualCircleActiveIdx).length
+      nextActiveCircleIdx = Math.max(-1, manualCircleActiveIdx - removedBefore)
+    }
+    const nextDraft = draftMatches ? null : manualCircleDraft
+    return {
+      changed: true,
+      removedCircles,
+      nextCircles,
+      nextDraft,
+      nextActiveCircleIdx,
+      snapshot: {
+        ...diameterSnapshot(),
+        circle: nextDraft,
+        circles: nextCircles,
+        circleActiveIdx: nextActiveCircleIdx,
+        circleSelected: false,
+      },
+    }
+  }
+
   async function updateDiameterPoints(action, extra = {}, options = {}) {
     if (!sessionId || !imageId) return
     const removedPoint = String(action) === 'remove_active' && diamActivePointIdx >= 0 && diamActivePointIdx < diamPoints.length
@@ -6315,8 +6642,17 @@ export default function App() {
           y: Number(diamPoints[diamActivePointIdx]?.y),
         }
       : null
+    const circleRemoval = removedPoint ? diameterCircleRemovalForPoint(removedPoint) : { changed: false, snapshot: null, removedCircles: [] }
+    const geometrySnapshot = options.geometrySnapshot || circleRemoval.snapshot || {}
     if (options.remember !== false && ['add', 'remove_last', 'remove_active', 'clear', 'replace'].includes(String(action))) {
       rememberDiameterManualState()
+    }
+    if (circleRemoval.changed) {
+      setManualCircleDraft(circleRemoval.nextDraft)
+      setManualCircles(circleRemoval.nextCircles)
+      setManualCircleActiveIdx(circleRemoval.nextActiveCircleIdx)
+      setManualCircleSelected(false)
+      setManualCircleConsumed(!circleRemoval.nextCircles.length && !circleRemoval.nextDraft)
     }
     await withLoad('diamPoints', async () => {
       try {
@@ -6324,12 +6660,18 @@ export default function App() {
           session_id: sessionId,
           action,
           circle_type: action === 'add' ? manualCircleNextType : '',
-          geometry: buildDiameterGeometryPayload(options.geometrySnapshot || {}),
+          geometry: buildDiameterGeometryPayload(geometrySnapshot),
           ...extra,
         })
         syncDiameterPointPayload(res)
         if (removedPoint && Number.isFinite(removedPoint.x) && Number.isFinite(removedPoint.y)) {
-          pruneDiameterResultsForRemovals({ point: removedPoint })
+          pruneDiameterResultsForRemovals([
+            { point: removedPoint },
+            ...circleRemoval.removedCircles.map((circle) => ({
+              geometryId: String(circle?.geometry_id || ''),
+              point: circle?.center || removedPoint,
+            })),
+          ])
         }
       } catch (err) {
         toast('error', 'Diameter points', errMsg(err))
@@ -7808,8 +8150,26 @@ export default function App() {
     query.set('include_uncalibrated', diamAnalysisIncludeUncalibrated ? 'true' : 'false')
     await withLoad('diamAnalysis', async () => {
       try {
-        const res = await apiGet(`/api/diameter-research/analysis/export?${query.toString()}`)
-        toast('success', 'Exportar analisis', `CSV: ${res.summary_csv || '-'} | JSON: ${res.summary_json || '-'}`)
+        const res = await fetch(`${API_BASE}/api/diameter-research/analysis/export/download?${query.toString()}`)
+        if (!res.ok) {
+          let msg = `HTTP ${res.status}`
+          try {
+            const data = await res.json()
+            msg = data?.detail || msg
+          } catch {}
+          throw new Error(String(msg))
+        }
+        const blob = await res.blob()
+        const disposition = res.headers.get('content-disposition') || ''
+        const match = disposition.match(/filename="?([^"]+)"?/)
+        const fileName = match?.[1] || `${String(diamAnalysisName || 'diameter_analysis').replace(/[^\w-]+/g, '_')}.zip`
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = fileName
+        a.click()
+        URL.revokeObjectURL(url)
+        toast('success', 'Exportar analisis', `Descarga generada: ${fileName}`)
       } catch (err) {
         toast('error', 'Exportar analisis', errMsg(err))
       }
@@ -9318,8 +9678,21 @@ export default function App() {
   }
 
   function openDiameterPointReview(result) {
+    const point = resultPointForReview(result)
+    if (!point) {
+      toast('warning', 'Revision por punto', 'No se pudo resolver el punto del resultado.')
+      return
+    }
     selectDiameterResultForReview(result, { silent: true })
-    setPointReviewOpen(true)
+    setPointReviewOpen(false)
+    setWorkspaceTab('diameter')
+    setActiveGroup('detection')
+    setActiveTab('diameter')
+    if (diamMethodId === 'circle_square_mask_diameter') setDiamViewerMode('circle')
+    const focused = centerDiameterViewerOnPoint(point, { preferredZoom: 2 })
+    if (!focused) {
+      requestAnimationFrame(() => centerDiameterViewerOnPoint(point, { preferredZoom: 2 }))
+    }
   }
 
   function manualLineFromForm(form = validationForm) {
@@ -9856,11 +10229,32 @@ export default function App() {
     return Math.round((100 * batchProgress.done) / batchProgress.total)
   }, [batchProgress])
   const transferAllSelected = transferCatalog.length > 0 && transferCatalog.every((item) => !!transferSelection[item.key])
-  const transferSelectedSize = transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.size_bytes || 0) : 0), 0)
-  const transferSelectedFiles = transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.file_count || 0) : 0), 0)
   const transferSelectedProjects = projects.filter((project) => transferProjectIds.includes(project.project_id))
+  const transferAdvancedActive = transferMode === 'project' && transferExportMode === 'advanced'
+  const transferAdvancedSelectedCategories = projects.flatMap((project) => {
+    const projectId = project.project_id
+    const selectedKeys = new Set(transferProjectCategorySelection?.[projectId] || [])
+    return transferProjectCategories(projectId).filter((item) => selectedKeys.has(item.key)).map((item) => ({ ...item, project_id: projectId }))
+  })
+  const transferAdvancedProjectCount = new Set(transferAdvancedSelectedCategories.map((item) => item.project_id)).size
+  const transferAdvancedCategoryCount = transferAdvancedSelectedCategories.length
+  const transferAdvancedFiles = transferAdvancedSelectedCategories.reduce((total, item) => total + Number(item.file_count || 0), 0)
+  const transferAdvancedSize = transferAdvancedSelectedCategories.reduce((total, item) => total + Number(item.size_bytes || 0), 0)
+  const transferSelectedSize = transferAdvancedActive
+    ? transferAdvancedSize
+    : transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.size_bytes || 0) : 0), 0)
+  const transferSelectedFiles = transferAdvancedActive
+    ? transferAdvancedFiles
+    : transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.file_count || 0) : 0), 0)
+  const transferHasSelection = transferAdvancedActive
+    ? transferAdvancedSelectedCategories.length > 0
+    : transferCatalog.some((item) => transferSelection[item.key])
   const transferImportProjects = Array.isArray(transferImportInspection?.summary?.projects) ? transferImportInspection.summary.projects : []
   const transferImportNeedsProjectSelection = transferImportProjects.length > 0 && transferImportProjectIds.length === 0
+  const transferImportBusy = loading.transferApply || !!transferImportJob || ['queued', 'running'].includes(String(transferImportProgress?.status || '')) || transferImportRefreshing
+  const transferImportTotal = Number(transferImportProgress?.total_files || 0)
+  const transferImportProcessed = Number(transferImportProgress?.processed_files || 0)
+  const transferImportPct = transferImportTotal > 0 ? Math.min(100, Math.round((100 * transferImportProcessed) / transferImportTotal)) : 0
   const diamAnalysisRows = Array.isArray(diamAnalysisResult?.items) ? diamAnalysisResult.items : []
   const diamAnalysisValues = diamAnalysisRows.map((row) => Number(row.diameter_value)).filter((value) => Number.isFinite(value))
   const diamAnalysisGlobalStats = diamAnalysisResult?.global_metrics?.stats || {}
@@ -9881,6 +10275,40 @@ export default function App() {
     const normalized = normalizeStructuredTags([tag])[0]
     if (!normalized) return ''
     return JSON.stringify(normalized).toLowerCase()
+  }
+
+  function tagsMatchCategorizedFilter(imageTagsRaw = [], requiredTagsRaw = []) {
+    const requiredGroups = new Map()
+    normalizeStructuredTags(requiredTagsRaw).forEach((tag) => {
+      const key = tagKey(tag)
+      if (!key) return
+      const category = String(tag.category || 'other')
+      if (!requiredGroups.has(category)) requiredGroups.set(category, new Set())
+      requiredGroups.get(category).add(key)
+    })
+    if (!requiredGroups.size) return true
+
+    const imageGroups = new Map()
+    normalizeStructuredTags(imageTagsRaw).forEach((tag) => {
+      const key = tagKey(tag)
+      if (!key) return
+      const category = String(tag.category || 'other')
+      if (!imageGroups.has(category)) imageGroups.set(category, new Set())
+      imageGroups.get(category).add(key)
+    })
+
+    for (const [category, requiredKeys] of requiredGroups.entries()) {
+      const imageKeys = imageGroups.get(category) || new Set()
+      let matched = false
+      for (const key of requiredKeys) {
+        if (imageKeys.has(key)) {
+          matched = true
+          break
+        }
+      }
+      if (!matched) return false
+    }
+    return true
   }
 
   function tagCategoryLabel(category) {
@@ -10361,14 +10789,81 @@ export default function App() {
         <span>{notice.text}</span>
       </div>
 
+      {transferImportBusy && workspaceTab !== 'projectTransfer' ? (
+        <div className="transfer-mini-progress">
+          <strong>{transferImportRefreshing ? 'Actualizando datos importados' : 'Importando proyecto'}</strong>
+          <span>{transferImportRefreshing ? 'finalizando' : `${transferImportPct}%`}</span>
+          <div><span style={{ width: `${transferImportRefreshing ? 100 : transferImportPct}%` }} /></div>
+        </div>
+      ) : null}
+
+      {transferImportReloadModal ? (
+        <div className="modal-backdrop import-reload-backdrop" role="dialog" aria-modal="true">
+          <div className="modal import-reload-modal">
+            <h2>
+              {transferImportVerifyStatus === 'error'
+                ? 'No se pudo verificar todo'
+                : transferImportVerifyStatus === 'ready'
+                  ? 'Datos importados disponibles'
+                  : 'Verificando datos importados...'}
+            </h2>
+            <p>
+              {transferImportVerifyStatus === 'error'
+                ? 'La importacion terminó, pero una recarga de catálogos falló. Puedes reintentar la verificación o recargar igualmente.'
+                : transferImportVerifyStatus === 'ready'
+                  ? 'Los catálogos principales respondieron correctamente. Recarga la interfaz para iniciar con el estado importado limpio.'
+                  : 'La app está actualizando proyectos, imágenes, modelos, mediciones y análisis antes de permitir la recarga.'}
+            </p>
+            <div className="import-reload-mode">
+              Modo: <strong>{transferImportVerifyMode === 'strict' ? 'estricta' : 'rapida'}</strong>
+            </div>
+            {transferImportResult ? (
+              <div className="import-reload-summary">
+                <span>Importados: {transferImportResult.imported_count || 0}</span>
+                <span>Reemplazados: {transferImportResult.replaced_count || 0}</span>
+                <span>Conservados: {transferImportResult.skipped_count || 0}</span>
+              </div>
+            ) : null}
+            {transferImportVerifyDetails.length ? (
+              <div className="import-reload-checks">
+                {transferImportVerifyDetails.map((item) => (
+                  <div className={`import-reload-check ${item.ok ? 'ok' : 'bad'}`} key={`import-verify-${item.key}`}>
+                    <span>{item.ok ? '✓' : '!'}</span>
+                    <strong>{item.label}</strong>
+                    <em>{item.message}</em>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {transferImportVerifyStatus === 'verifying' ? (
+              <div className="transfer-progress-bar import-reload-bar"><span style={{ width: '100%' }} /></div>
+            ) : null}
+            {transferImportVerifyError ? <p className="small import-reload-error">{transferImportVerifyError}</p> : null}
+            <div className="import-reload-actions">
+              {transferImportVerifyStatus === 'error' ? (
+                <button onClick={() => verifyImportedProjectData(transferImportVerifyMode, transferImportVerifySummary)} disabled={transferImportRefreshing}>Reintentar verificacion</button>
+              ) : null}
+              {transferImportVerifyStatus === 'ready' ? (
+                <button onClick={() => setTransferImportReloadModal(false)}>Seguir sin recargar</button>
+              ) : null}
+              {['ready', 'error'].includes(transferImportVerifyStatus) ? (
+                <button className="primary" onClick={() => window.location.reload()}>
+                  {transferImportVerifyStatus === 'error' ? 'Recargar interfaz igualmente' : 'Recargar interfaz'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {tutorialOverlayState?.type === 'pathCopy' ? (
         <div className="tutorial-overlay-window" data-tour="tutorial-overlay-path-copy">
           <div className="tutorial-overlay-card">
             <span className="tutorial-overlay-kicker">Paso guiado</span>
             <h2>Realiza esto</h2>
             <p>
-              Copia esta ruta dinamica del proyecto. Luego, en el siguiente paso, usa <strong>Elegir directorio</strong>,
-              pega la ruta en la ventana del sistema y presiona aceptar.
+              Copia esta ruta informativa del proyecto. Luego usa <strong>Elegir carpeta</strong> y selecciona
+              esa carpeta desde el navegador para listar las imagenes.
             </p>
             <code>{String(tutorialOverlayState.path || tutorialOverlayState.loadError || 'Cargando ruta...')}</code>
             <div className="tutorial-card-actions">
@@ -10808,19 +11303,44 @@ export default function App() {
                 </div>
                 <label className="field">
                   <span>ruta carpeta origen</span>
-                  <input value={projectForm.source_dir} onChange={(e) => setProjectForm((prev) => ({ ...prev, source_dir: e.target.value }))} placeholder="C:\\ruta\\a\\imagenes" />
+                  <input
+                    value={projectForm.source_dir}
+                    onChange={(e) => setProjectForm((prev) => ({ ...prev, source_dir: e.target.value }))}
+                    placeholder="Elige una carpeta o archivos"
+                    readOnly
+                  />
                 </label>
                 <div className="inline">
-                  <button onClick={chooseProjectSourceDir} disabled={loading.localDirPick}>Elegir directorio</button>
-                  <button onClick={() => projectForm.source_dir && openFolder('custom', projectForm.source_dir)} disabled={loading.openFolder || !String(projectForm.source_dir || '').trim()}>Abrir ruta</button>
+                  <label className="file-action">
+                    Elegir carpeta
+                    <input type="file" accept="image/*,.tif,.tiff,.bmp" webkitdirectory="true" multiple onChange={(e) => {
+                      const first = e.target.files?.[0]
+                      const rel = first ? browserImageRelativeName(first) : ''
+                      const folder = rel.includes('/') ? rel.split('/')[0] : 'carpeta seleccionada'
+                      onBrowserFolderPicked(e)
+                      if (first) {
+                        setProjectForm((prev) => ({ ...prev, source_dir: `Navegador: ${folder}` }))
+                      }
+                    }} />
+                  </label>
+                  <label className="file-action">
+                    Elegir archivos
+                    <input type="file" accept="image/*,.tif,.tiff,.bmp" multiple onChange={(e) => {
+                      const hasFiles = Boolean(e.target.files?.length)
+                      onBrowserFilesPicked(e)
+                      if (hasFiles) {
+                        setProjectForm((prev) => ({ ...prev, source_dir: 'Navegador: archivos seleccionados' }))
+                      }
+                    }} />
+                  </label>
                 </div>
+                <p className="small">{browserImageFiles.length ? `${browserImageFiles.length} imagenes listas para cargar.` : 'Compatible con Docker, Windows y macOS.'}</p>
                 <label className="check-row">
                   <input type="checkbox" checked={projectForm.active} onChange={(e) => setProjectForm((prev) => ({ ...prev, active: e.target.checked }))} />
                   dejar como proyecto activo
                 </label>
                 <div className="inline">
                   <button className="primary" onClick={saveProject} disabled={loading.projectSave}>Guardar proyecto</button>
-                  <button onClick={() => setProjectForm((prev) => ({ ...prev, source_dir: imageStartDir }))}>Usar ruta inicial actual</button>
                 </div>
               </section>
               <section className="card">
@@ -10897,21 +11417,27 @@ export default function App() {
                   <span>ruta inicial</span>
                   <input
                     value={imageStartDir}
-                    onChange={(e) => setImageStartDir(e.target.value)}
-                    placeholder="C:\\ruta\\a\\carpeta\\de\\imagenes"
-                    disabled={loading.localPrefs}
+                    readOnly
+                    placeholder="Elige una carpeta o archivos"
+                    disabled={loading.localLoad}
                     data-tour="local-image-start-dir"
                   />
                 </label>
                 <div className="inline">
-                  <button data-tour="local-image-choose-dir" onClick={chooseLocalImageDir} disabled={loading.localDirPick}>Elegir directorio</button>
-                  <button data-tour="local-image-save-dir" onClick={saveLocalImagePrefs} disabled={loading.localPrefs || !imageStartDir.trim()}>Guardar ruta</button>
-                  <button data-tour="local-image-list" onClick={listLocalImages} disabled={loading.localImages || !imageStartDir.trim()}>Listar imagenes</button>
-                  <button onClick={() => openFolder('custom', imageStartDir)} disabled={loading.openFolder || !imageStartDir.trim()}>Abrir ruta</button>
+                  <label className="file-action" data-tour="local-image-choose-dir">
+                    Elegir carpeta
+                    <input type="file" accept="image/*,.tif,.tiff,.bmp" webkitdirectory="true" multiple onChange={onBrowserFolderPicked} disabled={loading.localLoad} />
+                  </label>
+                  <label className="file-action">
+                    Elegir archivos
+                    <input type="file" accept="image/*,.tif,.tiff,.bmp" multiple onChange={onBrowserFilesPicked} disabled={loading.localLoad} />
+                  </label>
+                  <button data-tour="local-image-list" onClick={listLocalImages} disabled={loading.localImages}>Listar imagenes</button>
                 </div>
+                <p className="small">{browserImageFiles.length ? `${browserImageFiles.length} imagenes disponibles${browserImageFolderName ? ` desde ${browserImageFolderName}` : ''}.` : 'Compatible con Docker, Windows y macOS.'}</p>
                 {localImageFiles.length ? (
                   <label className="field">
-                    <span>imagenes desde ruta guardada</span>
+                    <span>imagenes desde ruta elegida</span>
                     <select
                       data-tour="local-image-select"
                       value={selectedLocalPath}
@@ -10933,7 +11459,7 @@ export default function App() {
                   </label>
                 ) : null}
                 {localImageFiles.length ? (
-                  <button data-tour="local-image-load" onClick={() => loadLocalImage()} disabled={!selectedLocalPath || loading.localLoad}>Cargar seleccion local</button>
+                  <button data-tour="local-image-load" onClick={() => loadLocalImage()} disabled={!selectedLocalPath || loading.localLoad}>Cargar seleccion</button>
                 ) : null}
               </section>
 
@@ -11224,7 +11750,7 @@ export default function App() {
                       key={tier.value}
                       className={`tier tier-${tier.value}`}
                       onClick={() => mark(tier.value)}
-                      disabled={!activeRunId || loading.mark}
+                      disabled={!activeRunId || loading.mark || !!activeRun?.load_error}
                     >
                       {tier.short}
                     </button>
@@ -12388,7 +12914,7 @@ export default function App() {
               <section className="card">
                 <h2>Multiclase</h2>
                 <label className="field"><ParamSpan paramKey="crossing_threshold">crossing threshold</ParamSpan><input type="number" min="0.01" max="0.99" step="0.01" value={locoModelParams.crossing_threshold} onChange={(e) => updateLocoModelParam('crossing_threshold', Number(e.target.value || 0.5))} onBlur={clampOnBlur('crossing_threshold', 0.01, 0.99, 0.01, 0.5)} /></label>
-                <p className="small">Controla qu\u00e9 tan estricto es el filtro de cruces. Valor bajo = menos falsos positivos por cruce.</p>
+                <p className="small">Controla qué tan estricto es el filtro de cruces. Valor bajo = menos falsos positivos por cruce.</p>
               </section>
 
               <section className="card">
@@ -12420,7 +12946,7 @@ export default function App() {
               <section className="card">
                 <h2>Filtro espacial</h2>
                 <label className="check-field"><input type="checkbox" checked={!!locoModelParams.use_spatial_final_filter} onChange={(e) => updateLocoModelParam('use_spatial_final_filter', e.target.checked)} /><ParamSpan paramKey="use_spatial_final_filter">Filtro espacial final (post-NMS)</ParamSpan></label>
-                <p className="small">Divide la imagen en tiles y limita el n\u00famero de c\u00edrculos aceptados por tile, asegurando distribuci\u00f3n espacial uniforme.</p>
+                <p className="small">Divide la imagen en tiles y limita el número de círculos aceptados por tile, asegurando distribución espacial uniforme.</p>
                 <div className="diam-param-grid">
                   <label className="field"><ParamSpan paramKey="spatial_final_tile_px">tile px</ParamSpan><input type="number" min="16" max="512" step="8" value={locoModelParams.spatial_final_tile_px} onChange={(e) => updateLocoModelParam('spatial_final_tile_px', Number(e.target.value || 128))} onBlur={clampOnBlur('spatial_final_tile_px', 16, 512, 8, 128)} /></label>
                   <label className="field"><ParamSpan paramKey="spatial_final_max_per_tile">max/tile</ParamSpan><input type="number" min="1" max="50" step="1" value={locoModelParams.spatial_final_max_per_tile} onChange={(e) => updateLocoModelParam('spatial_final_max_per_tile', Number(e.target.value || 3))} onBlur={clampOnBlur('spatial_final_max_per_tile', 1, 50, 1, 3)} /></label>
@@ -12458,7 +12984,7 @@ export default function App() {
                 <div className="kpi">Categorias: <strong>{transferCatalog.filter((item) => transferSelection[item.key]).length}</strong></div>
                 <div className="kpi">Archivos: <strong>{transferSelectedFiles}</strong></div>
                 <div className="kpi">Tamano estimado: <strong>{formatBytes(transferSelectedSize)}</strong></div>
-                <button onClick={refreshTransferCatalog} disabled={loading.transferCatalog}>Actualizar tamanos</button>
+                <button onClick={refreshTransferCatalog} disabled={loading.transferCatalog || transferImportBusy}>Actualizar tamanos</button>
               </section>
             </>
           ) : (
@@ -12769,6 +13295,13 @@ export default function App() {
                     <strong>{activeRun.experiment_id}</strong>
                     <span>{activeRun.run_id}</span>
                   </div>
+                  {activeRun.load_error ? (
+                    <div className="warn">
+                      Run incompleto o no importado. Este resultado aparece en el indice, pero faltan artefactos del run.
+                      {' '}{String(activeRun.load_error)}
+                    </div>
+                  ) : (
+                    <>
                   <div className="kpi-row">
                     <span>Group: <strong>{activeRun?.meta?.experiment?.group || '-'}</strong></span>
                     <span>Impl: <strong>{activeRun?.meta?.experiment?.implementation_status || '-'}</strong></span>
@@ -12817,6 +13350,8 @@ export default function App() {
                     />
                   </div>
                   <pre className="meta">{JSON.stringify(activeRun.meta || {}, null, 2)}</pre>
+                    </>
+                  )}
                 </>
               ) : <div className="placeholder">Ejecuta un experimento para ver resultados.</div>}
           </article>
@@ -13107,7 +13642,7 @@ export default function App() {
                                 openDiameterPointReview(r)
                               }}
                             >
-                              Revisar
+                              Ver punto
                             </button>
                           </td>
                           <td>{Number(r.point_index) + 1}</td>
@@ -14771,7 +15306,7 @@ export default function App() {
                     <h2>Exportar proyecto</h2>
                     <p>Genera un ZIP portátil con el trabajo de entrenamiento seleccionado.</p>
                   </div>
-                  <button className="small-action" onClick={refreshTransferCatalog} disabled={loading.transferCatalog}>Refrescar</button>
+                  <button className="small-action" onClick={refreshTransferCatalog} disabled={loading.transferCatalog || transferImportBusy}>Refrescar</button>
                 </div>
                 <div className="mode-tabs compact">
                   <button className={transferMode === 'project' ? 'active' : ''} onClick={() => setTransferMode('project')}>Por proyecto</button>
@@ -14783,31 +15318,93 @@ export default function App() {
                       <button className={transferExportMode === 'simple' ? 'active' : ''} onClick={() => setTransferExportMode('simple')}>Simple</button>
                       <button className={transferExportMode === 'advanced' ? 'active' : ''} onClick={() => setTransferExportMode('advanced')}>Avanzado</button>
                     </div>
-                    <div className="transfer-project-list">
-                      {projects.length ? projects.map((project) => (
-                        <label className="transfer-project-row" key={`transfer-project-${project.project_id}`}>
-                          <input
-                            type="checkbox"
-                            checked={transferProjectIds.includes(project.project_id)}
-                            onChange={() => toggleTransferProject(project.project_id)}
-                          />
-                          <span>
-                            <strong>{project.name || project.project_id}</strong>
-                            <em>{project.project_id === activeProjectId ? 'activo' : project.project_id}</em>
-                          </span>
-                        </label>
-                      )) : <div className="placeholder small">No hay proyectos creados.</div>}
-                    </div>
+                    {transferExportMode === 'simple' ? (
+                      <div className="transfer-project-list">
+                        {projects.length ? projects.map((project) => (
+                          <label className="transfer-project-row" key={`transfer-project-${project.project_id}`}>
+                            <input
+                              type="checkbox"
+                              checked={transferProjectIds.includes(project.project_id)}
+                              onChange={() => toggleTransferProject(project.project_id)}
+                            />
+                            <span>
+                              <strong>{project.name || project.project_id}</strong>
+                              <em>{project.project_id === activeProjectId ? 'activo' : project.project_id}</em>
+                            </span>
+                          </label>
+                        )) : <div className="placeholder small">No hay proyectos creados.</div>}
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <p className="small">Exporta todas las categorias seleccionadas sin filtrar por proyecto.</p>
                 )}
-                <label className="transfer-master-check">
-                  <input type="checkbox" checked={transferAllSelected} onChange={(e) => toggleAllTransferCategories(e.target.checked)} />
-                  <strong>{transferMode === 'project' ? 'Todo el proyecto seleccionado' : 'Todo'}</strong>
-                  <span>{transferSelectedFiles} archivos | {formatBytes(transferSelectedSize)}</span>
-                </label>
-                {transferMode === 'full' || transferExportMode === 'advanced' ? (
+                {transferAdvancedActive ? (
+                  <div className="transfer-project-accordion-list">
+                    {projects.length ? projects.map((project) => {
+                      const projectId = project.project_id
+                      const categories = transferProjectCategories(projectId)
+                      const selectedKeys = transferProjectCategorySelection?.[projectId] || []
+                      const selectedSet = new Set(selectedKeys)
+                      const selectedRows = categories.filter((item) => selectedSet.has(item.key))
+                      const allProjectSelected = categories.length > 0 && categories.every((item) => selectedSet.has(item.key))
+                      const projectFiles = selectedRows.reduce((total, item) => total + Number(item.file_count || 0), 0)
+                      const projectSize = selectedRows.reduce((total, item) => total + Number(item.size_bytes || 0), 0)
+                      const open = transferProjectOpen[projectId] !== false
+                      return (
+                        <div className="transfer-project-accordion" key={`transfer-project-advanced-${projectId}`}>
+                          <div className="transfer-project-accordion-head">
+                            <button type="button" className="icon-button" onClick={() => toggleTransferProjectOpen(projectId)} aria-label={open ? 'Cerrar proyecto' : 'Abrir proyecto'}>
+                              {open ? '▾' : '▸'}
+                            </button>
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={allProjectSelected}
+                                onChange={(e) => setAllTransferProjectCategories(projectId, e.target.checked)}
+                              />
+                              <span>
+                                <strong>{project.name || projectId}</strong>
+                                <em>{projectId === activeProjectId ? 'activo' : projectId}</em>
+                              </span>
+                            </label>
+                            <div className="transfer-project-accordion-summary">
+                              <span>{selectedRows.length}/{categories.length} categorias</span>
+                              <span>{projectFiles} archivos</span>
+                              <strong>{formatBytes(projectSize)}</strong>
+                            </div>
+                          </div>
+                          {open ? (
+                            <div className="transfer-category-list per-project">
+                              <label className="transfer-master-check">
+                                <input type="checkbox" checked={allProjectSelected} onChange={(e) => setAllTransferProjectCategories(projectId, e.target.checked)} />
+                                <strong>Todo este proyecto</strong>
+                                <span>{projectFiles} archivos | {formatBytes(projectSize)}</span>
+                              </label>
+                              {categories.map((item) => (
+                                <label className="transfer-category-row" key={`transfer-export-${projectId}-${item.key}`}>
+                                  <input type="checkbox" checked={selectedSet.has(item.key)} onChange={() => toggleTransferProjectCategory(projectId, item.key)} />
+                                  <span>
+                                    <strong>{item.label}</strong>
+                                    <em>{item.file_count || 0} archivos</em>
+                                  </span>
+                                  <b>{formatBytes(item.size_bytes)}</b>
+                                </label>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      )
+                    }) : <div className="placeholder small">No hay proyectos creados.</div>}
+                  </div>
+                ) : (
+                  <label className="transfer-master-check">
+                    <input type="checkbox" checked={transferAllSelected} onChange={(e) => toggleAllTransferCategories(e.target.checked)} />
+                    <strong>{transferMode === 'project' ? 'Todo el proyecto seleccionado' : 'Todo'}</strong>
+                    <span>{transferSelectedFiles} archivos | {formatBytes(transferSelectedSize)}</span>
+                  </label>
+                )}
+                {transferMode === 'full' ? (
                   <div className="transfer-category-list">
                     {transferCatalog.map((item) => (
                       <label className="transfer-category-row" key={`transfer-export-${item.key}`}>
@@ -14820,17 +15417,24 @@ export default function App() {
                       </label>
                     ))}
                   </div>
-                ) : (
+                ) : transferExportMode === 'simple' ? (
                   <div className="transfer-summary">
                     <span>Proyectos <strong>{transferSelectedProjects.length}</strong></span>
                     <span>Categorias <strong>{transferCatalog.filter((item) => transferSelection[item.key]).length}</strong></span>
                     <span>Archivos <strong>{transferSelectedFiles}</strong></span>
                     <span>Tamano <strong>{formatBytes(transferSelectedSize)}</strong></span>
                   </div>
+                ) : (
+                  <div className="transfer-summary">
+                    <span>Proyectos <strong>{transferAdvancedProjectCount}</strong></span>
+                    <span>Categorias elegidas <strong>{transferAdvancedCategoryCount}</strong></span>
+                    <span>Archivos estimados <strong>{transferSelectedFiles}</strong></span>
+                    <span>Tamano estimado <strong>{formatBytes(transferSelectedSize)}</strong></span>
+                  </div>
                 )}
                 {!transferCatalog.length ? <div className="placeholder small">Refresca para calcular el contenido disponible.</div> : null}
                 <div className="transfer-actions">
-                  <button className="primary" onClick={prepareProjectExport} disabled={loading.transferExport || !transferCatalog.some((item) => transferSelection[item.key])}>
+                  <button className="primary" onClick={prepareProjectExport} disabled={loading.transferExport || transferImportBusy || !transferHasSelection}>
                     {loading.transferExport ? 'Generando ZIP...' : (transferMode === 'project' ? 'Generar ZIP del proyecto' : 'Generar ZIP')}
                   </button>
                 </div>
@@ -14839,6 +15443,7 @@ export default function App() {
                     <strong>ZIP generado</strong>
                     <span>{transferExportInfo.file_name}</span>
                     <span>{transferExportInfo.file_count || 0} archivos | {formatBytes(transferExportInfo.size_bytes)}</span>
+                    {transferExportInfo.export_selection_mode === 'per_project' ? <span>Exportacion avanzada por proyecto.</span> : null}
                     <span>La descarga comenzó automáticamente.</span>
                   </div>
                 ) : null}
@@ -14856,15 +15461,24 @@ export default function App() {
                   <input
                     type="file"
                     accept=".zip,application/zip"
+                    disabled={loading.transferApply || !!transferImportJob}
                     onChange={(e) => {
                       setTransferImportFile(e.target.files?.[0] || null)
                       setTransferImportInspection(null)
                       setTransferImportResult(null)
+                      setTransferImportJob(null)
+                      setTransferImportProgress(null)
+                      setTransferImportRefreshing(false)
+                      setTransferImportReloadModal(false)
+                      setTransferImportVerifyStatus('idle')
+                      setTransferImportVerifyError('')
+                      setTransferImportVerifyDetails([])
+                      setTransferImportVerifySummary(null)
                       setTransferImportProjectIds([])
                     }}
                   />
                 </label>
-                <button onClick={inspectProjectImport} disabled={!transferImportFile || loading.transferInspect || loading.transferApply}>
+                <button onClick={inspectProjectImport} disabled={!transferImportFile || loading.transferInspect || transferImportBusy}>
                   {loading.transferInspect ? 'Revisando ZIP...' : 'Revisar contenido'}
                 </button>
                 {transferImportInspection?.summary ? (
@@ -14874,6 +15488,7 @@ export default function App() {
                       <span>Conflictos <strong>{transferImportInspection.summary.conflict_count || 0}</strong></span>
                       <span>Total <strong>{transferImportInspection.summary.file_count || 0}</strong></span>
                       <span>Tamano <strong>{formatBytes(transferImportInspection.summary.size_bytes)}</strong></span>
+                      {transferImportInspection.summary.export_selection_mode === 'per_project' ? <span>Tipo <strong>Avanzada por proyecto</strong></span> : null}
                     </div>
                     {transferImportProjects.length ? (
                       <div className="transfer-import-projects">
@@ -14884,6 +15499,7 @@ export default function App() {
                               <input
                                 type="checkbox"
                                 checked={transferImportProjectIds.includes(project.project_id)}
+                                disabled={transferImportBusy}
                                 onChange={() => toggleImportProject(project.project_id)}
                               />
                               <span>
@@ -14927,16 +15543,79 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
+                    <div className="transfer-verify-mode">
+                      <strong>Verificacion posterior</strong>
+                      <label>
+                        <input
+                          type="radio"
+                          name="transferImportVerifyMode"
+                          value="quick"
+                          checked={transferImportVerifyMode === 'quick'}
+                          disabled={transferImportBusy}
+                          onChange={() => setTransferImportVerifyMode('quick')}
+                        />
+                        <span>Rapida</span>
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="transferImportVerifyMode"
+                          value="strict"
+                          checked={transferImportVerifyMode === 'strict'}
+                          disabled={transferImportBusy}
+                          onChange={() => setTransferImportVerifyMode('strict')}
+                        />
+                        <span>Estricta</span>
+                      </label>
+                      <em>La estricta revisa proyectos, modelos e imagenes/mascaras Scribble.</em>
+                    </div>
                     <p className="small">La importación solo agrega archivos del ZIP. Los archivos locales que no aparecen en el paquete se mantienen intactos.</p>
                     {transferImportNeedsProjectSelection ? <p className="small">Selecciona al menos un proyecto del ZIP para importar.</p> : null}
                     {Number(transferImportInspection.summary.conflict_count || 0) > 0 ? (
                       <div className="transfer-actions split">
-                        <button onClick={() => applyProjectImport(false)} disabled={loading.transferApply || transferImportNeedsProjectSelection}>Importar conservando existentes</button>
-                        <button className="primary" onClick={() => applyProjectImport(true)} disabled={loading.transferApply || transferImportNeedsProjectSelection}>Importar y sobrescribir conflictos</button>
+                        <button onClick={() => applyProjectImport(false)} disabled={transferImportBusy || transferImportNeedsProjectSelection}>Importar conservando existentes</button>
+                        <button className="primary" onClick={() => applyProjectImport(true)} disabled={transferImportBusy || transferImportNeedsProjectSelection}>Importar y sobrescribir conflictos</button>
                       </div>
                     ) : (
-                      <button className="primary" onClick={() => applyProjectImport(false)} disabled={loading.transferApply || transferImportNeedsProjectSelection}>Importar archivos</button>
+                      <button className="primary" onClick={() => applyProjectImport(false)} disabled={transferImportBusy || transferImportNeedsProjectSelection}>Importar archivos</button>
                     )}
+                  </div>
+                ) : null}
+                {transferImportProgress ? (
+                  <div className="transfer-progress">
+                    <div className="transfer-progress-head">
+                      <strong>{transferImportRefreshing ? 'Actualizando interfaz' : (transferImportProgress.status === 'completed' ? 'Importacion lista' : transferImportProgress.status === 'error' ? 'Importacion con error' : 'Importando proyecto')}</strong>
+                      <span>{transferImportProcessed} / {transferImportTotal} archivos</span>
+                    </div>
+                    <div className="transfer-progress-bar" aria-label="Progreso de importacion">
+                      <span style={{ width: `${transferImportRefreshing ? 100 : transferImportPct}%` }} />
+                    </div>
+                    <p className="small">
+                      {transferImportRefreshing
+                        ? 'Actualizando proyectos, imagenes, modelos y analisis.'
+                        : transferImportProgress.status === 'error'
+                          ? (transferImportProgress.error || 'La importacion fallo.')
+                          : transferImportProgress.current_category
+                            ? `${transferImportProgress.current_category}${transferImportProgress.current_file ? `: ${transferImportProgress.current_file}` : ''}`
+                            : 'Preparando importacion.'}
+                    </p>
+                    <div className="transfer-progress-list">
+                      {(transferImportProgress.categories || []).map((item) => (
+                        <div className={`transfer-progress-row ${item.status || 'pending'}`} key={`transfer-progress-${item.key}`}>
+                          <span className="transfer-progress-mark">{item.status === 'completed' ? '✓' : item.status === 'running' ? '…' : item.status === 'error' ? '!' : '-'}</span>
+                          <span>
+                            <strong>{item.label || item.key}</strong>
+                            <em>{item.processed_files || 0} / {item.total_files || 0} archivos</em>
+                          </span>
+                          <span>{item.status === 'completed' ? 'Listo' : item.status === 'running' ? 'Importando' : 'En espera'}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="transfer-progress-counts">
+                      <span>Importados: {transferImportProgress.imported_count || 0}</span>
+                      <span>Reemplazados: {transferImportProgress.replaced_count || 0}</span>
+                      <span>Conservados: {transferImportProgress.skipped_count || 0}</span>
+                    </div>
                   </div>
                 ) : null}
                 {transferImportResult ? (
@@ -14945,7 +15624,7 @@ export default function App() {
                     <span>Importados: {transferImportResult.imported_count || 0}</span>
                     <span>Reemplazados: {transferImportResult.replaced_count || 0}</span>
                     <span>Conservados: {transferImportResult.skipped_count || 0}</span>
-                    <button onClick={() => window.location.reload()}>Recargar interfaz</button>
+                    <span>La recarga se controla desde la ventana global.</span>
                   </div>
                 ) : null}
               </section>

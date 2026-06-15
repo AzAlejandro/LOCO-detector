@@ -27,7 +27,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\check_docker_ports.ps1" -BackendPort %DOCKER_BACKEND_PORT% -FrontendPort %DOCKER_FRONTEND_PORT%
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\tools\check_docker_ports.ps1" -BackendPort %DOCKER_BACKEND_PORT% -FrontendPort %DOCKER_FRONTEND_PORT%
 if errorlevel 1 (
   echo [ERROR] No se iniciara Docker mientras existan servidores locales en conflicto.
   exit /b 1

@@ -31,7 +31,7 @@ from .library_store import (
 )
 from .project_transfer import router as project_transfer_router
 from .projects_api import router as projects_router
-from .projects_store import get_active_project, project_tags_for_image
+from .projects_store import get_active_project, list_projects, project_tags_for_image
 from .persistence import (
     append_review,
     clear_results_for_image,
@@ -319,6 +319,78 @@ def _load_image_from_path_to_session(sess, path: Path, scale_percent: float = 10
         'cap_applied': bool(cap_applied),
         'cap_scale': float(cap_scale),
         'source_path': str(path),
+    }
+
+
+def _project_for_upload(project_id: str = '') -> dict[str, Any] | None:
+    pid = str(project_id or '').strip()
+    if not pid:
+        return get_active_project()
+    try:
+        state = list_projects()
+        for project in state.get('projects') or []:
+            if str(project.get('project_id') or '') == pid:
+                return dict(project)
+    except Exception:
+        pass
+    return None
+
+
+def _load_uploaded_image_to_session(
+    sess,
+    raw: bytes,
+    filename: str,
+    *,
+    scale_percent: float = 100.0,
+    project_id: str = '',
+    source_label: str = '',
+) -> dict[str, Any]:
+    if not raw:
+        raise HTTPException(status_code=400, detail='Archivo de imagen vacio.')
+    name = str(filename or 'image').strip() or 'image'
+    ext = Path(name).suffix.lower()
+    if ext and ext not in LOCAL_IMAGE_EXTS:
+        raise HTTPException(status_code=400, detail=f'Extension no soportada: {ext}')
+    img = _decode_upload(raw, name)
+    rgb = to_uint8_rgb(img)
+    if rgb is None:
+        raise HTTPException(status_code=400, detail='Formato de imagen no soportado.')
+    rgb, cap_applied, cap_scale = _cap_image_to_max_resolution(rgb, DEFAULT_MAX_RESOLUTION_PX)
+    rgb = _resize_percent(rgb, float(scale_percent))
+
+    sess.image_rgb = rgb
+    sess.image_name = name
+    sess.image_id = compute_image_id(rgb)
+    sess.gt_mask = None
+    sess.touch()
+
+    project = _project_for_upload(project_id)
+    project_tags, project_ids, structured_tags = project_tags_for_image(project)
+    register_library_image(
+        sess.image_id,
+        sess.image_name,
+        rgb,
+        source_path=str(source_label or name),
+        tags=project_tags,
+        project_ids=project_ids,
+        structured_tags=structured_tags,
+    )
+
+    image_b64, image_mime = encode_display_b64(rgb)
+    return {
+        'session_id': sess.session_id,
+        'image_id': sess.image_id,
+        'image_name': sess.image_name,
+        'image_shape': [int(v) for v in rgb.shape],
+        'image_b64': image_b64,
+        'image_mime': image_mime,
+        'has_gt_mask': False,
+        'scale_percent': float(np.clip(float(scale_percent), 1.0, 100.0)),
+        'max_resolution_px': int(DEFAULT_MAX_RESOLUTION_PX),
+        'cap_applied': bool(cap_applied),
+        'cap_scale': float(cap_scale),
+        'source_path': str(source_label or name),
+        'project_id': str(project.get('project_id') or '') if project else '',
     }
 
 
@@ -806,6 +878,28 @@ def api_local_image_load(req: LocalImageLoadReq) -> dict[str, Any]:
     return _ok('Imagen local cargada.', level='success', payload=payload)
 
 
+@app.post('/api/local-images/upload-browser')
+async def api_local_image_upload_browser(
+    session_id: str = Form(...),
+    file: UploadFile = File(...),
+    project_id: str = Form(default=''),
+    source_label: str = Form(default=''),
+    scale_percent: float = Form(default=100.0),
+) -> dict[str, Any]:
+    sess = _require_session(session_id)
+    raw = await file.read()
+    label = str(source_label or file.filename or '').strip()
+    payload = _load_uploaded_image_to_session(
+        sess,
+        raw,
+        str(file.filename or 'image'),
+        scale_percent=scale_percent,
+        project_id=project_id,
+        source_label=label,
+    )
+    return _ok('Imagen cargada desde navegador.', level='success', payload=payload)
+
+
 @app.post('/api/system/open-folder')
 def api_system_open_folder(req: OpenFolderReq) -> dict[str, Any]:
     kind = str(req.kind or 'outputs').strip().lower()
@@ -1115,4 +1209,13 @@ def api_reports_export(image_id: str) -> dict[str, Any]:
 
 @app.get('/api/health')
 def api_health() -> dict[str, Any]:
-    return {'ok': True, 'app': 'scribble_research', 'version': '0.2.0'}
+    return {
+        'ok': True,
+        'app': 'scribble_research',
+        'version': '0.2.0',
+        'capabilities': {
+            'native_folder_picker': os.name == 'nt',
+            'open_folder': os.name == 'nt',
+            'runtime_os': os.name,
+        },
+    }

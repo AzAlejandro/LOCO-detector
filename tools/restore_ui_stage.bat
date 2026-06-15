@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "CHECKPOINT_REMOTE=origin"
 set "CHECKPOINT_SHA=%~1"
@@ -24,7 +24,7 @@ if not exist ".git\" (
 
 if "%CHECKPOINT_SHA%"=="" (
   echo [ERROR] Falta el SHA aprobado que deseas restaurar.
-  echo Uso: restore_ui_stage.bat ^<sha-aprobado^>
+  echo Uso: tools\restore_ui_stage.bat ^<sha-aprobado^>
   exit /b 1
 )
 

@@ -8,7 +8,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 
 # --- Resolve project directory ---
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PROJECT_DIR = Resolve-Path $SCRIPT_DIR
+$PROJECT_DIR = Resolve-Path (Join-Path $SCRIPT_DIR '..')
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  LOCO Detector - Port Diagnostics" -ForegroundColor Cyan
@@ -166,5 +166,5 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Diagnostics complete." -ForegroundColor Cyan
 Write-Host "  No processes were killed." -ForegroundColor Green
 Write-Host "  To stop LOCO processes safely:" -ForegroundColor Gray
-Write-Host "    .\stop_servers.ps1" -ForegroundColor Gray
+Write-Host "    .\tools\stop_servers.ps1" -ForegroundColor Gray
 Write-Host "============================================" -ForegroundColor Cyan

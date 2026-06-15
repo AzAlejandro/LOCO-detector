@@ -8,10 +8,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_CSV = ROOT / "encoding_audit.csv"
+OUTPUT_CSV = ROOT / "docs" / "internal" / "encoding_audit.csv"
 SELF_PATH = Path("scripts/encoding_audit.py")
 
-INCLUDE_DIRS = {"backend", "frontend", "docs", "tests", "plans"}
+INCLUDE_DIRS = {"backend", "docs", "frontend", "tests", "tools"}
 INCLUDE_ROOT_FILES = {
     ".gitignore",
     ".dockerignore",
@@ -23,18 +23,13 @@ INCLUDE_ROOT_FILES = {
     "README.md",
     "SECURITY.md",
     "app.py",
-    "check_docker_ports.ps1",
-    "diagnose_ports.ps1",
     "docker-compose.yml",
     "package.json",
-    "plan_tutorial.md",
     "requirements.txt",
     "run_docker.bat",
     "run_local.bat",
     "run_silent.bat",
     "run_silent.vbs",
-    "seguimiento_guardado_circulo.md",
-    "stop_servers.ps1",
 }
 EXCLUDED_PARTS = {
     ".git",
@@ -53,7 +48,7 @@ EXCLUDED_PARTS = {
 }
 AUDIT_ARTIFACTS = {
     Path(".editorconfig"),
-    Path("encoding_audit.csv"),
+    Path("docs/internal/encoding_audit.csv"),
     SELF_PATH,
 }
 

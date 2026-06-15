@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 # --- Resolve project directory ---
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PROJECT_DIR = Resolve-Path $SCRIPT_DIR
+$PROJECT_DIR = Resolve-Path (Join-Path $SCRIPT_DIR '..')
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  LOCO Detector - Stop Servers" -ForegroundColor Cyan
@@ -162,5 +162,5 @@ Write-Host ""
 if ($allFree) {
     Write-Host "Done. All LOCO ports are free." -ForegroundColor Cyan
 } else {
-    Write-Host "Done. Some ports could not be freed. Run .\diagnose_ports.ps1 for details." -ForegroundColor Yellow
+    Write-Host "Done. Some ports could not be freed. Run .\tools\diagnose_ports.ps1 for details." -ForegroundColor Yellow
 }

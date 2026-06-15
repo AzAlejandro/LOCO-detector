@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+import zipfile
 
 import numpy as np
 
@@ -425,6 +426,7 @@ def export_analysis(filters: dict[str, Any] | None = None, unit: str = 'nm', inc
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = out_dir / 'diameter_analysis.json'
     csv_path = out_dir / 'diameter_analysis.csv'
+    zip_path = out_dir / 'diameter_analysis_export.zip'
     _write_json(json_path, query)
     rows = list(query.get('items') or [])
     fieldnames = [
@@ -436,10 +438,15 @@ def export_analysis(filters: dict[str, Any] | None = None, unit: str = 'nm', inc
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, '') for key in fieldnames})
+    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(json_path, arcname='diameter_analysis.json')
+        zf.write(csv_path, arcname='diameter_analysis.csv')
     return {
         'export_dir': str(out_dir),
         'summary_json': str(json_path),
         'summary_csv': str(csv_path),
+        'archive_zip': str(zip_path),
+        'file_name': f'diameter_analysis_{stamp}.zip',
         'measurement_count': len(rows),
         'image_count': len(query.get('image_metrics') or []),
     }

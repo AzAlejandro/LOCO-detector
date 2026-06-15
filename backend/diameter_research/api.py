@@ -14,6 +14,7 @@ import cv2
 import joblib
 import numpy as np
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.metrics import (
@@ -6902,6 +6903,29 @@ def analysis_export(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f'No se pudo exportar analisis: {exc}') from exc
     return {'ok': True, **info}
+
+
+@router.get('/analysis/export/download')
+def analysis_export_download(
+    image_ids: str = '',
+    project_ids: str = '',
+    structured_tags: str = '',
+    unit: str = 'nm',
+    include_uncalibrated: bool = False,
+) -> FileResponse:
+    payload = _measurement_query_payload(image_ids, project_ids, structured_tags, unit, include_uncalibrated)
+    try:
+        info = analysis_store.export_analysis(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'No se pudo exportar analisis: {exc}') from exc
+    zip_path = Path(str(info.get('archive_zip') or ''))
+    if not zip_path.exists() or not zip_path.is_file():
+        raise HTTPException(status_code=500, detail='No se genero el archivo ZIP del analisis.')
+    return FileResponse(
+        zip_path,
+        media_type='application/zip',
+        filename=str(info.get('file_name') or zip_path.name),
+    )
 
 
 @router.post('/validation/case/upsert')

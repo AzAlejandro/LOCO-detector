@@ -43,8 +43,8 @@ Set outFile = fso.CreateTextFile(frontendEnvPath, True)
 outFile.WriteLine frontendEnvContent
 outFile.Close
 
-' --- Step 1: Stop previous LOCO processes via stop_servers.ps1 ---
-shell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File """ & currentDir & "\stop_servers.ps1""", 0, True
+' --- Step 1: Stop previous LOCO processes via tools\stop_servers.ps1 ---
+shell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File """ & currentDir & "\tools\stop_servers.ps1""", 0, True
 
 ' --- Step 2: Wait for ports to release ---
 WScript.Sleep 2000

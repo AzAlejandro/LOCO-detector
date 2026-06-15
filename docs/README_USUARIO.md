@@ -57,7 +57,7 @@ Abre PowerShell en Windows o Terminal en macOS y entra a la raiz del repositorio
 En Windows:
 
 ```powershell
-cd "C:\Users\alejo\Documents\GitHub\LOCO-detector"
+cd "C:\ruta\donde\clonaste\LOCO-detector"
 ```
 
 En macOS, usa la ruta donde tengas clonado el repo:
